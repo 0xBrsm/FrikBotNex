@@ -839,7 +839,8 @@ void() bot_angle_set =
 {
 	local float h;
 	local vector view;
-	
+	local float aim_error, espeed;
+
 	if (self.enemy)
 	{
 		if (self.enemy.items & 524288)
@@ -847,19 +848,35 @@ void() bot_angle_set =
 				return;
 		if (self.missile_speed == 0)
 			self.missile_speed = 10000;
+
+		// track how long we've been aiming at this enemy
+		if (self.b_aim_delay == 0)
+		{
+			self.b_aim_delay = time;
+			// initial aim offset based on skill
+			// skill 0: 25 degrees, skill 1: 15, skill 2: 8, skill 3: 3
+			if (self.b_skill == 0)
+				self.b_aim_offset = 25;
+			else if (self.b_skill == 1)
+				self.b_aim_offset = 15;
+			else if (self.b_skill == 2)
+				self.b_aim_offset = 8;
+			else
+				self.b_aim_offset = 3;
+		}
+
 		if (self.enemy.solid == SOLID_BSP)
 		{
 			view = (((self.enemy.absmin + self.enemy.absmax) * 0.5) - self.origin);
 		}
 		else
 		{
-		
 			local float levels;
-			
+
 			levels = 3;
-			
+
 			view = self.enemy.origin;
-			
+
 			while (levels)
 			{
 				h = vlen(view - self.origin) / self.missile_speed;
@@ -867,7 +884,7 @@ void() bot_angle_set =
 					view = self.enemy.velocity * h + '0 0 -20';
 				else
 					view = (self.enemy.velocity - (sv_gravity * '0 0 1') * h) * h;
-				view = self.enemy.origin + view; 
+				view = self.enemy.origin + view;
 				traceline(self.enemy.origin, view, FALSE, self);
 				view = trace_endpos;
 				levels = levels - 1;
@@ -876,10 +893,62 @@ void() bot_angle_set =
 		}
 		view = vectoangles(view);
 		view_x = view_x * -1;
+
+		// apply aim variance based on skill
+		// aim_offset converges toward a floor over time
+		track_time = time - self.b_aim_delay;
+
+		// convergence rate: skill 3 converges in ~0.2s, skill 0 in ~1.5s
+		if (self.b_skill == 0)
+			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 0.7);
+		else if (self.b_skill == 1)
+			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 1.5);
+		else if (self.b_skill == 2)
+			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 3.0);
+		else
+			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 5.0);
+
+		// floor: minimum persistent jitter per skill
+		// skill 0: 6 degrees, skill 1: 3, skill 2: 1.5, skill 3: 0.5
+		if (self.b_skill == 0)
+		{	if (self.b_aim_offset < 6) self.b_aim_offset = 6; }
+		else if (self.b_skill == 1)
+		{	if (self.b_aim_offset < 3) self.b_aim_offset = 3; }
+		else if (self.b_skill == 2)
+		{	if (self.b_aim_offset < 1.5) self.b_aim_offset = 1.5; }
+		else
+		{	if (self.b_aim_offset < 0.5) self.b_aim_offset = 0.5; }
+
+		// tracking error: fast-moving enemies add offset for low skill
+		// scaled by frametime so it's frame-rate independent
+		espeed = vlen(self.enemy.velocity);
+		if (espeed > 200)
+		{
+			if (self.b_skill == 0)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.008 * real_frametime * 10;
+			else if (self.b_skill == 1)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.004 * real_frametime * 10;
+			else if (self.b_skill == 2)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.001 * real_frametime * 10;
+		}
+
+		// cap aim offset to prevent wild spraying
+		if (self.b_aim_offset > 30)
+			self.b_aim_offset = 30;
+
+		// apply random jitter within the offset envelope
+		aim_error = self.b_aim_offset;
+		view_x = view_x + (random() - 0.5) * aim_error;
+		view_y = view_y + (random() - 0.5) * aim_error;
+
 		self.b_angle = view;
 	}
 	else if (self.target1)
 	{
+		// no enemy - reset aim tracking
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
+
 		view = realorigin(self.target1);
 		if (self.target1.flags & FL_ITEM)
 				view = view + '0 0 48';
@@ -889,11 +958,16 @@ void() bot_angle_set =
 		self.b_angle = view;
 	}
 	else
+	{
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
 		self.b_angle_x = 0;
-	// HACK HACK HACK HACK
-	// The bot falls off ledges a lot because of "turning around"
-	// so let the bot use instant turn around when not hunting a player
-	if (self.b_skill == 3)
+	}
+
+	// apply view angles based on skill
+	// all skills now use direct angle setting (aim variance handles humanization)
+	// skill 0-1 still use keyboard look for the "sluggish" feel
+	if (self.b_skill >= 2)
 	{
 		self.keys = self.keys & 63;
 		self.v_angle = self.b_angle;
@@ -901,10 +975,10 @@ void() bot_angle_set =
 			self.v_angle_x = self.v_angle_x + 360;
 		while (self.v_angle_x > 180)
 			self.v_angle_x = self.v_angle_x - 360;
-
 	}
 	else if ((self.enemy == world || self.enemy.movetype == MOVETYPE_PUSH) && self.target1.classname != "player")
 	{
+		// no combat target - instant turn (prevents falling off ledges)
 		self.keys = self.keys & 63;
 		self.v_angle = self.b_angle;
 		while (self.v_angle_x < -180)
@@ -912,8 +986,9 @@ void() bot_angle_set =
 		while (self.v_angle_x > 180)
 			self.v_angle_x = self.v_angle_x - 360;
 	}
-	else if (self.b_skill < 2) // skill 2 handled in bot_phys
+	else
 	{
+		// skill 0-1 in combat: keyboard turning (sluggish tracking)
 		if (self.b_angle_x > 180)
 			self.b_angle_x = self.b_angle_x - 360;
 		self.keys = self.keys & 63;
@@ -956,6 +1031,10 @@ void() BotAI =
 		ClearMyRoute();
 		self.target1 = self.target2 = self.target3 = self.target4 = self.enemy = world;
 		self.last_way = world;
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
+		self.b_strafe_dir = 0;
+		self.b_retreat = 0;
 		return;
 	}
 		

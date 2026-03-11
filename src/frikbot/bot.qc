@@ -140,6 +140,9 @@ for all variables in the bot...
 .float	b_menu, b_menu_time, b_menu_value;
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
+.float b_strafe_time, b_strafe_dir;
+.float b_aim_delay, b_aim_offset;
+.float b_retreat;
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
@@ -282,6 +285,12 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
+// combat ai
+float() bot_enemy_near_wall;
+float(float wep, float brange) bot_weapon_score;
+void() bot_combat_strafe;
+void() bot_retreat;
+void(float scope) bot_look_for_crap;
 
 // editor stuffs
 

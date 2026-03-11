@@ -1,11 +1,11 @@
 # FrikBotNex TODO
 
 ## Combat AI
-- [ ] Situational weapon selection (ammo, enemy health, splash near walls)
-- [ ] Strafe/dodge patterns during fights
-- [ ] Retreat-when-weak behavior
+- [x] Situational weapon selection (ammo, enemy health, splash near walls)
+- [x] Strafe/dodge patterns during fights
+- [x] Retreat-when-weak behavior
 - [ ] Ambush positioning
-- [ ] Human-like aim variance (interpolated tracking styles per skill level)
+- [x] Human-like aim variance (interpolated tracking styles per skill level)
 
 ## Movement
 - [ ] Bunny hopping
