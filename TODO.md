@@ -23,7 +23,7 @@
 - [ ] Track recent death locations as danger zones
 
 ## Waypoint System
-- [ ] Auto-waypointing from BSP geometry
+- [ ] Auto-waypointing from BSP geometry (needs decision: engine extensions vs external tool)
 - [ ] Weighted route selection (danger zones, enemy positions)
 - [ ] Flanking behavior via alternate route scoring
 
