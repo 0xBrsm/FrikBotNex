@@ -31,3 +31,5 @@
 - [x] Per-bot personality traits (aggressive, defensive, etc.)
 - [x] Weapon preferences per personality
 - [x] Varied playstyle at same skill level
+- [x] Idle behavior: glancing around, recreational jumps, personality-scaled fidgeting
+- [x] Behavioral variety: movement jitter, look frequency, jump rate per personality

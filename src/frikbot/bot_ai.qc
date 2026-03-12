@@ -1199,6 +1199,54 @@ void() bot_angle_set =
 		// humans don't snap perfectly to new waypoint directions
 		view_y = view_y + (random() - 0.5) * 5;
 
+		// idle glance: occasionally look to one side while navigating
+		// simulates checking flanks, glancing at doorways, general awareness
+		if (self.b_idle_glance_yaw != 0)
+		{
+			// currently glancing — blend toward glance target then snap back
+			view_y = view_y + self.b_idle_glance_yaw;
+			// decay the glance over ~0.4s
+			self.b_idle_glance_yaw = self.b_idle_glance_yaw * (1 - real_frametime * 3);
+			if (fabs(self.b_idle_glance_yaw) < 2)
+				self.b_idle_glance_yaw = 0;
+		}
+		else if (time > self.b_idle_glance_time)
+		{
+			// time to maybe glance somewhere
+			// personality scaling: campers glance often, aggressive rarely
+			local float glance_chance, glance_interval;
+			if (self.b_personality == PERSONALITY_CAMPER)
+			{	glance_chance = 0.4; glance_interval = 2 + random() * 3; }
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			{	glance_chance = 0.3; glance_interval = 3 + random() * 4; }
+			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			{	glance_chance = 0.1; glance_interval = 5 + random() * 5; }
+			else
+			{	glance_chance = 0.2; glance_interval = 3 + random() * 5; }
+
+			if (random() < glance_chance)
+			{
+				// pick a side — mostly small checks, rarely a full look-behind
+				if (random() < 0.85)
+				{
+					// normal glance: 30-70 degrees to one side
+					if (random() < 0.5)
+						self.b_idle_glance_yaw = 30 + random() * 40;
+					else
+						self.b_idle_glance_yaw = -30 - random() * 40;
+				}
+				else
+				{
+					// rare check-behind: quick 130-170 degree look
+					if (random() < 0.5)
+						self.b_idle_glance_yaw = 130 + random() * 40;
+					else
+						self.b_idle_glance_yaw = -130 - random() * 40;
+				}
+			}
+			self.b_idle_glance_time = time + glance_interval;
+		}
+
 		self.b_angle = view;
 	}
 	else
@@ -1299,6 +1347,9 @@ void() BotAI =
 		self.b_react_time = 0;
 		self.b_wep_commit_time = 0;
 		self.b_bhop_fumble = 0;
+		self.b_idle_glance_yaw = 0;
+		self.b_idle_glance_time = 0;
+		self.b_idle_jump_time = 0;
 		bot_opp_model_reset();
 		return;
 	}
@@ -1386,6 +1437,26 @@ void() BotAI =
 		if (random() < 0.2)
 			if (random() < 0.2)
 				bot_weapon_switch(-1);
+
+		// idle behavior: recreational jumping while navigating
+		// quake players hop around for fun, especially aggressive ones
+		if (self.target1 && self.flags & FL_ONGROUND && time > self.b_idle_jump_time)
+		{
+			local float jump_chance;
+			if (self.b_personality == PERSONALITY_AGGRESSIVE)
+				jump_chance = 0.25;
+			else if (self.b_personality == PERSONALITY_CAMPER)
+				jump_chance = 0.03;
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+				jump_chance = 0.08;
+			else
+				jump_chance = 0.12;
+
+			if (random() < jump_chance)
+				self.button2 = TRUE;
+
+			self.b_idle_jump_time = time + 0.8 + random() * 2;
+		}
 
 		// skill 1+: pre-aim toward nearby sounds when idle
 		if (self.b_skill >= 1)

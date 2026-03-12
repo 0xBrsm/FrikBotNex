@@ -158,6 +158,11 @@ for all variables in the bot...
 .float b_nav_jitter_time;	// next time to add random strafe during navigation
 .float b_bhop_fumble;		// chance to miss a bhop jump this chain (0-1)
 
+// idle behavior
+.float b_idle_glance_time;	// next time to glance around while navigating
+.float b_idle_glance_yaw;	// target yaw offset for current glance (0 = not glancing)
+.float b_idle_jump_time;	// next recreational jump time
+
 // human emulation: aim
 .float b_aim_flick;		// overshoot amount on target acquisition (degrees)
 .float b_aim_drift_phase;	// sine wave phase for low-frequency tracking drift

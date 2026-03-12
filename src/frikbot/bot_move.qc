@@ -630,16 +630,27 @@ void() frik_movetogoal =
 
 	// human emulation: occasional strafe jitter during navigation
 	// humans don't run in perfectly straight lines
+	// personality: aggressive bots are fidgety, campers/defensive move clean
 	if (!self.enemy && time > self.b_nav_jitter_time)
 	{
-		if (random() < 0.15)
+		local float jitter_chance, jitter_wait;
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		{	jitter_chance = 0.25; jitter_wait = 0.2 + random() * 0.3; }
+		else if (self.b_personality == PERSONALITY_CAMPER)
+		{	jitter_chance = 0.06; jitter_wait = 0.5 + random() * 0.8; }
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		{	jitter_chance = 0.08; jitter_wait = 0.4 + random() * 0.6; }
+		else
+		{	jitter_chance = 0.15; jitter_wait = 0.3 + random() * 0.5; }
+
+		if (random() < jitter_chance)
 		{
 			if (random() < 0.5)
 				self.keys = self.keys | KEY_MOVELEFT;
 			else
 				self.keys = self.keys | KEY_MOVERIGHT;
 		}
-		self.b_nav_jitter_time = time + 0.3 + random() * 0.5;
+		self.b_nav_jitter_time = time + jitter_wait;
 	}
 
 	frik_dodge_obstruction();
