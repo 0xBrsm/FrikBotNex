@@ -503,7 +503,7 @@ to gain speed via SV_AirAccelerate.
 
 void() bot_bhop =
 {
-	local float spd;
+	local float spd, yaw_nudge;
 	local vector vel;
 
 	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
@@ -598,7 +598,6 @@ void() bot_bhop =
 
 		// turn view into strafe direction for actual speed gain
 		// skill 3: 5-8 deg/frame, skill 2: 3-5 deg/frame
-		local float yaw_nudge;
 		if (self.b_skill >= 3)
 			yaw_nudge = 5 + random() * 3;
 		else
@@ -610,7 +609,7 @@ void() bot_bhop =
 void() frik_movetogoal =
 {
 	local vector way, start, stop, ang;
-	local float g;
+	local float g, jitter_chance, jitter_wait;
 
 	if (self.target1 == world)
 	{
@@ -633,7 +632,6 @@ void() frik_movetogoal =
 	// personality: aggressive bots are fidgety, campers/defensive move clean
 	if (!self.enemy && time > self.b_nav_jitter_time)
 	{
-		local float jitter_chance, jitter_wait;
 		if (self.b_personality == PERSONALITY_AGGRESSIVE)
 		{	jitter_chance = 0.25; jitter_wait = 0.2 + random() * 0.3; }
 		else if (self.b_personality == PERSONALITY_CAMPER)

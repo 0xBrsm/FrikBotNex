@@ -730,6 +730,8 @@ vector(float wep) weapon_range =
 		return '180 48 3000';
 	else if (wep == 64) // IT_LIGHTNING
 		return '350 0 512';
+	else
+		return '128 0 3000';
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
