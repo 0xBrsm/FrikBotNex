@@ -505,9 +505,23 @@ void() bot_bhop =
 	local float spd;
 	local vector vel;
 
-	// only skill 2+ bunny hops
-	if (self.b_skill < 2)
-		return;
+	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+	{
+		if (self.b_skill < 1)
+			return;
+	}
+	else if (self.b_personality == PERSONALITY_DEFENSIVE || self.b_personality == PERSONALITY_CAMPER)
+	{
+		// defensive/camper: rarely bhop
+		if (self.b_skill < 3)
+			return;
+	}
+	else
+	{
+		if (self.b_skill < 2)
+			return;
+	}
 
 	// don't bhop during precision movement, on trains, or in water
 	if (self.b_aiflags & (AI_PRECISION | AI_RIDE_TRAIN | AI_WAIT))

@@ -829,6 +829,40 @@ float(entity thing) priority_for_thing =
 	}
 	if (pointcontents(thing.origin) < -3)
 		return 0;
+
+	// personality-based priority adjustments
+	if (thisp > 0)
+	{
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		{
+			// aggressive: values weapons and players more, health/armor less
+			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
+				thisp = thisp + 15;
+			if (thing.flags & FL_ITEM)
+			{
+				if (thing.model == "progs/armor.mdl" || thing.classname == "item_health")
+					thisp = thisp * 0.8;
+			}
+		}
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		{
+			// defensive: values health and armor more, avoids players
+			if (thing.classname == "item_health" || thing.model == "progs/armor.mdl")
+				thisp = thisp + 10;
+			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
+				thisp = thisp * 0.7;
+		}
+		else if (self.b_personality == PERSONALITY_CAMPER)
+		{
+			// camper: loves ambush/sniper waypoints
+			if (thing.classname == "waypoint")
+			{
+				if (thing.b_aiflags & (AI_SNIPER | AI_AMBUSH))
+					thisp = thisp + 15;
+			}
+		}
+	}
+
 	if (thisp)
 	{
 		if (thing.current_way)

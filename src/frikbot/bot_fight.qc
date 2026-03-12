@@ -387,6 +387,34 @@ float(float wep, float brange) bot_weapon_score =
 		}
 	}
 
+	// personality weapon preferences
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+	{
+		// aggressive: loves close-range power weapons
+		if (wep == 32) score = score + 10; // RL
+		else if (wep == 64) score = score + 8; // LG
+		else if (wep == 4096) score = score + 5; // AXE (fearless)
+		else if (wep == 1 || wep == 4) score = score - 5; // weak weapons
+	}
+	else if (self.b_personality == PERSONALITY_DEFENSIVE)
+	{
+		// defensive: prefers range and safety
+		if (wep == 8) score = score + 8; // SNG (safe DPS)
+		else if (wep == 64) score = score + 5; // LG
+		else if (wep == 32 || wep == 16)
+		{
+			if (brange < 250) // splash risk at close range
+				score = score - 10;
+		}
+	}
+	else if (self.b_personality == PERSONALITY_CAMPER)
+	{
+		// camper: prefers long-range precision weapons
+		if (wep == 32) score = score + 5; // RL
+		if (wep == 8) score = score + 5; // SNG
+		if (wep == 4096) score = score - 10; // hates melee
+	}
+
 	if (score < 1)
 		score = 1;
 	return score;
@@ -524,6 +552,12 @@ void() bot_combat_strafe =
 		strafe_interval = 0.5 + random();
 	else
 		strafe_interval = 0.3 + random() * 0.5;
+
+	// personality: aggressive strafes faster, defensive slower
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		strafe_interval = strafe_interval * 0.7;
+	else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		strafe_interval = strafe_interval * 1.3;
 
 	// initialize strafe direction if not set
 	if (self.b_strafe_dir == 0)
@@ -696,6 +730,12 @@ void() bot_fight_style =
 	{
 		foesz = bot_size_player(self.enemy);
 		mysz = bot_size_player(self) + 5;
+
+		// personality adjusts retreat threshold
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			mysz = mysz + 40; // fights even when outgunned
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			mysz = mysz - 30; // retreats earlier
 
 		if (foesz > mysz)
 		{

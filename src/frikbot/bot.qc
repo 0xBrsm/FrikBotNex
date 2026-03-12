@@ -147,6 +147,14 @@ for all variables in the bot...
 .float b_bhop_land;
 .vector b_death1, b_death2, b_death3;
 .float b_death_time;
+.float b_personality;
+
+// personality types
+float PERSONALITY_BALANCED	= 0;
+float PERSONALITY_AGGRESSIVE	= 1;
+float PERSONALITY_DEFENSIVE	= 2;
+float PERSONALITY_CAMPER	= 3;
+
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
@@ -988,6 +996,11 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	else if (whatskill < 0)
 		whatskill = 0;
 	self.b_skill = whatskill;
+
+	// assign random personality for varied playstyles
+	f = floor(random() * 4);
+	if (f > 3) f = 3;
+	self.b_personality = f;
 
 	if (teamplay && !coop)
 	{

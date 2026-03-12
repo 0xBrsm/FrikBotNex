@@ -28,6 +28,6 @@
 - [ ] Flanking behavior via alternate route scoring
 
 ## Personality / Unpredictability
-- [ ] Per-bot personality traits (aggressive, defensive, etc.)
-- [ ] Weapon preferences per personality
-- [ ] Varied playstyle at same skill level
+- [x] Per-bot personality traits (aggressive, defensive, etc.)
+- [x] Weapon preferences per personality
+- [x] Varied playstyle at same skill level
