@@ -281,11 +281,22 @@ Check if enemy has a wall close behind them
 float() bot_enemy_near_wall =
 {
 	local vector dir, org;
+
+	// return cached result if already computed this frame
+	if (self.b_wall_time == time)
+		return self.b_wall_near;
+
 	org = realorigin(self.enemy);
 	dir = normalize(org - self.origin);
 	traceline(org, org + dir * 100, TRUE, self.enemy);
+
+	self.b_wall_time = time;
 	if (trace_fraction < 1)
+	{
+		self.b_wall_near = TRUE;
 		return TRUE;
+	}
+	self.b_wall_near = FALSE;
 	return FALSE;
 };
 
@@ -323,6 +334,10 @@ float(float wep, float brange) bot_weapon_score =
 	else if (wep == 4096)
 		score = 15; // AXE
 	else
+		return 0;
+
+	// LG in water = self-discharge, never use it
+	if (wep == 64 && self.waterlevel > 0)
 		return 0;
 
 	// range fitness - unusable weapons score 0
@@ -720,6 +735,12 @@ void() bot_fight_style =
 					return;
 			bot_shoot();
 		}
+		// skill 1+: periodically re-evaluate weapon as range changes mid-fight
+		if (self.b_skill >= 1 && time > self.b_wepswitch_time)
+		{
+			bot_weapon_switch(foedist);
+			self.b_wepswitch_time = time + 1.5;
+		}
 	}
 	else
 		bot_weapon_switch(foedist);
@@ -747,6 +768,12 @@ void() bot_fight_style =
 					bot_start_topic(5);
 					self.b_chattime = 1;
 				}
+			}
+			// skill 1+: shoot while retreating instead of fleeing silently
+			if (self.b_skill >= 1)
+			{
+				bot_weapon_switch(vlen(org - self.origin));
+				bot_shoot();
 			}
 			return;
 		}
@@ -781,6 +808,11 @@ void() bot_fight_style =
 		if (foesz > mysz)
 		{
 			bot_retreat();
+			if (self.b_skill >= 1)
+			{
+				bot_weapon_switch(vlen(org - self.origin));
+				bot_shoot();
+			}
 			return;
 		}
 		else if (mysz < 140)

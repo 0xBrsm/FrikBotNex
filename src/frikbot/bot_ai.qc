@@ -876,21 +876,26 @@ float(entity thing) priority_for_thing =
 
 		// skill 1+: penalize areas near recent deaths (danger zones)
 		// death memory fades over 60 seconds
+		// uses squared distance (65536 = 256^2) to avoid sqrt in this hot path
 		if (self.b_skill >= 1 && self.b_death1 != '0 0 0')
 		{
-			if (vlen(thing.origin - self.b_death1) < 256)
+			local vector dv;
+			dv = thing.origin - self.b_death1;
+			if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
 			{
 				if ((time - self.b_death_time) < 60)
 					thisp = thisp * 0.5;
 			}
 			if (self.b_death2 != '0 0 0')
 			{
-				if (vlen(thing.origin - self.b_death2) < 256)
+				dv = thing.origin - self.b_death2;
+				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
 					thisp = thisp * 0.7;
 			}
 			if (self.b_death3 != '0 0 0')
 			{
-				if (vlen(thing.origin - self.b_death3) < 256)
+				dv = thing.origin - self.b_death3;
+				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
 					thisp = thisp * 0.85;
 			}
 		}
@@ -1011,17 +1016,21 @@ void() bot_angle_set =
 
 		// apply aim variance based on skill
 		// aim_offset converges toward a floor over time
-		track_time = time - self.b_aim_delay;
 
 		// convergence rate: skill 3 converges in ~0.2s, skill 0 in ~1.5s
+		// decay is clamped to 0.95 to prevent sign flip at very low framerates
+		local float decay;
 		if (self.b_skill == 0)
-			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 0.7);
+			decay = real_frametime * 0.7;
 		else if (self.b_skill == 1)
-			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 1.5);
+			decay = real_frametime * 1.5;
 		else if (self.b_skill == 2)
-			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 3.0);
+			decay = real_frametime * 3.0;
 		else
-			self.b_aim_offset = self.b_aim_offset * (1 - real_frametime * 5.0);
+			decay = real_frametime * 5.0;
+		if (decay > 0.95)
+			decay = 0.95;
+		self.b_aim_offset = self.b_aim_offset * (1 - decay);
 
 		// floor: minimum persistent jitter per skill
 		// skill 0: 6 degrees, skill 1: 3, skill 2: 1.5, skill 3: 0.5
@@ -1243,9 +1252,41 @@ void() BotAI =
 	// FIXME
 	if (self.enemy)
 		bot_fight_style();
-	else if (random() < 0.2)
+	else
+	{
 		if (random() < 0.2)
-			bot_weapon_switch(-1);
+			if (random() < 0.2)
+				bot_weapon_switch(-1);
+
+		// skill 1+: pre-aim toward nearby sounds when idle
+		if (self.b_skill >= 1)
+		{
+			local entity snd_foe;
+			local float snd_dist, snd_best;
+			local vector snd_view;
+			snd_best = 800; // max sound awareness range
+			snd_foe = player_head;
+			while (snd_foe)
+			{
+				if (snd_foe != self && snd_foe.health > 0 && snd_foe.b_sound > time)
+				{
+					if (!(teamplay && snd_foe.team == self.team) && !coop)
+					{
+						snd_dist = vlen(snd_foe.origin - self.origin);
+						if (snd_dist < snd_best)
+						{
+							snd_best = snd_dist;
+							snd_view = normalize(snd_foe.origin - self.origin);
+							snd_view = vectoangles(snd_view);
+							snd_view_x = snd_view_x * -1;
+							self.b_angle = snd_view;
+						}
+					}
+				}
+				snd_foe = snd_foe._next;
+			}
+		}
+	}
 	bot_dodge_stuff();
 
 	// checks to see if bot needs to start going up for air

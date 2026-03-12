@@ -234,10 +234,11 @@ float() frik_check_hazard =
 	if (!(self.flags & FL_ONGROUND))
 		return FALSE;
 
-	ang = normalize(self.velocity);
+	ang = self.velocity;
 	ang_z = 0;
 	if (vlen(ang) < 0.1)
 		return FALSE;
+	ang = normalize(ang);
 
 	// check ground 48 units ahead
 	check = self.origin + ang * 48;
@@ -542,12 +543,20 @@ void() bot_bhop =
 
 	if (self.flags & FL_ONGROUND)
 	{
-		// just landed - jump immediately to chain hops
+		// in a chain - keep jumping if speed is above a lower "stop" threshold
 		if (self.b_bhop_land)
 		{
-			bot_jump();
-			self.b_bhop_land = 0;
-			return;
+			if (spd > 80)
+			{
+				bot_jump();
+				return;
+			}
+			else
+			{
+				// speed dropped too low, break the chain
+				self.b_bhop_land = 0;
+				return;
+			}
 		}
 
 		// start a bhop chain if moving fast enough
@@ -560,8 +569,9 @@ void() bot_bhop =
 	}
 	else if (self.b_bhop_land)
 	{
-		// in air during bhop - add slight strafe for air acceleration
-		// alternate strafe direction for speed gain
+		// in air during bhop - strafe + yaw turn for air acceleration
+		// SV_AirAccelerate requires wish direction offset from velocity,
+		// achieved by holding strafe and turning into the strafe direction
 		if (self.b_strafe_dir == 0)
 		{
 			if (random() < 0.5)
@@ -573,6 +583,15 @@ void() bot_bhop =
 			self.keys = self.keys | KEY_MOVERIGHT;
 		else
 			self.keys = self.keys | KEY_MOVELEFT;
+
+		// turn view into strafe direction for actual speed gain
+		// skill 3: 5-8 deg/frame, skill 2: 3-5 deg/frame
+		local float yaw_nudge;
+		if (self.b_skill >= 3)
+			yaw_nudge = 5 + random() * 3;
+		else
+			yaw_nudge = 3 + random() * 2;
+		self.b_angle_y = self.b_angle_y + self.b_strafe_dir * yaw_nudge;
 	}
 };
 

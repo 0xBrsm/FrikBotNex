@@ -145,6 +145,8 @@ for all variables in the bot...
 .float b_retreat;
 .float b_ambush_time;
 .float b_bhop_land;
+.float b_wall_near, b_wall_time;
+.float b_wepswitch_time;
 .vector b_death1, b_death2, b_death3;
 .float b_death_time;
 .float b_personality;
