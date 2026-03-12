@@ -226,7 +226,7 @@ void(float brange) bot_weapon_switch =
 		// simplified: use base tier ordering with ammo check
 		if ((self.ammo_rockets >= 1) && (it & 32))
 		{	best_pulse = 7; best_score = 70; }
-		if (self.waterlevel <= 1 && self.ammo_cells >= 1 && (it & 64))
+		if (self.waterlevel < 1 && self.ammo_cells >= 1 && (it & 64))
 		{	if (65 > best_score) { best_pulse = 8; best_score = 65; } }
 		if (self.ammo_nails >= 2 && (it & 8))
 		{	if (55 > best_score) { best_pulse = 5; best_score = 55; } }
