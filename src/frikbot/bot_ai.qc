@@ -977,7 +977,7 @@ generally making the bot look good.
 void() bot_angle_set =
 {
 	local float h;
-	local vector view;
+	local vector view, pred_vel, foe_fwd, foe_right;
 	local float aim_error, espeed;
 
 	if (self.enemy)
@@ -1015,14 +1015,48 @@ void() bot_angle_set =
 			levels = 3;
 
 			view = self.enemy.origin;
+			pred_vel = self.enemy.velocity;
+
+			// skill 2+ with opponent model: enhance velocity prediction
+			// for projectile weapons using behavioral tendencies
+			if (self.b_skill >= 2 && self.missile_speed < 2000
+				&& self.b_opp_ent == self.enemy)
+			{
+				// get enemy's facing direction for lateral prediction
+				foe_fwd = normalize(self.origin - self.enemy.origin);
+				foe_right_x = foe_fwd_y * -1;
+				foe_right_y = foe_fwd_x;
+				foe_right_z = 0;
+
+				// strafe tendency: blend model prediction into velocity
+				// b_opp_strafe ranges -1 to +1, scale to movement speed
+				if (self.b_opp_strafe > 0.15 || self.b_opp_strafe < -0.15)
+				{
+					// weight: 30% model, 70% current velocity
+					// this smoothly corrects for direction changes
+					pred_vel = pred_vel + foe_right * self.b_opp_strafe * 100;
+				}
+
+				// aggression: rushing enemies close distance faster
+				if (self.b_opp_aggro > 0.65)
+				{
+					// enemy is aggressive — they'll push toward us
+					pred_vel = pred_vel + foe_fwd * 40;
+				}
+				else if (self.b_opp_aggro < 0.3)
+				{
+					// enemy is retreating — they'll move away
+					pred_vel = pred_vel - foe_fwd * 30;
+				}
+			}
 
 			while (levels)
 			{
 				h = vlen(view - self.origin) / self.missile_speed;
 				if (self.enemy.flags & FL_ONGROUND)
-					view = self.enemy.velocity * h + '0 0 -20';
+					view = pred_vel * h + '0 0 -20';
 				else
-					view = (self.enemy.velocity - (sv_gravity * '0 0 1') * h) * h;
+					view = (pred_vel - (sv_gravity * '0 0 1') * h) * h;
 				view = self.enemy.origin + view;
 				traceline(self.enemy.origin, view, FALSE, self);
 				view = trace_endpos;
@@ -1080,8 +1114,9 @@ void() bot_angle_set =
 			self.b_aim_offset = 30;
 
 		// skill 3 opponent model: bias aim toward enemy strafe tendency
-		// if we've modeled that they tend to strafe right, lead right
-		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy)
+		// for hitscan weapons only (projectiles use velocity prediction above)
+		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy
+			&& self.missile_speed >= 2000)
 		{
 			if (self.b_opp_strafe > 0.2 || self.b_opp_strafe < -0.2)
 			{
