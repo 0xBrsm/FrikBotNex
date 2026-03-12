@@ -152,6 +152,19 @@ for all variables in the bot...
 .float b_death_time;
 .float b_personality;
 
+// human emulation: movement
+.float b_nav_jitter_time;	// next time to add random strafe during navigation
+.float b_bhop_fumble;		// chance to miss a bhop jump this chain (0-1)
+
+// human emulation: aim
+.float b_aim_flick;		// overshoot amount on target acquisition (degrees)
+.float b_aim_drift_phase;	// sine wave phase for low-frequency tracking drift
+.float b_aim_last_yaw_err;	// last frame's yaw error for overcorrection modeling
+
+// human emulation: decisions
+.float b_react_time;		// delay before engaging newly detected enemy
+.float b_wep_commit_time;	// locked into current weapon until this time
+
 // combat state machine
 .float b_combat_state;
 .float b_combat_time;		// when we entered current state

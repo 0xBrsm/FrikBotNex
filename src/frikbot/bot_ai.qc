@@ -1002,6 +1002,15 @@ void() bot_angle_set =
 				self.b_aim_offset = 8;
 			else
 				self.b_aim_offset = 3;
+
+			// human emulation: flick overshoot on target acquisition
+			// humans snap past the target then settle back
+			// generates a directional bias that decays over ~0.3s
+			if (self.b_skill >= 2)
+				self.b_aim_flick = (random() - 0.5) * 8;
+			else
+				self.b_aim_flick = (random() - 0.5) * 16;
+			self.b_aim_drift_phase = random() * 6.28;
 		}
 
 		if (self.enemy.solid == SOLID_BSP)
@@ -1124,10 +1133,38 @@ void() bot_angle_set =
 			}
 		}
 
-		// apply random jitter within the offset envelope
+		// --- human emulation: aim behavior ---
+
+		// 1. flick overshoot: decays toward 0 over ~0.3s
+		// creates the "snap past target, settle back" pattern
+		if (self.b_aim_flick != 0)
+		{
+			view_y = view_y + self.b_aim_flick;
+			// decay flick: fast exponential
+			self.b_aim_flick = self.b_aim_flick * (1 - real_frametime * 4);
+			if (fabs(self.b_aim_flick) < 0.3)
+				self.b_aim_flick = 0;
+		}
+
+		// 2. tracking drift: slow sine wave wobble
+		// simulates imperfect mouse tracking (humans drift off target)
+		self.b_aim_drift_phase = self.b_aim_drift_phase + real_frametime * 1.8;
+		if (self.b_aim_drift_phase > 6.28)
+			self.b_aim_drift_phase = self.b_aim_drift_phase - 6.28;
+		if (self.b_skill <= 1)
+			view_y = view_y + sin(self.b_aim_drift_phase) * 2.5;
+		else if (self.b_skill == 2)
+			view_y = view_y + sin(self.b_aim_drift_phase) * 1.0;
+		else
+			view_y = view_y + sin(self.b_aim_drift_phase) * 0.4;
+
+		// 3. overcorrection: correlated jitter
+		// if last frame's error was right, this frame tends left (and vice versa)
+		// creates the "wiggle around target" look instead of random scatter
 		aim_error = self.b_aim_offset;
+		view_y = view_y + (random() - 0.5) * aim_error - self.b_aim_last_yaw_err * 0.3;
 		view_x = view_x + (random() - 0.5) * aim_error;
-		view_y = view_y + (random() - 0.5) * aim_error;
+		self.b_aim_last_yaw_err = view_y - self.b_angle_y;
 
 		self.b_angle = view;
 	}
@@ -1143,6 +1180,11 @@ void() bot_angle_set =
 		view = view - (self.origin + self.view_ofs);
 		view = vectoangles(view);
 		view_x = view_x * -1;
+
+		// human emulation: slight yaw overshoot during navigation turns
+		// humans don't snap perfectly to new waypoint directions
+		view_y = view_y + (random() - 0.5) * 5;
+
 		self.b_angle = view;
 	}
 	else
@@ -1238,6 +1280,11 @@ void() BotAI =
 		self.b_combat_state = CSTATE_NONE;
 		self.b_los_time = 0;
 		self.b_combo_time = 0;
+		self.b_aim_flick = 0;
+		self.b_aim_last_yaw_err = 0;
+		self.b_react_time = 0;
+		self.b_wep_commit_time = 0;
+		self.b_bhop_fumble = 0;
 		bot_opp_model_reset();
 		return;
 	}

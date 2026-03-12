@@ -548,6 +548,12 @@ void() bot_bhop =
 		{
 			if (spd > 80)
 			{
+				// human emulation: occasionally fumble a bhop in the chain
+				if (random() < self.b_bhop_fumble)
+				{
+					self.b_bhop_land = 0;
+					return;
+				}
 				bot_jump();
 				return;
 			}
@@ -565,6 +571,12 @@ void() bot_bhop =
 		{
 			bot_jump();
 			self.b_bhop_land = 1;
+			// set fumble rate for this chain based on skill
+			// skill 2: 15% miss chance, skill 3: 5%
+			if (self.b_skill >= 3)
+				self.b_bhop_fumble = 0.05;
+			else
+				self.b_bhop_fumble = 0.15;
 		}
 	}
 	else if (self.b_bhop_land)
@@ -615,6 +627,20 @@ void() frik_movetogoal =
 
 	way = normalize(way);
 	self.keys = self.keys & 960 + frik_KeysForDir(way);
+
+	// human emulation: occasional strafe jitter during navigation
+	// humans don't run in perfectly straight lines
+	if (!self.enemy && time > self.b_nav_jitter_time)
+	{
+		if (random() < 0.15)
+		{
+			if (random() < 0.5)
+				self.keys = self.keys | KEY_MOVELEFT;
+			else
+				self.keys = self.keys | KEY_MOVERIGHT;
+		}
+		self.b_nav_jitter_time = time + 0.3 + random() * 0.5;
+	}
 
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);

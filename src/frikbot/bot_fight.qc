@@ -623,6 +623,37 @@ void() bot_dodge_stuff =
 			}
 			foe = foe._next;
 		}
+
+		// human emulation: reaction delay before engaging new enemies
+		// first detection starts a timer; enemy isn't fought until it expires
+		if (self.enemy && self.b_skill < 3)
+		{
+			if (self.b_react_time == 0)
+			{
+				// first frame we spotted someone — start reaction timer
+				if (self.b_skill == 0)
+					self.b_react_time = time + 0.3 + random() * 0.4;
+				else if (self.b_skill == 1)
+					self.b_react_time = time + 0.15 + random() * 0.25;
+				else
+					self.b_react_time = time + 0.05 + random() * 0.1;
+			}
+			if (self.b_react_time > time)
+			{
+				// still reacting — suppress engagement
+				self.enemy = world;
+			}
+			else
+			{
+				// reaction complete — engage and reset for next time
+				self.b_react_time = 0;
+			}
+		}
+		else if (!self.enemy)
+		{
+			// lost sight during reaction — reset timer
+			self.b_react_time = 0;
+		}
 	}
 
 	// ambush first-strike: if we just spotted an enemy from ambush,
@@ -962,7 +993,23 @@ void(float brange) bot_weapon_switch =
 	}
 
 	if (best_pulse)
+	{
+		// human emulation: weapon commitment and lazy switching
+		// skill 0-2 sometimes stick with current weapon even if not optimal
+		if (self.b_skill < 3 && self.b_wep_commit_time > time)
+		{
+			// committed to current weapon — skip switch
+			return;
+		}
 		self.impulse = best_pulse;
+		// lock weapon for a bit (humans don't constantly re-evaluate)
+		if (self.b_skill == 0)
+			self.b_wep_commit_time = time + 2.5 + random() * 2;
+		else if (self.b_skill == 1)
+			self.b_wep_commit_time = time + 1.5 + random() * 1;
+		else if (self.b_skill == 2)
+			self.b_wep_commit_time = time + 0.8 + random() * 0.5;
+	}
 };
 
 void() bot_shoot = 
@@ -1305,7 +1352,7 @@ void() bot_fight_style =
 	local vector v, v1, v2, org;
 	local float foedist, mysz, foesz;
 	local float u_fight, u_retreat, u_pressure, u_flank, u_best;
-	local float new_state, cur_score;
+	local float new_state, cur_score, hyst_margin, hyst_time;
 
 	// --- enemy validity ---
 	if (self.enemy.health <= 0)
@@ -1519,9 +1566,16 @@ void() bot_fight_style =
 	}
 
 	// hysteresis: require margin to switch states (prevents jitter)
-	// must beat current state by 10+ points, or 0.5s in current state
+	// human emulation: higher margin for skill 2 = more commitment to decisions
+	// skill 3: 10-point margin, 0.5s commitment (crisp reactions)
+	// skill 2: 15-point margin, 0.8s commitment (slight tunnel vision)
 	if (new_state != self.b_combat_state)
 	{
+		if (self.b_skill >= 3)
+		{	hyst_margin = 10; hyst_time = 0.5; }
+		else
+		{	hyst_margin = 15; hyst_time = 0.8; }
+
 		if (self.b_combat_state == CSTATE_FIGHT)
 			cur_score = u_fight;
 		else if (self.b_combat_state == CSTATE_RETREAT)
@@ -1533,7 +1587,7 @@ void() bot_fight_style =
 		else
 			cur_score = 0;
 
-		if (u_best < cur_score + 10 && (time - self.b_combat_time) < 0.5)
+		if (u_best < cur_score + hyst_margin && (time - self.b_combat_time) < hyst_time)
 			new_state = self.b_combat_state;	// keep current state
 	}
 
