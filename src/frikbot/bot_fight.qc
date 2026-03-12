@@ -112,6 +112,8 @@ void() bot_opp_model_update =
 	v = normalize(self.origin - self.enemy.origin);
 	delta_hp = self.enemy.velocity * v;	// positive = closing
 	delta_hp = delta_hp / 400;			// normalize to 0-1 range
+	// human emulation: perception noise on reading enemy movement
+	delta_hp = delta_hp + (random() - 0.5) * 0.3;
 	if (delta_hp > 1) delta_hp = 1;
 	if (delta_hp < -1) delta_hp = -1;
 	delta_hp = (delta_hp + 1) * 0.5;		// shift to 0-1
@@ -120,6 +122,8 @@ void() bot_opp_model_update =
 	// track strafe tendency from lateral velocity
 	makevectors(self.v_angle);
 	delta_hp = self.enemy.velocity * v_right;
+	// human emulation: noisy read on lateral movement
+	delta_hp = delta_hp + (random() - 0.5) * 40;
 	if (delta_hp > 50)
 		self.b_opp_strafe = self.b_opp_strafe * (1 - blend) + 1 * blend;
 	else if (delta_hp < -50)
@@ -149,11 +153,13 @@ Three integration points:
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-// count how many teammates are fighting a given enemy
+// count how many nearby teammates are fighting a given enemy
+// human emulation: only count allies within awareness range
+// (humans can't know what distant teammates are doing)
 float(entity foe) bot_team_fighting_enemy =
 {
 	local entity t;
-	local float count;
+	local float count, dist;
 
 	if (!teamplay || !foe)
 		return 0;
@@ -165,7 +171,12 @@ float(entity foe) bot_team_fighting_enemy =
 		if (t != self && t.team == self.team && t.health > 0)
 		{
 			if (t.enemy == foe && t.enemy.health > 0)
-				count = count + 1;
+			{
+				// must be within earshot/sight range to know
+				dist = vlen(t.origin - self.origin);
+				if (dist < 1000)
+					count = count + 1;
+			}
 		}
 		t = t._next;
 	}
@@ -197,7 +208,8 @@ entity() bot_nearest_teammate =
 	return best;
 };
 
-// check if any teammate is retreating from a given enemy
+// check if any nearby teammate is retreating from a given enemy
+// human emulation: must be close enough to notice teammate's situation
 float(entity foe) bot_teammate_retreating_from =
 {
 	local entity t;
@@ -211,7 +223,8 @@ float(entity foe) bot_teammate_retreating_from =
 		if (t != self && t.team == self.team && t.health > 0)
 		{
 			if (t.enemy == foe && t.b_combat_state == CSTATE_RETREAT)
-				return TRUE;
+				if (vlen(t.origin - self.origin) < 800)
+					return TRUE;
 		}
 		t = t._next;
 	}
@@ -1442,16 +1455,20 @@ void() bot_fight_style =
 
 			// --- RL->LG combo: initiate phase ---
 			// skill 3 in PRESSURE: after firing RL at mid range, start combo
+			// human emulation: only attempt 40% of the time (humans don't
+			// always think to combo, and sometimes fumble the switch)
 			if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
 				&& self.b_combo_time == 0
 				&& self.weapon == 32	// IT_ROCKET_LAUNCHER
 				&& (self.items & 64)	// have LG
 				&& self.ammo_cells >= 1
 				&& self.waterlevel <= 1	// LG doesn't work underwater
-				&& foedist > 200 && foedist < 600)
+				&& foedist > 200 && foedist < 600
+				&& random() < 0.4)
 			{
-				// rocket is in flight — switch to LG next frame
-				self.b_combo_time = time;
+				// rocket is in flight — switch to LG after brief delay
+				// (human reaction to own rocket fire)
+				self.b_combo_time = time + 0.05 + random() * 0.1;
 				self.b_wepswitch_time = time + 1.5; // suppress normal switching
 			}
 		}

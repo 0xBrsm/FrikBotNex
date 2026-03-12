@@ -641,31 +641,45 @@ the bot finds things it wants to kill/grab.
 
 float(entity thing) priority_for_thing =
 {
-	local float thisp;
+	local float thisp, time_left, awareness, urgency;
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
 
 	// skill 2+: anticipate item respawns by positioning near items about to reappear
+	// human emulation: imprecise timing — skill 3 arrives ~3s early,
+	// skill 2 has wider window but sometimes arrives too early or late
 	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 2)
 	{
-		if (thing.nextthink > 0 && (thing.nextthink - time) < 5 && (thing.nextthink - time) > 0)
+		time_left = thing.nextthink - time;
+		if (thing.nextthink > 0 && time_left > 0)
 		{
-			// item is about to respawn - go camp it
-			if (thing.classname == "item_artifact_super_damage")
-				return 80;
-			else if (thing.classname == "item_artifact_invulnerability")
-				return 80;
-			else if (thing.classname == "item_artifact_invisibility")
-				return 75;
-			else if (thing.classname == "item_health")
+			// skill 3: ~3s window, skill 2: ~8s window (arrives too early sometimes)
+			if (self.b_skill >= 3)
+				awareness = 3;
+			else
+				awareness = 8;
+
+			if (time_left < awareness)
 			{
-				if (thing.spawnflags & 2) // megahealth
-					return 65;
+				// scale priority by how close to respawn (avoid camping forever)
+				urgency = 1.0 - (time_left / awareness);
+
+				if (thing.classname == "item_artifact_super_damage")
+					return 40 + urgency * 40;
+				else if (thing.classname == "item_artifact_invulnerability")
+					return 40 + urgency * 40;
+				else if (thing.classname == "item_artifact_invisibility")
+					return 35 + urgency * 40;
+				else if (thing.classname == "item_health")
+				{
+					if (thing.spawnflags & 2) // megahealth
+						return 30 + urgency * 35;
+				}
+				else if (thing.classname == "item_armorInv")
+					return 25 + urgency * 30;
+				else if (thing.classname == "item_armor2")
+					return 20 + urgency * 25;
 			}
-			else if (thing.classname == "item_armorInv")
-				return 55;
-			else if (thing.classname == "item_armor2")
-				return 45;
 		}
 	}
 
