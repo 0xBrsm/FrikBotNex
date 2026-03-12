@@ -66,8 +66,6 @@ void() bot_opp_model_reset =
 	self.b_opp_strafe = 0;
 	self.b_opp_dist = 300;
 	self.b_opp_track_time = 0;
-	self.b_opp_damage_in = 0;
-	self.b_opp_damage_out = 0;
 };
 
 void() bot_opp_model_update =
@@ -188,6 +186,15 @@ float() bot_util_fight =
 			score = score + 8;	// they're running, press advantage
 	}
 
+	// splash weapons at mid-range with no wall angle: flanking would be better
+	if (self.b_skill >= 2 && (self.weapon == 32 || self.weapon == 16))
+	{
+		local float fdist;
+		fdist = vlen(self.enemy.origin - self.origin);
+		if (fdist > 200 && fdist < 600 && !bot_enemy_near_wall())
+			score = score - 12;
+	}
+
 	if (score < 0) score = 0;
 	if (score > 100) score = 100;
 	return score;
@@ -306,7 +313,7 @@ float() bot_util_flank =
 {
 	local float score, foedist;
 
-	score = 5;		// baseline: rarely flank
+	score = 20;		// baseline: flanking is a valid tactic with splash weapons
 
 	// only useful with splash weapons
 	if (self.weapon != 32 && self.weapon != 16)
@@ -370,6 +377,8 @@ float(entity e) bot_size_player =
 		sz = sz + 300;
 	if (e.items & 524288) // Invis
 		sz = sz + 250;
+	if (sz < 1)
+		sz = 1;
 	return sz;
 };
 
@@ -1050,6 +1059,16 @@ void() bot_pressure_move =
 	makevectors(self.v_angle);
 	right = v_right;
 
+	// ensure strafe direction is initialized
+	if (self.b_strafe_dir == 0)
+	{
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
+		else
+			self.b_strafe_dir = -1;
+		self.b_strafe_time = time + 0.3 + random() * 0.4;
+	}
+
 	// close in aggressively but not into self-splash range
 	if (foedist > 200)
 		movedir = toward;
@@ -1093,6 +1112,16 @@ void() bot_flank_move =
 	foedist = vlen(org - self.origin);
 	makevectors(self.v_angle);
 	right = v_right;
+
+	// ensure strafe direction is initialized
+	if (self.b_strafe_dir == 0)
+	{
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
+		else
+			self.b_strafe_dir = -1;
+		self.b_strafe_time = time + 0.8 + random() * 0.6;
+	}
 
 	// circle-strafe: heavy lateral component, slight range maintenance
 	movedir = right * self.b_strafe_dir;
@@ -1157,10 +1186,25 @@ void() bot_fight_style =
 	}
 	else if (!fisible(self.enemy))
 	{
-		self.enemy = world;
-		self.b_strafe_dir = 0;
-		self.b_combat_state = CSTATE_NONE;
-		return;
+		// skill 1+: grace period before dropping enemy on LOS loss
+		// prevents combat state thrashing when enemy ducks behind corners
+		if (self.b_skill >= 1 && (time - self.b_los_time) < 0.7)
+		{
+			// lost LOS briefly — keep fighting but don't shoot
+			// movement states continue (retreat, strafe, etc.)
+		}
+		else
+		{
+			self.enemy = world;
+			self.b_strafe_dir = 0;
+			self.b_combat_state = CSTATE_NONE;
+			return;
+		}
+	}
+	else
+	{
+		// have LOS — update timestamp
+		self.b_los_time = time;
 	}
 
 	// --- update opponent model ---

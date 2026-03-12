@@ -154,6 +154,7 @@ for all variables in the bot...
 // combat state machine
 .float b_combat_state;
 .float b_combat_time;		// when we entered current state
+.float b_los_time;		// last time we had LOS to enemy
 
 // opponent modeling (skill 2+)
 .entity b_opp_ent;		// which enemy we're tracking
@@ -162,8 +163,6 @@ for all variables in the bot...
 .float b_opp_strafe;		// enemy strafe tendency (-1 to +1)
 .float b_opp_dist;		// enemy preferred distance
 .float b_opp_track_time;	// last opponent model update
-.float b_opp_damage_in;	// damage we've taken from this enemy (rolling)
-.float b_opp_damage_out;	// damage we've dealt to this enemy (rolling)
 
 // personality types
 float PERSONALITY_BALANCED	= 0;
