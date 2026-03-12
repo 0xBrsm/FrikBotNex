@@ -144,6 +144,7 @@ for all variables in the bot...
 .float b_aim_delay, b_aim_offset;
 .float b_retreat;
 .float b_ambush_time;
+.float b_bhop_land;
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;

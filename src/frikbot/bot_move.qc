@@ -213,6 +213,79 @@ Also responsible for jumping gaps.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+frik_check_hazard
+
+Proactive hazard scanning: checks the ground
+ahead and to the sides for lava/slime.
+Returns TRUE and calls frik_obstructed if
+a hazard is detected.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() frik_check_hazard =
+{
+	local vector ang, check, side;
+	local float conts;
+
+	if (!(self.flags & FL_ONGROUND))
+		return FALSE;
+
+	ang = normalize(self.velocity);
+	ang_z = 0;
+	if (vlen(ang) < 0.1)
+		return FALSE;
+
+	// check ground 48 units ahead
+	check = self.origin + ang * 48;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
+	{
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang, TRUE);
+			return TRUE;
+		}
+	}
+
+	// check to the left and right (24 units out, 48 ahead)
+	side_x = ang_y * -1;
+	side_y = ang_x;
+
+	check = self.origin + ang * 48 + side * 24;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
+	{
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang + side, TRUE);
+			return TRUE;
+		}
+	}
+
+	check = self.origin + ang * 48 - side * 24;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
+	{
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang - side, TRUE);
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+};
+
 void() frik_obstacles =
 {
 	local vector start, stop, ang;
@@ -221,6 +294,10 @@ void() frik_obstacles =
 	if (!(self.flags & FL_ONGROUND))
 		return;
 	if (self.b_aiflags & AI_BLIND)
+		return;
+
+	// proactive hazard scan (lava/slime ahead and to sides)
+	if (frik_check_hazard())
 		return;
 
 	ang = normalize(self.velocity);
@@ -411,6 +488,80 @@ blah
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_bhop
+
+Bunny hop / strafe jump logic for skill 2+.
+Chains jumps on landing and adds air strafe
+to gain speed via SV_AirAccelerate.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_bhop =
+{
+	local float spd;
+	local vector vel;
+
+	// only skill 2+ bunny hops
+	if (self.b_skill < 2)
+		return;
+
+	// don't bhop during precision movement, on trains, or in water
+	if (self.b_aiflags & (AI_PRECISION | AI_RIDE_TRAIN | AI_WAIT))
+		return;
+	if (self.waterlevel > 1)
+		return;
+
+	// don't bhop when target is very close (prevents overshooting)
+	if (self.target1)
+	{
+		if (vlen(realorigin(self.target1) - self.origin) < 128)
+			return;
+	}
+
+	vel = self.velocity;
+	vel_z = 0;
+	spd = vlen(vel);
+
+	if (self.flags & FL_ONGROUND)
+	{
+		// just landed - jump immediately to chain hops
+		if (self.b_bhop_land)
+		{
+			bot_jump();
+			self.b_bhop_land = 0;
+			return;
+		}
+
+		// start a bhop chain if moving fast enough
+		// skill 3: initiates more aggressively
+		if (spd > 150 || (self.b_skill >= 3 && spd > 50))
+		{
+			bot_jump();
+			self.b_bhop_land = 1;
+		}
+	}
+	else if (self.b_bhop_land)
+	{
+		// in air during bhop - add slight strafe for air acceleration
+		// alternate strafe direction for speed gain
+		if (self.b_strafe_dir == 0)
+		{
+			if (random() < 0.5)
+				self.b_strafe_dir = 1;
+			else
+				self.b_strafe_dir = -1;
+		}
+		if (self.b_strafe_dir > 0)
+			self.keys = self.keys | KEY_MOVERIGHT;
+		else
+			self.keys = self.keys | KEY_MOVELEFT;
+	}
+};
+
 void() frik_movetogoal =
 {
 	local vector way, start, stop, ang;
@@ -444,6 +595,8 @@ void() frik_movetogoal =
 		if (fabs(g) > 10)
 			self.keys = self.keys & 960;
 	}
+	else
+		bot_bhop();
 };
 
 float(vector weird) frik_walkmove =

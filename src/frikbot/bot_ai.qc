@@ -424,9 +424,14 @@ void() bot_handle_ai =
 		// simple, but effective
 		// this can probably be used for a lot of different
 		// things, not just trains (door elevators come to mind)
+
+		// keep search_time alive while riding
+		if (self.search_time < time + 3)
+			self.search_time = time + 3;
+
 		b_temp3 = self;
 		self = self.last_way;
-	
+
 		if (!frik_recognize_plat(FALSE)) // if there is nothing there now
 		{
 			self = b_temp3;
@@ -454,6 +459,9 @@ void() bot_handle_ai =
 		newt = FindThing("plat");
 		if (newt.state != 1)
 		{
+			// keep search_time alive while waiting for plat
+			if (self.search_time < time + 3)
+				self.search_time = time + 3;
 			v =  self.origin - realorigin(newt);
 			v_z = 0;
 			if (vlen(v) > 96)
@@ -1063,6 +1071,7 @@ void() BotAI =
 		self.b_strafe_dir = 0;
 		self.b_retreat = 0;
 		self.b_ambush_time = 0;
+		self.b_bhop_land = 0;
 		return;
 	}
 		

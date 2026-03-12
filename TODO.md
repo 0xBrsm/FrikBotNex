@@ -8,12 +8,12 @@
 - [x] Human-like aim variance (interpolated tracking styles per skill level)
 
 ## Movement
-- [ ] Bunny hopping
-- [ ] Strafe jumping
-- [ ] Rocket jumping
-- [ ] Better obstacle/ledge detection
-- [ ] Hazard avoidance (lava, slime)
-- [ ] Elevator/platform timing
+- [x] Bunny hopping
+- [x] Strafe jumping
+- [x] Rocket jumping (via AI_SUPER_JUMP waypoints)
+- [x] Better obstacle/ledge detection
+- [x] Hazard avoidance (lava, slime)
+- [x] Elevator/platform timing
 
 ## Strategic Awareness
 - [ ] Item respawn timers (mega health, red armor, quad)
