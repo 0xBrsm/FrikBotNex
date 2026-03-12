@@ -50,7 +50,9 @@ in your source folder, then...
 * Add the following lines to progs.src right after the defs.qc line
 frikbot/bot.qc
 frikbot/bot_way.qc
-frikbot/bot_fight.qc 
+frikbot/bot_think.qc
+frikbot/bot_shoot.qc
+frikbot/bot_fight.qc
 frikbot/bot_ai.qc
 frikbot/bot_misc.qc
 frikbot/bot_phys.qc
@@ -333,20 +335,33 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
-// combat ai
-float() bot_enemy_near_wall;
-float(float wep, float brange) bot_weapon_score;
-void() bot_combat_strafe;
-void() bot_retreat;
-void(float scope) bot_look_for_crap;
-
-// opponent modeling & utility ai
+// bot_think.qc — opponent modeling, team coordination, utility scoring, threat assessment
 void() bot_opp_model_update;
 void() bot_opp_model_reset;
+float(entity foe) bot_team_fighting_enemy;
+entity() bot_nearest_teammate;
+float(entity foe) bot_teammate_retreating_from;
 float() bot_util_fight;
 float() bot_util_retreat;
 float() bot_util_pressure;
 float() bot_util_flank;
+float(entity e) bot_size_player;
+void() bot_dodge_stuff;
+vector(float wep) weapon_range;
+float() bot_enemy_near_wall;
+
+// bot_shoot.qc — weapon scoring, switching, shooting
+float(float wep, float brange) bot_weapon_score;
+void(float brange) bot_weapon_switch;
+void() bot_shoot;
+
+// bot_fight.qc — combat movement and state machine
+void() bot_combat_strafe;
+void() bot_retreat;
+void() bot_pressure_move;
+void() bot_flank_move;
+void() bot_fight_style;
+void(float scope) bot_look_for_crap;
 
 // editor stuffs
 
