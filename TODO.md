@@ -33,3 +33,8 @@
 - [x] Varied playstyle at same skill level
 - [x] Idle behavior: glancing around, recreational jumps, personality-scaled fidgeting
 - [x] Behavioral variety: movement jitter, look frequency, jump rate per personality
+- [ ] Grudge system: track nemesis player, prioritize targeting, targeted chat
+- [ ] Post-kill BM: brief pause + look at corpse, weapon flex, personality-scaled
+- [ ] Personality-flavored chat: branch chat strings by personality type
+- [ ] Dynamic personality drift: tilt toward defensive on death streaks, aggressive on kill streaks
+- [ ] Sound bait: skill 3 campers fire bait shots to draw enemies into ambush
