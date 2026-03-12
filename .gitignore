@@ -1,0 +1,5 @@
+# Compiled QuakeC output (in src/)
+src/*.dat
+src/*.lno
+fteqcc.log
+.claude/

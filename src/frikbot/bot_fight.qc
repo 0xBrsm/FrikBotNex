@@ -18,7 +18,7 @@ NO EVENT WILL RYAN "FRIKAC" SMITH BE LIABLE FOR ANY
 GENERAL, CONSEQUENTIAL, INDIRECT, INCIDENTAL,
 EXEMPLARY, OR SPECIAL DAMAGES, EVEN IF RYAN "FRIKAC"
 SMITH HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
-DAMAGES, IRRESPECTIVE OF THE CAUSE OF SUCH DAMAGES. 
+DAMAGES, IRRESPECTIVE OF THE CAUSE OF SUCH DAMAGES.
 
 You accept this software on the condition that you
 indemnify and hold harmless Ryan "FrikaC" Smith from
@@ -26,7 +26,7 @@ any and all liability or damages to third parties,
 including attorney fees, court costs, and other
 related costs and expenses, arising out of your use
 of this software irrespective of the cause of said
-liability. 
+liability.
 
 The export from the United States or the subsequent
 reexport of this software is subject to compliance
@@ -35,311 +35,331 @@ control restrictions. You agree that in the event you
 seek to export this software, you assume full
 responsibility for obtaining all necessary export
 licenses and approvals and for assuring compliance
-with applicable reexport restrictions. 
+with applicable reexport restrictions.
 
 Any reproduction of this software must contain
-this notice in its entirety. 
+this notice in its entirety.
 
 */
 
-.entity avoid;
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-float(entity e) bot_size_player =
+bot_combat_strafe
+
+Handles strafe movement during combat with
+periodic direction changes scaled by skill.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_combat_strafe =
 {
-	local float sz;
+	local vector org, movedir, right, v;
+	local float foedist, strafe_interval;
 
-	sz = e.health + e.armorvalue * e.armortype;
-	if (e.weapon == 32)
-		sz = sz + 60;
-	else if (e.weapon == 64)
-		sz = sz + 60;
-	else if (e.weapon == 16)
-		sz = sz + 50;
-	else if (e.weapon == 8)
-		sz = sz + 50;
-	else if (e.weapon == 4)
-		sz = sz + 40;
-	else if (e.weapon == 2)
-		sz = sz + 40;
-	else if (e.weapon == 1)
-		sz = sz + 10;
-	else if (e.weapon == 4096)
-		sz = sz - 50;
-	if (e.items & 4194304) // Quad
-		sz = sz + 200;
-	if (e.items & 1048576) // Invul
-		sz = sz + 300;
-	if (e.items & 524288) // Invis
-		sz = sz + 250;
-	return sz;
-};
+	org = realorigin(self.enemy);
+	foedist = vlen(org - self.origin);
+	makevectors(self.v_angle);
+	right = v_right;
 
-void() bot_dodge_stuff =
-{
-	local entity foe;
-	local float avdist, foesz, flen, tsz;
-	local vector v;
-
-	if (waypoint_mode > WM_LOADED)
-		return;
-
-	self.avoid = world;
-
-
-	if (self.enemy)
+	// strafe interval based on skill and range
+	// close-range: much faster weaving for skill 1+
+	if (foedist < 150 && self.b_skill >= 1)
 	{
-		v = self.origin - realorigin(self.enemy);
-
-		foesz = bot_size_player(self.enemy);
-		foesz = foesz + vlen(v) * 0.5;
+		strafe_interval = 0.2 + random() * 0.3;
 	}
-	else 
-		foesz = 9999999;
-	avdist = 256;
-
-	foe = find(world, classname, "grenade");
-	while(foe)
-	{
-		flen = vlen(foe.origin - self.origin);
-		if (flen < avdist)
-		{
-			avdist = flen;
-			self.avoid = foe;
-		}
-		foe = find(foe, classname, "grenade");
-	}
-	if (!self.avoid)
-	{
-		foe = find(world, classname, "missile");
-		while(foe)
-		{
-			if (foe.owner != self)
-			{
-				flen = vlen(foe.origin - self.origin);
-				if (flen < avdist)
-				{
-					avdist = flen;
-					self.avoid = foe;
-				}
-			}
-			foe = find(foe, classname, "missile");
-		}
-		if (!self.avoid)
-		{
-			foe = find(world, classname, "spike");
-			while(foe)
-			{
-				if (foe.owner != self)
-				{
-					flen = vlen(foe.origin - self.origin);
-					if (flen < avdist)
-					{
-						avdist = flen;
-						self.avoid = foe;
-					}
-				}
-				foe = find(foe, classname, "spike");
-			}
-		}
-	}
-	if (coop)
-	{
-		if (!self.enemy)
-		{
-			foe = findradius(self.origin, 9999);
-			while(foe)
-			{
-				if(foe.flags & FL_MONSTER)
-				{
-					if(foe.health > 0)
-					{
-						tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
-						if (tsz < foesz)
-						{
-							if (fisible(foe))
-							{
-								self.enemy = foe;
-								foesz = tsz;
-							}
-						}
-					}
-				}
-				foe = foe.chain;
-			}
-		}		
-	}
+	else if (self.b_skill == 0)
+		strafe_interval = 2.0 + random();
+	else if (self.b_skill == 1)
+		strafe_interval = 1.0 + random();
+	else if (self.b_skill == 2)
+		strafe_interval = 0.5 + random();
 	else
+		strafe_interval = 0.3 + random() * 0.5;
+
+	// personality: aggressive strafes faster, defensive slower
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		strafe_interval = strafe_interval * 0.7;
+	else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		strafe_interval = strafe_interval * 1.3;
+
+	// initialize strafe direction if not set
+	if (self.b_strafe_dir == 0)
 	{
-		foe = player_head;
-		while(foe)
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
+		else
+			self.b_strafe_dir = -1;
+		self.b_strafe_time = time + strafe_interval;
+	}
+
+	// time to change direction
+	if (time > self.b_strafe_time)
+	{
+		// skill 3 opponent model: counter-strafe (go opposite their tendency)
+		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy)
 		{
-			if(foe != self)
+			if (self.b_opp_strafe > 0.4)
+				self.b_strafe_dir = -1;		// they go right, we go left
+			else if (self.b_opp_strafe < -0.4)
+				self.b_strafe_dir = 1;
+			else
+				self.b_strafe_dir = self.b_strafe_dir * -1;
+			self.b_strafe_time = time + strafe_interval;
+		}
+		// skill 2+: occasional quick fake (short strafe then switch)
+		else if (self.b_skill >= 2 && random() < 0.2)
+		{
+			self.b_strafe_dir = self.b_strafe_dir * -1;
+			self.b_strafe_time = time + 0.15 + random() * 0.15;
+		}
+		else
+		{
+			self.b_strafe_dir = self.b_strafe_dir * -1;
+			self.b_strafe_time = time + strafe_interval;
+		}
+	}
+
+	// build movement: strafe + range management
+	v = weapon_range(self.weapon);
+	movedir = right * self.b_strafe_dir;
+
+	if (foedist + 32 < v_x)
+		movedir = movedir + normalize(self.origin - org) * 0.5; // too close, back up
+	else if (foedist - 32 > v_x)
+		movedir = movedir + normalize(org - self.origin) * 0.5; // too far, close in
+
+	if (!frik_walkmove(movedir))
+	{
+		// obstructed, flip direction immediately
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.1;
+	}
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_retreat
+
+Retreat behavior when outgunned. Skill-scaled
+from panic freeze to smart angular retreat.
+Skill 2+ uses opponent model to dodge away from
+enemy's strong side.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_retreat =
+{
+	local vector away, org, right, movedir, toward_mate;
+	local entity mate;
+
+	org = realorigin(self.enemy);
+	away = normalize(self.origin - org);
+	self.b_retreat = 1;
+
+	// skill 0: panic - barely moves
+	if (self.b_skill == 0)
+	{
+		if (random() < 0.3)
+			frik_walkmove(away);
+		return;
+	}
+
+	// skill 1: run directly away (with teammate bias in teamplay)
+	if (self.b_skill == 1)
+	{
+		if (teamplay)
+		{
+			mate = bot_nearest_teammate();
+			if (mate != world)
 			{
-				if (foe.modelindex != 0)
-				{
-					if (foe.health > 0)
-					{
-						if (!(teamplay && self.team == foe.team))
-						{
-							tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
-							if (tsz < foesz)
-							{
-								if (fov(foe) || foe.b_sound > time || self.b_skill == 3)
-								{
-									if (fisible(foe))
-									{
-										self.enemy = foe;
-										foesz = tsz;
-									}
-								}
-							}
-						}
-					}
-				}
+				toward_mate = normalize(mate.origin - self.origin);
+				// blend: mostly away from enemy, slightly toward teammate
+				away = normalize(away + toward_mate * 0.3);
 			}
-			foe = foe._next;
 		}
+		frik_walkmove(away);
+		return;
 	}
-};
 
+	// skill 2-3: angular retreat (harder to track)
+	makevectors(self.v_angle);
+	right = v_right;
 
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-weapon_range
-
-_x "sweet spot range" - try to maintain this range if possible
-_y minimum range bot can be to be effective (rl/gl) (move away)
-_z maximum range bot can be to be effective (lg/axe) (move in)
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-vector(float wep) weapon_range =
-{
-	if (wep == 4096) // IT_AXE
-		return '48 0 64';
-	else if (wep == 1) // IT_SHOTGUN
-		//~ ai fix start
-		//~ return '128 0 99999';
-		return '128 8 3000';
-		//~ ai fix end
-	else if (wep == 2) // IT_SUPER_SHOTGUN
-		//~ ai fix start
-		//~ return '128 0 99999';
-		return '128 0 3000';
-		//~ ai fix end
-	else if (wep == 4) // IT_NAILGUN
-		return '180 0 3000';
-	else if (wep == 8) // IT_SUPER_NAILGUN
-		return '180 0 3000';
-	else if (wep == 16) // IT_GRENADE_LAUNCHER
-		return '180 48 3000';
-	else if (wep == 32) // IT_ROCKET_LAUNCHER
-		return '180 48 3000';
-	else if (wep == 64) // IT_LIGHTNING
-		return '350 0 512';
-};
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_weapon_switch
-
-Pick a weapon based on range / ammo
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void(float brange) bot_weapon_switch =
-{
-	local	float	it, flag, pulse;
-	local vector v;
-
-	it = self.items & 127;
-
-	while(it)
+	// initialize strafe dir if needed
+	if (self.b_strafe_dir == 0)
 	{
-		if ((self.ammo_rockets >= 1) && (it & 32))
-		{
-			flag = 32;
-			pulse = 7;
-		}
-		else if (self.waterlevel <= 1 && self.ammo_cells >= 1 && (it & 64))
-		{
-			flag = 64;
-			pulse = 8;
-		}
-		else if(self.ammo_nails >= 2 && (it & 8))
-		{
-			flag = 8;
-			pulse = 5;
-		}
-		else if ((self.ammo_rockets >= 1) && (it & 16))
-		{
-			flag = 16;
-			pulse = 6;
-		}
-		else if(self.ammo_shells >= 2 && (it & 2))
-		{
-			flag = 2;
-			pulse = 3;
-		}
-		else if(self.ammo_nails >= 1 && (it & 4))
-		{
-			flag = 4;
-			pulse = 4;
-		}
-		else if(self.ammo_shells >= 1 && (it & 1))
-		{
-			flag = 1;
-			pulse = 2;
-		}
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
 		else
-		{
-			if (pulse)
-				self.impulse = pulse;
-			return;
-		}
+			self.b_strafe_dir = -1;
+	}
 
-		if (brange == -1)
+	// opponent model: retreat away from enemy's strafe direction
+	// if they tend to strafe right, we go left to break their tracking
+	if (self.b_opp_ent == self.enemy && self.b_skill >= 3)
+	{
+		if (self.b_opp_strafe > 0.3)
+			self.b_strafe_dir = -1;
+		else if (self.b_opp_strafe < -0.3)
+			self.b_strafe_dir = 1;
+	}
+
+	// team coordination: bias retreat toward nearest teammate
+	if (teamplay)
+	{
+		mate = bot_nearest_teammate();
+		if (mate != world)
 		{
-			if (pulse)
-				self.impulse = pulse;
-			return;
-		}
-		v = weapon_range(flag);
-		if (brange < v_y || brange > v_z)
-			it = it - flag;
-		else
-		{
-			if (pulse)
-				self.impulse = pulse;
-			return;
+			toward_mate = normalize(mate.origin - self.origin);
+			// blend teammate direction into retreat vector
+			away = normalize(away + toward_mate * 0.35);
 		}
 	}
-};
 
-void() bot_shoot = 
-{
-	// quick little function to stop making him shoot the wrong way ! Argh
-	local float g;
-	g = angcomp(self.v_angle_x, self.b_angle_x);
-	if (fabs(g) > 30)
-		return; // argh, too far away
-	g = angcomp(self.v_angle_y, self.b_angle_y);
-	if (fabs(g) > 30)
-		return; // not again!
-	self.button0 = TRUE;
+	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
+
+	if (!frik_walkmove(movedir))
+	{
+		// obstructed, try the other side
+		movedir = normalize(away + right * self.b_strafe_dir * -0.7);
+		frik_walkmove(movedir);
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+	}
+
+	// skill 3: seek nearby health while retreating
+	if (self.b_skill == 3 && self.health < 50)
+	{
+		if (!self.target1 || self.target1.classname == "waypoint")
+			bot_look_for_crap(FALSE);
+	}
 };
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-Bot_fight_style
+bot_pressure_move
 
-This is the core of the bot's thinking when
-attacking an enemy. 
+Aggressive push toward a weakened enemy.
+Close distance while strafing unpredictably.
+Skill 2+ only.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_pressure_move =
+{
+	local vector org, toward, right, movedir;
+	local float foedist;
+
+	org = realorigin(self.enemy);
+	toward = normalize(org - self.origin);
+	foedist = vlen(org - self.origin);
+	makevectors(self.v_angle);
+	right = v_right;
+
+	// ensure strafe direction is initialized
+	if (self.b_strafe_dir == 0)
+	{
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
+		else
+			self.b_strafe_dir = -1;
+		self.b_strafe_time = time + 0.3 + random() * 0.4;
+	}
+
+	// close in aggressively but not into self-splash range
+	if (foedist > 200)
+		movedir = toward;
+	else if (foedist > 100)
+		movedir = toward * 0.3 + right * self.b_strafe_dir * 0.7;
+	else
+		movedir = right * self.b_strafe_dir;	// close enough, just strafe
+
+	// fast strafe changes when pressuring
+	if (time > self.b_strafe_time)
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.3 + random() * 0.4;
+	}
+
+	if (!frik_walkmove(movedir))
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.1;
+	}
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_flank_move
+
+Circle-strafe to get a better splash angle.
+Tries to push the enemy toward walls.
+Skill 2+ only.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_flank_move =
+{
+	local vector org, right, movedir;
+	local float foedist;
+
+	org = realorigin(self.enemy);
+	foedist = vlen(org - self.origin);
+	makevectors(self.v_angle);
+	right = v_right;
+
+	// ensure strafe direction is initialized
+	if (self.b_strafe_dir == 0)
+	{
+		if (random() < 0.5)
+			self.b_strafe_dir = 1;
+		else
+			self.b_strafe_dir = -1;
+		self.b_strafe_time = time + 0.8 + random() * 0.6;
+	}
+
+	// circle-strafe: heavy lateral component, slight range maintenance
+	movedir = right * self.b_strafe_dir;
+	if (foedist > 400)
+		movedir = movedir + normalize(org - self.origin) * 0.4;
+	else if (foedist < 200)
+		movedir = movedir + normalize(self.origin - org) * 0.4;
+
+	// moderate strafe changes
+	if (time > self.b_strafe_time)
+	{
+		// flanking: longer commits to build angle
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.8 + random() * 0.6;
+	}
+
+	if (!frik_walkmove(movedir))
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.1;
+	}
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_fight_style
+
+Combat state machine driven by utility scoring.
+
+Skill 0-1: simplified path (fight or retreat
+based on size comparison, like original logic).
+
+Skill 2+: full utility evaluation picks from
+FIGHT, RETREAT, PRESSURE, or FLANK each cycle.
+State transitions are smoothed to avoid jitter.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -348,106 +368,285 @@ void() bot_fight_style =
 {
 	local vector v, v1, v2, org;
 	local float foedist, mysz, foesz;
+	local float u_fight, u_retreat, u_pressure, u_flank, u_best;
+	local float new_state, cur_score, hyst_margin, hyst_time;
 
-
+	// --- enemy validity ---
 	if (self.enemy.health <= 0)
 	{
 		self.enemy = world;
+		self.b_strafe_dir = 0;
+		self.b_combat_state = CSTATE_NONE;
+		self.b_combo_time = 0;
 		return;
 	}
 	else if (!self.enemy.takedamage)
 	{
 		self.enemy = world;
+		self.b_strafe_dir = 0;
+		self.b_combat_state = CSTATE_NONE;
+		self.b_combo_time = 0;
 		return;
 	}
 	else if (!fisible(self.enemy))
 	{
-		self.enemy = world;
-		return;
+		// skill 1+: grace period before dropping enemy on LOS loss
+		// prevents combat state thrashing when enemy ducks behind corners
+		if (self.b_skill >= 1 && (time - self.b_los_time) < 0.7)
+		{
+			// lost LOS briefly — keep fighting but don't shoot
+			// movement states continue (retreat, strafe, etc.)
+		}
+		else
+		{
+			self.enemy = world;
+			self.b_strafe_dir = 0;
+			self.b_combat_state = CSTATE_NONE;
+			self.b_combo_time = 0;
+			return;
+		}
 	}
+	else
+	{
+		// have LOS — update timestamp
+		self.b_los_time = time;
+	}
+
+	// --- update opponent model ---
+	bot_opp_model_update();
 
 	org = realorigin(self.enemy);
 	makevectors(self.v_angle);
 
-	// decide if I should shoot
-
+	// --- shooting decision (universal, all states) ---
 	foedist = vlen(org - self.origin);
 	v = weapon_range(self.weapon);
+
+	// --- RL->LG combo: execute phase (skill 3, PRESSURE state) ---
+	// after firing RL, switch to LG for hitscan damage while rocket flies
+	if (self.b_combo_time > 0)
+	{
+		if (time > self.b_combo_time + 0.6 || self.enemy.health <= 0)
+		{
+			// combo expired or enemy dead — resume normal weapon logic
+			self.b_combo_time = 0;
+		}
+		else if (self.weapon != 64)
+		{
+			// haven't switched yet — force LG
+			self.impulse = 8;
+		}
+		else
+		{
+			// LG is active — shoot it, combo is running
+			bot_shoot();
+		}
+	}
 
 	if (foedist > v_y && foedist < v_z)
 	{
 		traceline(self.origin + self.view_ofs, self.origin + self.view_ofs + v_forward * v_z, FALSE, self);
 		if (vlen(trace_endpos - (self.origin + self.view_ofs)) >= v_y)
 		{
-			// try to avoid shooting teammates
+			// skip shot if teammate is in the way, but don't freeze movement
 			if (trace_ent.classname == "player")
-				if ((trace_ent.team == self.team && teamplay) || (coop))
-					return;
-			bot_shoot();
+			{
+				if (!((trace_ent.team == self.team && teamplay) || (coop)))
+					bot_shoot();
+			}
+			else
+				bot_shoot();
+
+			// --- RL->LG combo: initiate phase ---
+			// skill 3 in PRESSURE: after firing RL at mid range, start combo
+			// human emulation: only attempt 40% of the time (humans don't
+			// always think to combo, and sometimes fumble the switch)
+			if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
+				&& self.b_combo_time == 0
+				&& self.weapon == 32	// IT_ROCKET_LAUNCHER
+				&& (self.items & 64)	// have LG
+				&& self.ammo_cells >= 1
+				&& self.waterlevel <= 1	// LG doesn't work underwater
+				&& foedist > 200 && foedist < 600
+				&& random() < 0.4)
+			{
+				// rocket is in flight — switch to LG after brief delay
+				// (human reaction to own rocket fire)
+				self.b_combo_time = time + 0.05 + random() * 0.1;
+				self.b_wepswitch_time = time + 1.5; // suppress normal switching
+			}
+		}
+		if (self.b_skill >= 1 && time > self.b_wepswitch_time && self.b_combo_time == 0)
+		{
+			bot_weapon_switch(foedist);
+			self.b_wepswitch_time = time + 1.5;
 		}
 	}
-	else
+	else if (self.b_combo_time == 0)
 		bot_weapon_switch(foedist);
 
-	if (!(self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED)))
+	self.b_retreat = 0;
+
+	// --- movement constrained by AI flags ---
+	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
+	{
+		// constrained: simplified fight-or-retreat only
+		if (bot_size_player(self.enemy) > bot_size_player(self) + 5)
+		{
+			bot_retreat();
+			if (self.b_skill >= 1)
+			{
+				bot_weapon_switch(foedist);
+				bot_shoot();
+			}
+			return;
+		}
+		self.keys = self.keys & 960;
+		return;
+	}
+
+	// --- projectile dodge takes priority over state movement ---
+	if (self.avoid)
+	{
+		if (self.avoid.velocity)
+			v = self.avoid.velocity;
+		else
+			v = normalize(self.avoid.origin - self.origin);
+		v1_x = v_y * -1;
+		v1_y = v_x;
+		v2_x = v_y;
+		v2_y = v_x * -1;
+		foedist = vlen(self.avoid.origin - (self.origin + v1));
+		if (foedist < vlen(self.avoid.origin - (self.origin + v2)))
+			frik_walkmove(v2);
+		else
+			frik_walkmove(v1);
+		return;
+	}
+
+	// --- skill 0-1: classic binary fight/retreat ---
+	if (self.b_skill < 2)
 	{
 		foesz = bot_size_player(self.enemy);
 		mysz = bot_size_player(self) + 5;
 
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			mysz = mysz + 40;
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			mysz = mysz - 30;
+
 		if (foesz > mysz)
 		{
-			if (teamplay)
+			self.b_combat_state = CSTATE_RETREAT;
+			bot_retreat();
+			if (teamplay && random() < 0.02)
 			{
-				if (random() < 0.02)
-				{
-					bot_start_topic(5);
-					self.b_chattime = 1;
-				}
+				bot_start_topic(5);
+				self.b_chattime = 1;
 			}
-			
+			if (self.b_skill >= 1)
+			{
+				bot_weapon_switch(foedist);
+				bot_shoot();
+			}
 			return;
 		}
-		else if (mysz < 140)
+		if (mysz < 140)
 			return;
-		else if (self.avoid)
+		self.b_combat_state = CSTATE_FIGHT;
+		if (!(self.enemy.flags & FL_MONSTER))
+			bot_combat_strafe();
+		return;
+	}
+
+	// --- skill 2+: utility-scored state machine ---
+
+	u_fight = bot_util_fight();
+	u_retreat = bot_util_retreat();
+	u_pressure = bot_util_pressure();
+	u_flank = bot_util_flank();
+
+	// find best action
+	u_best = u_fight;
+	new_state = CSTATE_FIGHT;
+
+	if (u_retreat > u_best)
+	{
+		u_best = u_retreat;
+		new_state = CSTATE_RETREAT;
+	}
+	if (u_pressure > u_best)
+	{
+		u_best = u_pressure;
+		new_state = CSTATE_PRESSURE;
+	}
+	if (u_flank > u_best)
+	{
+		u_best = u_flank;
+		new_state = CSTATE_FLANK;
+	}
+
+	// hysteresis: require margin to switch states (prevents jitter)
+	// human emulation: higher margin for skill 2 = more commitment to decisions
+	// skill 3: 10-point margin, 0.5s commitment (crisp reactions)
+	// skill 2: 15-point margin, 0.8s commitment (slight tunnel vision)
+	if (new_state != self.b_combat_state)
+	{
+		if (self.b_skill >= 3)
+		{	hyst_margin = 10; hyst_time = 0.5; }
+		else
+		{	hyst_margin = 15; hyst_time = 0.8; }
+
+		if (self.b_combat_state == CSTATE_FIGHT)
+			cur_score = u_fight;
+		else if (self.b_combat_state == CSTATE_RETREAT)
+			cur_score = u_retreat;
+		else if (self.b_combat_state == CSTATE_PRESSURE)
+			cur_score = u_pressure;
+		else if (self.b_combat_state == CSTATE_FLANK)
+			cur_score = u_flank;
+		else
+			cur_score = 0;
+
+		if (u_best < cur_score + hyst_margin && (time - self.b_combat_time) < hyst_time)
+			new_state = self.b_combat_state;	// keep current state
+	}
+
+	// state transition
+	if (new_state != self.b_combat_state)
+	{
+		// cancel RL->LG combo if leaving PRESSURE
+		if (self.b_combat_state == CSTATE_PRESSURE)
+			self.b_combo_time = 0;
+		self.b_combat_state = new_state;
+		self.b_combat_time = time;
+	}
+
+	// --- execute current state ---
+	if (self.b_combat_state == CSTATE_RETREAT)
+	{
+		bot_retreat();
+		if (teamplay && random() < 0.02)
 		{
-			if (self.avoid.velocity)
-				v = self.avoid.velocity;
-			else
-				v = normalize(self.avoid.origin - self.origin);
-			v1_x = v_y * -1;
-			v1_y = v_x;
-			v2_x = v_y;
-			v2_y = v_x * -1;
-			foedist = vlen(self.avoid.origin - (self.origin + v1));
-			if (foedist < vlen(self.avoid.origin - (self.origin + v2)))
-				frik_walkmove(v2);
-			else
-				frik_walkmove(v1);
+			bot_start_topic(5);
+			self.b_chattime = 1;
 		}
-		else if (!self.enemy.flags & FL_MONSTER)
-		{
-			if (foedist + 32 <  v_x)
-			frik_walkmove(self.origin - org);
-			else if (foedist - 32 >  v_x)
-				frik_walkmove(org - self.origin);
-			else if (self.wallhug)
-				frik_walkmove(v_right);
-			else
-				frik_walkmove(v_right * -1);
-		}
+		// always shoot while retreating at skill 2+
+		bot_weapon_switch(foedist);
+		bot_shoot();
+	}
+	else if (self.b_combat_state == CSTATE_PRESSURE)
+	{
+		bot_pressure_move();
+	}
+	else if (self.b_combat_state == CSTATE_FLANK)
+	{
+		bot_flank_move();
 	}
 	else
 	{
-		foesz = bot_size_player(self.enemy);
-		mysz = bot_size_player(self) + 5;
-
-		if (foesz > mysz)
-			return;
-		else if (mysz < 140)
-			return;
-		self.keys = self.keys & 960;
+		// CSTATE_FIGHT: standard combat strafe
+		if (!(self.enemy.flags & FL_MONSTER))
+			bot_combat_strafe();
 	}
 };
-
-

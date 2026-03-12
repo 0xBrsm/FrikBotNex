@@ -50,7 +50,9 @@ in your source folder, then...
 * Add the following lines to progs.src right after the defs.qc line
 frikbot/bot.qc
 frikbot/bot_way.qc
-frikbot/bot_fight.qc 
+frikbot/bot_think.qc
+frikbot/bot_shoot.qc
+frikbot/bot_fight.qc
 frikbot/bot_ai.qc
 frikbot/bot_misc.qc
 frikbot/bot_phys.qc
@@ -140,6 +142,68 @@ for all variables in the bot...
 .float	b_menu, b_menu_time, b_menu_value;
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
+.float b_strafe_time, b_strafe_dir;
+.float b_aim_delay, b_aim_offset;
+.float b_retreat;
+.float b_ambush_time;
+.float b_bhop_land;
+.float b_wall_near, b_wall_time;
+.float b_wepswitch_time;
+.float b_combo_time;		// RL->LG combo: when to switch to LG (0 = inactive)
+.vector b_death1, b_death2, b_death3;
+.float b_death_time;
+.float b_personality;
+
+// human emulation: movement
+.float b_nav_jitter_time;	// next time to add random strafe during navigation
+.float b_bhop_fumble;		// chance to miss a bhop jump this chain (0-1)
+
+// idle behavior
+.float b_idle_glance_time;	// next time to glance around while navigating
+.float b_idle_glance_yaw;	// target yaw offset for current glance (0 = not glancing)
+.float b_idle_jump_time;	// next recreational jump time
+
+// human emulation: aim
+.float b_aim_flick;		// overshoot amount on target acquisition (degrees)
+.float b_aim_drift_phase;	// sine wave phase for low-frequency tracking drift
+.float b_aim_last_yaw_err;	// last frame's yaw error for overcorrection modeling
+
+// human emulation: decisions
+.float b_react_time;		// delay before engaging newly detected enemy
+.float b_wep_commit_time;	// locked into current weapon until this time
+
+// combat state machine
+.float b_combat_state;
+.float b_combat_time;		// when we entered current state
+.float b_los_time;		// last time we had LOS to enemy
+
+// opponent modeling (skill 2+)
+.entity b_opp_ent;		// which enemy we're tracking
+.float b_opp_weapon;		// enemy's current weapon
+.float b_opp_aggro;		// aggression estimate (0.0 = passive, 1.0 = rush)
+.float b_opp_strafe;		// enemy strafe tendency (-1 to +1)
+.float b_opp_dist;		// enemy preferred distance
+.float b_opp_track_time;	// last opponent model update
+
+// personality types
+float PERSONALITY_BALANCED	= 0;
+float PERSONALITY_AGGRESSIVE	= 1;
+float PERSONALITY_DEFENSIVE	= 2;
+float PERSONALITY_CAMPER	= 3;
+
+// ambush patience by skill level (seconds)
+float AMBUSH_PATIENCE_SKILL0	= 5;
+float AMBUSH_PATIENCE_SKILL1	= 8;
+float AMBUSH_PATIENCE_SKILL2	= 12;
+float AMBUSH_PATIENCE_SKILL3	= 18;
+
+// combat states (state machine)
+float CSTATE_NONE	= 0;	// not in combat
+float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
+float CSTATE_RETREAT	= 2;	// outgunned, falling back
+float CSTATE_PRESSURE	= 3;	// enemy weak, pushing for the kill
+float CSTATE_FLANK	= 4;	// circling to get splash angle
+
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
@@ -282,6 +346,33 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
+// bot_think.qc — opponent modeling, team coordination, utility scoring, threat assessment
+void() bot_opp_model_update;
+void() bot_opp_model_reset;
+float(entity foe) bot_team_fighting_enemy;
+entity() bot_nearest_teammate;
+float(entity foe) bot_teammate_retreating_from;
+float() bot_util_fight;
+float() bot_util_retreat;
+float() bot_util_pressure;
+float() bot_util_flank;
+float(entity e) bot_size_player;
+void() bot_dodge_stuff;
+vector(float wep) weapon_range;
+float() bot_enemy_near_wall;
+
+// bot_shoot.qc — weapon scoring, switching, shooting
+float(float wep, float brange) bot_weapon_score;
+void(float brange) bot_weapon_switch;
+void() bot_shoot;
+
+// bot_fight.qc — combat movement and state machine
+void() bot_combat_strafe;
+void() bot_retreat;
+void() bot_pressure_move;
+void() bot_flank_move;
+void() bot_fight_style;
+void(float scope) bot_look_for_crap;
 
 // editor stuffs
 
@@ -975,6 +1066,10 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	else if (whatskill < 0)
 		whatskill = 0;
 	self.b_skill = whatskill;
+
+	// assign random personality for varied playstyles
+	f = floor(random() * 4);
+	self.b_personality = f;
 
 	if (teamplay && !coop)
 	{

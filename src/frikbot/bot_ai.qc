@@ -161,6 +161,7 @@ void(entity targ, float success) bot_lost =
 		self.last_way = FindWayPoint(self.current_way);
 		ClearMyRoute();
 		self.b_aiflags = 0;
+		self.b_ambush_time = 0;
 	}
         else
         {
@@ -423,9 +424,14 @@ void() bot_handle_ai =
 		// simple, but effective
 		// this can probably be used for a lot of different
 		// things, not just trains (door elevators come to mind)
+
+		// keep search_time alive while riding
+		if (self.search_time < time + 3)
+			self.search_time = time + 3;
+
 		b_temp3 = self;
 		self = self.last_way;
-	
+
 		if (!frik_recognize_plat(FALSE)) // if there is nothing there now
 		{
 			self = b_temp3;
@@ -453,6 +459,9 @@ void() bot_handle_ai =
 		newt = FindThing("plat");
 		if (newt.state != 1)
 		{
+			// keep search_time alive while waiting for plat
+			if (self.search_time < time + 3)
+				self.search_time = time + 3;
 			v =  self.origin - realorigin(newt);
 			v_z = 0;
 			if (vlen(v) > 96)
@@ -480,8 +489,39 @@ void() bot_handle_ai =
 	if (self.b_aiflags & AI_AMBUSH)
 	{
 		self.b_aiflags = (self.b_aiflags | AI_WAIT) - AI_AMBUSH;
-		// FIXME: Add a switch to wep command
-		// FIXME: increase delay?
+
+		// ready best weapon while waiting
+		bot_weapon_switch(-1);
+
+		// extend patience based on skill
+		if (self.b_skill == 0)
+			self.search_time = time + AMBUSH_PATIENCE_SKILL0;
+		else if (self.b_skill == 1)
+			self.search_time = time + AMBUSH_PATIENCE_SKILL1;
+		else if (self.b_skill == 2)
+			self.search_time = time + AMBUSH_PATIENCE_SKILL2;
+		else
+			self.search_time = time + AMBUSH_PATIENCE_SKILL3;
+
+		// personality: campers are patient, aggressive bots get bored
+		if (self.b_personality == PERSONALITY_CAMPER)
+			self.search_time = self.search_time + (self.search_time - time) * 0.5;
+		else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			self.search_time = time + (self.search_time - time) * 0.6;
+
+		self.b_ambush_time = time;
+
+		// face the most likely approach direction (toward first linked waypoint)
+		if (self.last_way)
+		{
+			if (self.last_way.target1 && self.last_way.target1.classname == "waypoint")
+			{
+				v = normalize(self.last_way.target1.origin - self.origin);
+				v = vectoangles(v);
+				v_x = v_x * -1;
+				self.b_angle = v;
+			}
+		}
 	}
 
 };
@@ -606,9 +646,48 @@ the bot finds things it wants to kill/grab.
 
 float(entity thing) priority_for_thing =
 {
-	local float thisp;
+	local float thisp, time_left, awareness, urgency;
+	local vector dv;
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
+
+	// skill 2+: anticipate item respawns by positioning near items about to reappear
+	// human emulation: imprecise timing — skill 3 arrives ~3s early,
+	// skill 2 has wider window but sometimes arrives too early or late
+	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 2)
+	{
+		time_left = thing.nextthink - time;
+		if (thing.nextthink > 0 && time_left > 0)
+		{
+			// skill 3: ~3s window, skill 2: ~8s window (arrives too early sometimes)
+			if (self.b_skill >= 3)
+				awareness = 3;
+			else
+				awareness = 8;
+
+			if (time_left < awareness)
+			{
+				// scale priority by how close to respawn (avoid camping forever)
+				urgency = 1.0 - (time_left / awareness);
+
+				if (thing.classname == "item_artifact_super_damage")
+					return 40 + urgency * 40;
+				else if (thing.classname == "item_artifact_invulnerability")
+					return 40 + urgency * 40;
+				else if (thing.classname == "item_artifact_invisibility")
+					return 35 + urgency * 40;
+				else if (thing.classname == "item_health")
+				{
+					if (thing.spawnflags & 2) // megahealth
+						return 30 + urgency * 35;
+				}
+				else if (thing.classname == "item_armorInv")
+					return 25 + urgency * 30;
+				else if (thing.classname == "item_armor2")
+					return 20 + urgency * 25;
+			}
+		}
+	}
 
 	if ((thing.flags & FL_ITEM) && thing.model != string_null && thing.search_time < time)
 	{
@@ -617,59 +696,6 @@ float(entity thing) priority_for_thing =
                 if (thing._last != self)
                         thisp = 20;
 		//~ ai fix start
-		/* 					 
-		if (thing.classname == "item_artifact_super_damage")
-			thisp = 65;
-		else if (thing.classname == "item_artifact_invulnerability")
-			thisp = 65;
-		else if (thing.classname == "item_health")
-		{
-			if (thing.spawnflags & 2)
-				thisp = 55;
-			if (self.health < 40)
-				thisp = thisp + 50;
-		}
-		else if (thing.model == "progs/armor.mdl")
-		{
-			if (self.armorvalue < 200)
-			{		
-				if (thing.skin == 2)
-					thisp = 60;
-				else if (self.armorvalue < 100)			
-					thisp = thisp + 25;
-			}
-		}
-		else if (thing.classname == "weapon_supershotgun")
-		{
-			if (!(self.items & 2)) // IT_SUPER_SHOTGUN  
-				thisp = 25;
-		}
-		else if (thing.classname == "weapon_nailgun")
-		{
-			if (!(self.items & 4)) // IT_NAILGUN 
-				thisp = 30;
-		}
-		else if (thing.classname == "weapon_supernailgun")
-		{
-			if (!(self.items & 8)) // IT_SUPER_NAILGUN
-				thisp = 35;
-		}
-		else if (thing.classname == "weapon_grenadelauncher")
-		{
-			if (!(self.items & 16)) // IT_GRENADE_LAUNCHER
-				thisp = 45;
-		}
-		else if (thing.classname == "weapon_rocketlauncher")
-		{
-			if (!(self.items & 32)) // IT_ROCKET_LAUNCHER
-				thisp = 60;
-		}
-		else if (thing.classname == "weapon_lightning")
-		{
-			if (!(self.items & 64)) // IT_LIGHTNING
-				thisp = 50;
-		}
-		*/
 		if (thing.classname == "item_artifact_super_damage")
 			thisp = 10*(random()) + 55;
 		else if (thing.classname == "item_artifact_invulnerability")
@@ -729,6 +755,43 @@ float(entity thing) priority_for_thing =
 			thisp = 45;
 		else if (thing.classname == "item_artifact_envirosuit")
 			thisp = 30;
+
+		// skill 1+: loadout-aware adjustments
+		if (self.b_skill >= 1 && thisp > 0)
+		{
+			// weapons we already own are still worth picking up for ammo
+			if (thing.classname == "weapon_rocketlauncher" && (self.items & 32))
+			{
+				if (self.ammo_rockets < 5)
+					thisp = 40; // need rockets badly
+			}
+			else if (thing.classname == "weapon_lightning" && (self.items & 64))
+			{
+				if (self.ammo_cells < 10)
+					thisp = 35;
+			}
+			else if (thing.classname == "weapon_supernailgun" && (self.items & 8))
+			{
+				if (self.ammo_nails < 20)
+					thisp = 30;
+			}
+
+			// reduce health priority when healthy
+			if (thing.classname == "item_health" && !(thing.spawnflags & 2))
+			{
+				if (self.health >= 90)
+					thisp = thisp * 0.3;
+			}
+
+			// boost ammo backpacks when running low on primary ammo
+			if (thing.model == "progs/backpack.mdl")
+			{
+				if (self.ammo_rockets < 3 && (self.items & 32))
+					thisp = thisp + 15;
+				else if (self.ammo_cells < 5 && (self.items & 64))
+					thisp = thisp + 10;
+			}
+		}
 	}
 	//~ ai fix end
 	else if ((thing.flags & FL_MONSTER) && thing.health > 0)
@@ -756,19 +819,89 @@ float(entity thing) priority_for_thing =
 					if (thing.target1.classname == "player")
 						return 0;
 				}
-				else thisp = 30;
+				else
+			{
+				thisp = 30;
+				// skill 2+ opponent model: de-prioritize enemies we're losing to
+				if (self.b_skill >= 2 && self.b_opp_ent == thing)
+				{
+					if (self.b_opp_aggro > 0.7 && self.health < 50)
+						thisp = thisp * 0.6;	// scary enemy, avoid
+				}
+				// team coordination: focus fire + help retreating teammates
+				if (teamplay && self.b_skill >= 1)
+				{
+					// boost priority if teammate is already fighting this enemy
+					if (bot_team_fighting_enemy(thing) >= 1)
+						thisp = thisp + 15;
+					// strong boost if teammate is retreating from this enemy
+					if (bot_teammate_retreating_from(thing))
+						thisp = thisp + 25;
+				}
+			}
 			}
 		}
 	}
 	else if (thing.classname == "waypoint")
 	{
 		if (thing.b_aiflags & AI_SNIPER)
-			thisp = 45; //~ ai fix
+			thisp = 45;
 		else if (thing.b_aiflags & AI_AMBUSH)
 			thisp = 30;
+
+		// skill 2+: map control - prefer high ground and power positions when well-armed
+		if (self.b_skill >= 2 && thisp > 0)
+		{
+			if ((self.items & 32) && self.ammo_rockets >= 3) // have RL + ammo
+			{
+				// high ground bonus: waypoints above current position
+				if ((thing.origin_z - self.origin_z) > 64)
+					thisp = thisp + 10;
+
+				// extra value for sniper/ambush spots when armed
+				if (thing.b_aiflags & AI_SNIPER)
+					thisp = thisp + 10;
+				else if (thing.b_aiflags & AI_AMBUSH)
+					thisp = thisp + 8;
+			}
+		}
 	}
 	if (pointcontents(thing.origin) < -3)
 		return 0;
+
+	// personality-based priority adjustments
+	if (thisp > 0)
+	{
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		{
+			// aggressive: values weapons and players more, health/armor less
+			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
+				thisp = thisp + 15;
+			if (thing.flags & FL_ITEM)
+			{
+				if (thing.model == "progs/armor.mdl" || thing.classname == "item_health")
+					thisp = thisp * 0.8;
+			}
+		}
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		{
+			// defensive: values health and armor more, avoids players
+			if (thing.classname == "item_health" || thing.model == "progs/armor.mdl")
+				thisp = thisp + 10;
+			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
+				thisp = thisp * 0.7;
+		}
+		else if (self.b_personality == PERSONALITY_CAMPER)
+		{
+			// camper: loves ambush/sniper waypoints
+			if (thing.classname == "waypoint")
+			{
+				if (thing.b_aiflags & (AI_SNIPER | AI_AMBUSH))
+					thisp = thisp + 15;
+			}
+		}
+	}
+
 	if (thisp)
 	{
 		if (thing.current_way)
@@ -777,9 +910,34 @@ float(entity thing) priority_for_thing =
 			if (thing.current_way.items == -1)
 				return 0;
 			else
-				thisp = thisp + (13000 - thing.current_way.items) * 0.05; 
+				thisp = thisp + (13000 - thing.current_way.items) * 0.05;
 		}
-	} 		
+
+		// skill 1+: penalize areas near recent deaths (danger zones)
+		// death memory fades over 60 seconds
+		// uses squared distance (65536 = 256^2) to avoid sqrt in this hot path
+		if (self.b_skill >= 1 && self.b_death1 != '0 0 0')
+		{
+			dv = thing.origin - self.b_death1;
+			if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
+			{
+				if ((time - self.b_death_time) < 60)
+					thisp = thisp * 0.5;
+			}
+			if (self.b_death2 != '0 0 0')
+			{
+				dv = thing.origin - self.b_death2;
+				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
+					thisp = thisp * 0.7;
+			}
+			if (self.b_death3 != '0 0 0')
+			{
+				dv = thing.origin - self.b_death3;
+				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
+					thisp = thisp * 0.85;
+			}
+		}
+	}
 	return thisp;
 };
 
@@ -838,8 +996,10 @@ generally making the bot look good.
 void() bot_angle_set =
 {
 	local float h;
-	local vector view;
-	
+	local vector view, pred_vel, foe_fwd, foe_right;
+	local float aim_error, espeed, decay, glance_chance, glance_interval;
+	local float drift_sin;
+
 	if (self.enemy)
 	{
 		if (self.enemy.items & 524288)
@@ -847,27 +1007,86 @@ void() bot_angle_set =
 				return;
 		if (self.missile_speed == 0)
 			self.missile_speed = 10000;
+
+		// track how long we've been aiming at this enemy
+		if (self.b_aim_delay == 0)
+		{
+			self.b_aim_delay = time;
+			// initial aim offset based on skill
+			// skill 0: 25 degrees, skill 1: 15, skill 2: 8, skill 3: 3
+			if (self.b_skill == 0)
+				self.b_aim_offset = 25;
+			else if (self.b_skill == 1)
+				self.b_aim_offset = 15;
+			else if (self.b_skill == 2)
+				self.b_aim_offset = 8;
+			else
+				self.b_aim_offset = 3;
+
+			// human emulation: flick overshoot on target acquisition
+			// humans snap past the target then settle back
+			// generates a directional bias that decays over ~0.3s
+			if (self.b_skill >= 2)
+				self.b_aim_flick = (random() - 0.5) * 8;
+			else
+				self.b_aim_flick = (random() - 0.5) * 16;
+			self.b_aim_drift_phase = random() * 6.28;
+		}
+
 		if (self.enemy.solid == SOLID_BSP)
 		{
-			view = (((self.enemy.absmin + self.enemy.absmax) * 0.5) - self.origin);
+			view = realorigin(self.enemy) - self.origin;
 		}
 		else
 		{
-		
 			local float levels;
-			
+
 			levels = 3;
-			
+
 			view = self.enemy.origin;
-			
+			pred_vel = self.enemy.velocity;
+
+			// skill 2+ with opponent model: enhance velocity prediction
+			// for projectile weapons using behavioral tendencies
+			if (self.b_skill >= 2 && self.missile_speed < 2000
+				&& self.b_opp_ent == self.enemy)
+			{
+				// get enemy's facing direction for lateral prediction
+				foe_fwd = normalize(self.origin - self.enemy.origin);
+				foe_right_x = foe_fwd_y * -1;
+				foe_right_y = foe_fwd_x;
+				foe_right_z = 0;
+
+				// strafe tendency: blend model prediction into velocity
+				// b_opp_strafe ranges -1 to +1, scale to movement speed
+				if (self.b_opp_strafe > 0.15 || self.b_opp_strafe < -0.15)
+				{
+					// weight: 30% model, 70% current velocity
+					// this smoothly corrects for direction changes
+					pred_vel = pred_vel + foe_right * self.b_opp_strafe * 100;
+				}
+
+				// aggression: rushing enemies close distance faster
+				if (self.b_opp_aggro > 0.65)
+				{
+					// enemy is aggressive — they'll push toward us
+					pred_vel = pred_vel + foe_fwd * 40;
+				}
+				else if (self.b_opp_aggro < 0.3)
+				{
+					// enemy is retreating — they'll move away
+					pred_vel = pred_vel - foe_fwd * 30;
+				}
+			}
+
 			while (levels)
 			{
 				h = vlen(view - self.origin) / self.missile_speed;
 				if (self.enemy.flags & FL_ONGROUND)
-					view = self.enemy.velocity * h + '0 0 -20';
+					view = pred_vel * h + '0 0 -20';
 				else
-					view = (self.enemy.velocity - (sv_gravity * '0 0 1') * h) * h;
-				view = self.enemy.origin + view; 
+					view = (pred_vel - (sv_gravity * '0 0 1') * h) * h;
+				view = self.enemy.origin + view;
 				traceline(self.enemy.origin, view, FALSE, self);
 				view = trace_endpos;
 				levels = levels - 1;
@@ -876,24 +1095,178 @@ void() bot_angle_set =
 		}
 		view = vectoangles(view);
 		view_x = view_x * -1;
+
+		// apply aim variance based on skill
+		// aim_offset converges toward a floor over time
+
+		// convergence rate: skill 3 converges in ~0.2s, skill 0 in ~1.5s
+		// decay is clamped to 0.95 to prevent sign flip at very low framerates
+		if (self.b_skill == 0)
+			decay = real_frametime * 0.7;
+		else if (self.b_skill == 1)
+			decay = real_frametime * 1.5;
+		else if (self.b_skill == 2)
+			decay = real_frametime * 3.0;
+		else
+			decay = real_frametime * 5.0;
+		if (decay > 0.95)
+			decay = 0.95;
+		self.b_aim_offset = self.b_aim_offset * (1 - decay);
+
+		// floor: minimum persistent jitter per skill
+		// skill 0: 6 degrees, skill 1: 3, skill 2: 1.5, skill 3: 0.5
+		if (self.b_skill == 0)
+		{	if (self.b_aim_offset < 6) self.b_aim_offset = 6; }
+		else if (self.b_skill == 1)
+		{	if (self.b_aim_offset < 3) self.b_aim_offset = 3; }
+		else if (self.b_skill == 2)
+		{	if (self.b_aim_offset < 1.5) self.b_aim_offset = 1.5; }
+		else
+		{	if (self.b_aim_offset < 0.5) self.b_aim_offset = 0.5; }
+
+		// tracking error: fast-moving enemies add offset for low skill
+		// scaled by frametime so it's frame-rate independent
+		espeed = vlen(self.enemy.velocity);
+		if (espeed > 200)
+		{
+			if (self.b_skill == 0)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.008 * real_frametime * 10;
+			else if (self.b_skill == 1)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.004 * real_frametime * 10;
+			else if (self.b_skill == 2)
+				self.b_aim_offset = self.b_aim_offset + espeed * 0.001 * real_frametime * 10;
+		}
+
+		// cap aim offset to prevent wild spraying
+		if (self.b_aim_offset > 30)
+			self.b_aim_offset = 30;
+
+		// skill 3 opponent model: bias aim toward enemy strafe tendency
+		// for hitscan weapons only (projectiles use velocity prediction above)
+		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy
+			&& self.missile_speed >= 2000)
+		{
+			if (self.b_opp_strafe > 0.2 || self.b_opp_strafe < -0.2)
+			{
+				view_y = view_y - self.b_opp_strafe * 3;
+			}
+		}
+
+		// --- human emulation: aim behavior ---
+
+		// 1. flick overshoot: decays toward 0 over ~0.3s
+		// creates the "snap past target, settle back" pattern
+		if (self.b_aim_flick != 0)
+		{
+			view_y = view_y + self.b_aim_flick;
+			// decay flick: fast exponential
+			self.b_aim_flick = self.b_aim_flick * (1 - real_frametime * 4);
+			if (fabs(self.b_aim_flick) < 0.3)
+				self.b_aim_flick = 0;
+		}
+
+		// 2. tracking drift: slow sine wave wobble
+		// simulates imperfect mouse tracking (humans drift off target)
+		self.b_aim_drift_phase = self.b_aim_drift_phase + real_frametime * 1.8;
+		if (self.b_aim_drift_phase > 6.28)
+			self.b_aim_drift_phase = self.b_aim_drift_phase - 6.28;
+		// compute sin via makevectors (no sin builtin in standard QuakeC)
+		makevectors(self.b_aim_drift_phase * 57.2958 * '0 1 0');
+		drift_sin = v_forward_y;
+		if (self.b_skill <= 1)
+			view_y = view_y + drift_sin * 2.5;
+		else if (self.b_skill == 2)
+			view_y = view_y + drift_sin * 1.0;
+		else
+			view_y = view_y + drift_sin * 0.4;
+
+		// 3. overcorrection: correlated jitter
+		// if last frame's error was right, this frame tends left (and vice versa)
+		// creates the "wiggle around target" look instead of random scatter
+		aim_error = self.b_aim_offset;
+		view_y = view_y + (random() - 0.5) * aim_error - self.b_aim_last_yaw_err * 0.3;
+		view_x = view_x + (random() - 0.5) * aim_error;
+		self.b_aim_last_yaw_err = view_y - self.b_angle_y;
+
 		self.b_angle = view;
 	}
 	else if (self.target1)
 	{
+		// no enemy - reset aim tracking
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
+
 		view = realorigin(self.target1);
 		if (self.target1.flags & FL_ITEM)
 				view = view + '0 0 48';
 		view = view - (self.origin + self.view_ofs);
 		view = vectoangles(view);
 		view_x = view_x * -1;
+
+		// human emulation: slight yaw overshoot during navigation turns
+		// humans don't snap perfectly to new waypoint directions
+		view_y = view_y + (random() - 0.5) * 5;
+
+		// idle glance: occasionally look to one side while navigating
+		// simulates checking flanks, glancing at doorways, general awareness
+		if (self.b_idle_glance_yaw != 0)
+		{
+			// currently glancing — blend toward glance target then snap back
+			view_y = view_y + self.b_idle_glance_yaw;
+			// decay the glance over ~0.4s
+			self.b_idle_glance_yaw = self.b_idle_glance_yaw * (1 - real_frametime * 3);
+			if (fabs(self.b_idle_glance_yaw) < 2)
+				self.b_idle_glance_yaw = 0;
+		}
+		else if (time > self.b_idle_glance_time)
+		{
+			// time to maybe glance somewhere
+			// personality scaling: campers glance often, aggressive rarely
+			if (self.b_personality == PERSONALITY_CAMPER)
+			{	glance_chance = 0.4; glance_interval = 2 + random() * 3; }
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			{	glance_chance = 0.3; glance_interval = 3 + random() * 4; }
+			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			{	glance_chance = 0.1; glance_interval = 5 + random() * 5; }
+			else
+			{	glance_chance = 0.2; glance_interval = 3 + random() * 5; }
+
+			if (random() < glance_chance)
+			{
+				// pick a side — mostly small checks, rarely a full look-behind
+				if (random() < 0.85)
+				{
+					// normal glance: 30-70 degrees to one side
+					if (random() < 0.5)
+						self.b_idle_glance_yaw = 30 + random() * 40;
+					else
+						self.b_idle_glance_yaw = -30 - random() * 40;
+				}
+				else
+				{
+					// rare check-behind: quick 130-170 degree look
+					if (random() < 0.5)
+						self.b_idle_glance_yaw = 130 + random() * 40;
+					else
+						self.b_idle_glance_yaw = -130 - random() * 40;
+				}
+			}
+			self.b_idle_glance_time = time + glance_interval;
+		}
+
 		self.b_angle = view;
 	}
 	else
+	{
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
 		self.b_angle_x = 0;
-	// HACK HACK HACK HACK
-	// The bot falls off ledges a lot because of "turning around"
-	// so let the bot use instant turn around when not hunting a player
-	if (self.b_skill == 3)
+	}
+
+	// apply view angles based on skill
+	// all skills now use direct angle setting (aim variance handles humanization)
+	// skill 0-1 still use keyboard look for the "sluggish" feel
+	if (self.b_skill >= 2)
 	{
 		self.keys = self.keys & 63;
 		self.v_angle = self.b_angle;
@@ -901,10 +1274,10 @@ void() bot_angle_set =
 			self.v_angle_x = self.v_angle_x + 360;
 		while (self.v_angle_x > 180)
 			self.v_angle_x = self.v_angle_x - 360;
-
 	}
 	else if ((self.enemy == world || self.enemy.movetype == MOVETYPE_PUSH) && self.target1.classname != "player")
 	{
+		// no combat target - instant turn (prevents falling off ledges)
 		self.keys = self.keys & 63;
 		self.v_angle = self.b_angle;
 		while (self.v_angle_x < -180)
@@ -912,8 +1285,9 @@ void() bot_angle_set =
 		while (self.v_angle_x > 180)
 			self.v_angle_x = self.v_angle_x - 360;
 	}
-	else if (self.b_skill < 2) // skill 2 handled in bot_phys
+	else
 	{
+		// skill 0-1 in combat: keyboard turning (sluggish tracking)
 		if (self.b_angle_x > 180)
 			self.b_angle_x = self.b_angle_x - 360;
 		self.keys = self.keys & 63;
@@ -943,12 +1317,26 @@ float stagger_think;
 
 void() BotAI =
 {
+	local float jump_chance, snd_dist, snd_best;
+	local entity snd_foe;
+	local vector snd_view;
+
 	// am I dead? Fire randomly until I respawn
 	// health < 1 is used because fractional healths show up as 0 on normal player
 	// status bars, and the mod probably already compensated for that
 
 	if (self.health < 1)
-	{ 
+	{
+		// record death location once per death (skill 1+)
+		// only record if last death was more than 2s ago (new death)
+		if ((time - self.b_death_time) > 2 && self.b_skill >= 1)
+		{
+			self.b_death3 = self.b_death2;
+			self.b_death2 = self.b_death1;
+			self.b_death1 = self.origin;
+			self.b_death_time = time;
+		}
+
 		self.button0 = floor(random() * 2);
 		self.button2 = 0;
 		self.keys = 0;
@@ -956,9 +1344,27 @@ void() BotAI =
 		ClearMyRoute();
 		self.target1 = self.target2 = self.target3 = self.target4 = self.enemy = world;
 		self.last_way = world;
+		self.b_aim_delay = 0;
+		self.b_aim_offset = 0;
+		self.b_strafe_dir = 0;
+		self.b_retreat = 0;
+		self.b_ambush_time = 0;
+		self.b_bhop_land = 0;
+		self.b_combat_state = CSTATE_NONE;
+		self.b_los_time = 0;
+		self.b_combo_time = 0;
+		self.b_aim_flick = 0;
+		self.b_aim_last_yaw_err = 0;
+		self.b_react_time = 0;
+		self.b_wep_commit_time = 0;
+		self.b_bhop_fumble = 0;
+		self.b_idle_glance_yaw = 0;
+		self.b_idle_glance_time = 0;
+		self.b_idle_jump_time = 0;
+		bot_opp_model_reset();
 		return;
 	}
-		
+
 	// stagger the bot's AI out so they all don't think at the same time, causing game
 	// 'spikes'
 	if (self.b_skill < 2)
@@ -1037,9 +1443,67 @@ void() BotAI =
 	// FIXME
 	if (self.enemy)
 		bot_fight_style();
-	else if (random() < 0.2)
+	else
+	{
 		if (random() < 0.2)
-			bot_weapon_switch(-1);
+			if (random() < 0.2)
+				bot_weapon_switch(-1);
+
+		// idle behavior: recreational jumping while navigating
+		// quake players hop around for fun, especially aggressive ones
+		if (self.target1 && self.flags & FL_ONGROUND && time > self.b_idle_jump_time)
+		{
+			if (self.b_personality == PERSONALITY_AGGRESSIVE)
+				jump_chance = 0.25;
+			else if (self.b_personality == PERSONALITY_CAMPER)
+				jump_chance = 0.03;
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+				jump_chance = 0.08;
+			else
+				jump_chance = 0.12;
+
+			if (random() < jump_chance)
+				self.button2 = TRUE;
+
+			self.b_idle_jump_time = time + 0.8 + random() * 2;
+		}
+
+		// skill 1+: pre-aim toward nearby sounds when idle
+		if (self.b_skill >= 1)
+		{
+			// personality: campers are hyper-aware, aggressive have tunnel vision
+			// uses squared distances to avoid sqrt in this loop
+			if (self.b_personality == PERSONALITY_CAMPER)
+				snd_best = 1000000;	// 1000^2
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+				snd_best = 810000;	// 900^2
+			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+				snd_best = 360000;	// 600^2
+			else
+				snd_best = 640000;	// 800^2
+			snd_foe = player_head;
+			while (snd_foe)
+			{
+				if (snd_foe != self && snd_foe.health > 0 && snd_foe.b_sound > time)
+				{
+					if (!(teamplay && snd_foe.team == self.team) && !coop)
+					{
+						snd_view = snd_foe.origin - self.origin;
+						snd_dist = snd_view_x * snd_view_x + snd_view_y * snd_view_y + snd_view_z * snd_view_z;
+						if (snd_dist < snd_best)
+						{
+							snd_best = snd_dist;
+							snd_view = normalize(snd_foe.origin - self.origin);
+							snd_view = vectoangles(snd_view);
+							snd_view_x = snd_view_x * -1;
+							self.b_angle = snd_view;
+						}
+					}
+				}
+				snd_foe = snd_foe._next;
+			}
+		}
+	}
 	bot_dodge_stuff();
 
 	// checks to see if bot needs to start going up for air
