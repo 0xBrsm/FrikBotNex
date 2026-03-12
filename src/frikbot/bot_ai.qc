@@ -480,8 +480,34 @@ void() bot_handle_ai =
 	if (self.b_aiflags & AI_AMBUSH)
 	{
 		self.b_aiflags = (self.b_aiflags | AI_WAIT) - AI_AMBUSH;
-		// FIXME: Add a switch to wep command
-		// FIXME: increase delay?
+
+		// ready best weapon while waiting
+		bot_weapon_switch(-1);
+
+		// extend patience based on skill
+		// skill 0: 5s, skill 1: 8s, skill 2: 12s, skill 3: 18s
+		if (self.b_skill == 0)
+			self.search_time = time + 5;
+		else if (self.b_skill == 1)
+			self.search_time = time + 8;
+		else if (self.b_skill == 2)
+			self.search_time = time + 12;
+		else
+			self.search_time = time + 18;
+
+		self.b_ambush_time = time;
+
+		// face the most likely approach direction (toward first linked waypoint)
+		if (self.last_way)
+		{
+			if (self.last_way.target1 && self.last_way.target1.classname == "waypoint")
+			{
+				v = normalize(self.last_way.target1.origin - self.origin);
+				v = vectoangles(v);
+				v_x = v_x * -1;
+				self.b_angle = v;
+			}
+		}
 	}
 
 };
@@ -1035,6 +1061,7 @@ void() BotAI =
 		self.b_aim_offset = 0;
 		self.b_strafe_dir = 0;
 		self.b_retreat = 0;
+		self.b_ambush_time = 0;
 		return;
 	}
 		

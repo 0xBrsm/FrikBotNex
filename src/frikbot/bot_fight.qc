@@ -184,7 +184,8 @@ void() bot_dodge_stuff =
 							tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
 							if (tsz < foesz)
 							{
-								if (fov(foe) || foe.b_sound > time || self.b_skill == 3)
+								// ambush: 360-degree awareness, skip FOV check
+								if (self.b_ambush_time > 0 || fov(foe) || foe.b_sound > time || self.b_skill == 3)
 								{
 									if (fisible(foe))
 									{
@@ -199,6 +200,31 @@ void() bot_dodge_stuff =
 			}
 			foe = foe._next;
 		}
+	}
+
+	// ambush first-strike: if we just spotted an enemy from ambush,
+	// snap to target and fire immediately
+	if (self.b_ambush_time > 0 && self.enemy)
+	{
+		// snap aim toward enemy
+		v = normalize(realorigin(self.enemy) - self.origin);
+		v = vectoangles(v);
+		v_x = v_x * -1;
+		self.b_angle = v;
+
+		// skill 1+: instant snap aim for first shot
+		if (self.b_skill >= 1)
+		{
+			self.v_angle = v;
+		}
+
+		// fire immediately
+		bot_weapon_switch(vlen(realorigin(self.enemy) - self.origin));
+		bot_shoot();
+
+		// clear ambush state - we've been spotted
+		self.b_ambush_time = 0;
+		self.b_aiflags = self.b_aiflags - (self.b_aiflags & AI_WAIT);
 	}
 };
 

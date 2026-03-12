@@ -4,7 +4,7 @@
 - [x] Situational weapon selection (ammo, enemy health, splash near walls)
 - [x] Strafe/dodge patterns during fights
 - [x] Retreat-when-weak behavior
-- [ ] Ambush positioning
+- [x] Ambush positioning
 - [x] Human-like aim variance (interpolated tracking styles per skill level)
 
 ## Movement
