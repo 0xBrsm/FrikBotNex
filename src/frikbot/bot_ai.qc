@@ -494,15 +494,14 @@ void() bot_handle_ai =
 		bot_weapon_switch(-1);
 
 		// extend patience based on skill
-		// skill 0: 5s, skill 1: 8s, skill 2: 12s, skill 3: 18s
 		if (self.b_skill == 0)
-			self.search_time = time + 5;
+			self.search_time = time + AMBUSH_PATIENCE_SKILL0;
 		else if (self.b_skill == 1)
-			self.search_time = time + 8;
+			self.search_time = time + AMBUSH_PATIENCE_SKILL1;
 		else if (self.b_skill == 2)
-			self.search_time = time + 12;
+			self.search_time = time + AMBUSH_PATIENCE_SKILL2;
 		else
-			self.search_time = time + 18;
+			self.search_time = time + AMBUSH_PATIENCE_SKILL3;
 
 		// personality: campers are patient, aggressive bots get bored
 		if (self.b_personality == PERSONALITY_CAMPER)

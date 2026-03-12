@@ -191,6 +191,12 @@ float PERSONALITY_AGGRESSIVE	= 1;
 float PERSONALITY_DEFENSIVE	= 2;
 float PERSONALITY_CAMPER	= 3;
 
+// ambush patience by skill level (seconds)
+float AMBUSH_PATIENCE_SKILL0	= 5;
+float AMBUSH_PATIENCE_SKILL1	= 8;
+float AMBUSH_PATIENCE_SKILL2	= 12;
+float AMBUSH_PATIENCE_SKILL3	= 18;
+
 // combat states (state machine)
 float CSTATE_NONE	= 0;	// not in combat
 float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
@@ -1063,7 +1069,6 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 	// assign random personality for varied playstyles
 	f = floor(random() * 4);
-	if (f > 3) f = 3;
 	self.b_personality = f;
 
 	if (teamplay && !coop)
