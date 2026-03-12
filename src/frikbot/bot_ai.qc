@@ -504,6 +504,12 @@ void() bot_handle_ai =
 		else
 			self.search_time = time + 18;
 
+		// personality: campers are patient, aggressive bots get bored
+		if (self.b_personality == PERSONALITY_CAMPER)
+			self.search_time = self.search_time + (self.search_time - time) * 0.5;
+		else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			self.search_time = time + (self.search_time - time) * 0.6;
+
 		self.b_ambush_time = time;
 
 		// face the most likely approach direction (toward first linked waypoint)
@@ -1464,7 +1470,15 @@ void() BotAI =
 			local entity snd_foe;
 			local float snd_dist, snd_best;
 			local vector snd_view;
-			snd_best = 800; // max sound awareness range
+			// personality: campers are hyper-aware, aggressive have tunnel vision
+			if (self.b_personality == PERSONALITY_CAMPER)
+				snd_best = 1000;
+			else if (self.b_personality == PERSONALITY_DEFENSIVE)
+				snd_best = 900;
+			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+				snd_best = 600;
+			else
+				snd_best = 800;
 			snd_foe = player_head;
 			while (snd_foe)
 			{
