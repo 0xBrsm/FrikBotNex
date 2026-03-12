@@ -424,10 +424,6 @@ float() bot_util_pressure =
 			score = score + 10;	// teammate softening them up
 	}
 
-	// only skill 1+ can pressure
-	if (self.b_skill < 1)
-		score = 0;
-
 	if (score < 0) score = 0;
 	if (score > 100) score = 100;
 	return score;
@@ -461,10 +457,6 @@ float() bot_util_flank =
 	// we have rockets
 	if (self.weapon == 32 && self.ammo_rockets >= 3)
 		score = score + 10;
-
-	// skill 2+ only
-	if (self.b_skill < 2)
-		return 0;
 
 	// personality
 	if (self.b_personality == PERSONALITY_CAMPER)
