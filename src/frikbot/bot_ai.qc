@@ -648,6 +648,7 @@ the bot finds things it wants to kill/grab.
 float(entity thing) priority_for_thing =
 {
 	local float thisp, time_left, awareness, urgency;
+	local vector dv;
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
 
@@ -918,7 +919,6 @@ float(entity thing) priority_for_thing =
 		// uses squared distance (65536 = 256^2) to avoid sqrt in this hot path
 		if (self.b_skill >= 1 && self.b_death1 != '0 0 0')
 		{
-			local vector dv;
 			dv = thing.origin - self.b_death1;
 			if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
 			{
@@ -998,7 +998,7 @@ void() bot_angle_set =
 {
 	local float h;
 	local vector view, pred_vel, foe_fwd, foe_right;
-	local float aim_error, espeed;
+	local float aim_error, espeed, decay, glance_chance, glance_interval;
 
 	if (self.enemy)
 	{
@@ -1101,7 +1101,6 @@ void() bot_angle_set =
 
 		// convergence rate: skill 3 converges in ~0.2s, skill 0 in ~1.5s
 		// decay is clamped to 0.95 to prevent sign flip at very low framerates
-		local float decay;
 		if (self.b_skill == 0)
 			decay = real_frametime * 0.7;
 		else if (self.b_skill == 1)
@@ -1220,7 +1219,6 @@ void() bot_angle_set =
 		{
 			// time to maybe glance somewhere
 			// personality scaling: campers glance often, aggressive rarely
-			local float glance_chance, glance_interval;
 			if (self.b_personality == PERSONALITY_CAMPER)
 			{	glance_chance = 0.4; glance_interval = 2 + random() * 3; }
 			else if (self.b_personality == PERSONALITY_DEFENSIVE)
@@ -1316,6 +1314,10 @@ float stagger_think;
 
 void() BotAI =
 {
+	local float jump_chance, snd_dist, snd_best;
+	local entity snd_foe;
+	local vector snd_view;
+
 	// am I dead? Fire randomly until I respawn
 	// health < 1 is used because fractional healths show up as 0 on normal player
 	// status bars, and the mod probably already compensated for that
@@ -1448,7 +1450,6 @@ void() BotAI =
 		// quake players hop around for fun, especially aggressive ones
 		if (self.target1 && self.flags & FL_ONGROUND && time > self.b_idle_jump_time)
 		{
-			local float jump_chance;
 			if (self.b_personality == PERSONALITY_AGGRESSIVE)
 				jump_chance = 0.25;
 			else if (self.b_personality == PERSONALITY_CAMPER)
@@ -1467,9 +1468,6 @@ void() BotAI =
 		// skill 1+: pre-aim toward nearby sounds when idle
 		if (self.b_skill >= 1)
 		{
-			local entity snd_foe;
-			local float snd_dist, snd_best;
-			local vector snd_view;
 			// personality: campers are hyper-aware, aggressive have tunnel vision
 			if (self.b_personality == PERSONALITY_CAMPER)
 				snd_best = 1000;
