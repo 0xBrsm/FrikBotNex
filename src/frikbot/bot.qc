@@ -346,6 +346,9 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
+// bot_sense.qc — unified spatial awareness pass
+void() bot_sense;
+
 // bot_think.qc — opponent modeling, team coordination, utility scoring, threat assessment
 void() bot_opp_model_update;
 void() bot_opp_model_reset;

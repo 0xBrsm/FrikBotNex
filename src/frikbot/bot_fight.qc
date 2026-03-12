@@ -388,7 +388,7 @@ void() bot_fight_style =
 		self.b_combo_time = 0;
 		return;
 	}
-	else if (!fisible(self.enemy))
+	else if (!self.sense_enemy_vis)
 	{
 		// skill 1+: grace period before dropping enemy on LOS loss
 		// prevents combat state thrashing when enemy ducks behind corners
@@ -445,16 +445,10 @@ void() bot_fight_style =
 
 	if (foedist > v_y && foedist < v_z)
 	{
-		traceline(self.origin + self.view_ofs, self.origin + self.view_ofs + v_forward * v_z, FALSE, self);
-		if (vlen(trace_endpos - (self.origin + self.view_ofs)) >= v_y)
+		if (foedist >= v_y)
 		{
-			// skip shot if teammate is in the way, but don't freeze movement
-			if (trace_ent.classname == "player")
-			{
-				if (!((trace_ent.team == self.team && teamplay) || (coop)))
-					bot_shoot();
-			}
-			else
+			// skip shot if teammate is in the way (from sense cache)
+			if (!self.sense_friendly_block)
 				bot_shoot();
 
 			// --- RL->LG combo: initiate phase ---

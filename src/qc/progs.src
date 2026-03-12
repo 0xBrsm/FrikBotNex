@@ -10,6 +10,7 @@ defs.qc
 ../waypoints/map_dm6.qc
 
 ../frikbot/bot.qc
+../frikbot/bot_sense.qc
 ../frikbot/bot_way.qc
 ../frikbot/bot_think.qc
 ../frikbot/bot_shoot.qc
