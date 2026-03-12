@@ -808,6 +808,16 @@ float(entity thing) priority_for_thing =
 					if (self.b_opp_aggro > 0.7 && self.health < 50)
 						thisp = thisp * 0.6;	// scary enemy, avoid
 				}
+				// team coordination: focus fire + help retreating teammates
+				if (teamplay && self.b_skill >= 1)
+				{
+					// boost priority if teammate is already fighting this enemy
+					if (bot_team_fighting_enemy(thing) >= 1)
+						thisp = thisp + 15;
+					// strong boost if teammate is retreating from this enemy
+					if (bot_teammate_retreating_from(thing))
+						thisp = thisp + 25;
+				}
 			}
 			}
 		}

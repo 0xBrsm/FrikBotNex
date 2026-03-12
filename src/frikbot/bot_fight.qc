@@ -133,6 +133,94 @@ void() bot_opp_model_update =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
+Team Coordination (skill 1+ in teamplay)
+
+Bots share information through entity fields:
+- .enemy tells teammates who you're fighting
+- .b_combat_state tells teammates if you're
+  retreating, pressuring, etc.
+- .health/.armorvalue for teammate strength
+
+Three integration points:
+1. Focus fire: prioritize enemies teammates fight
+2. Help retreating: rush enemies chasing teammates
+3. Retreat toward teammates for crossfire support
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+// count how many teammates are fighting a given enemy
+float(entity foe) bot_team_fighting_enemy =
+{
+	local entity t;
+	local float count;
+
+	if (!teamplay || !foe)
+		return 0;
+
+	count = 0;
+	t = player_head;
+	while (t)
+	{
+		if (t != self && t.team == self.team && t.health > 0)
+		{
+			if (t.enemy == foe && t.enemy.health > 0)
+				count = count + 1;
+		}
+		t = t._next;
+	}
+	return count;
+};
+
+// find nearest visible teammate (for retreat direction bias)
+entity() bot_nearest_teammate =
+{
+	local entity t, best;
+	local float dist, bestdist;
+
+	best = world;
+	bestdist = 100000;
+	t = player_head;
+	while (t)
+	{
+		if (t != self && t.team == self.team && t.health > 0)
+		{
+			dist = vlen(t.origin - self.origin);
+			if (dist < bestdist && dist > 64)
+			{
+				bestdist = dist;
+				best = t;
+			}
+		}
+		t = t._next;
+	}
+	return best;
+};
+
+// check if any teammate is retreating from a given enemy
+float(entity foe) bot_teammate_retreating_from =
+{
+	local entity t;
+
+	if (!teamplay || !foe)
+		return FALSE;
+
+	t = player_head;
+	while (t)
+	{
+		if (t != self && t.team == self.team && t.health > 0)
+		{
+			if (t.enemy == foe && t.b_combat_state == CSTATE_RETREAT)
+				return TRUE;
+		}
+		t = t._next;
+	}
+	return FALSE;
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
 Utility AI — Combat Decision Scoring
 
 Each possible combat action is scored 0-100.
@@ -146,7 +234,7 @@ the binary fight-or-retreat check.
 // how good is staying and fighting right now?
 float() bot_util_fight =
 {
-	local float score, mysz, foesz, health_ratio, wep_adv;
+	local float score, mysz, foesz, health_ratio, wep_adv, allies;
 
 	score = 50;		// baseline: fighting is the default
 
@@ -186,6 +274,16 @@ float() bot_util_fight =
 			score = score + 8;	// they're running, press advantage
 	}
 
+	// team coordination: teammates fighting same enemy = confidence
+	if (teamplay && self.b_skill >= 1)
+	{
+		allies = bot_team_fighting_enemy(self.enemy);
+		if (allies >= 1)
+			score = score + 12;	// outnumber them, stay and fight
+		if (allies >= 2)
+			score = score + 8;	// 3v1, definitely fight
+	}
+
 	// splash weapons at mid-range with no wall angle: flanking would be better
 	if (self.b_skill >= 2 && (self.weapon == 32 || self.weapon == 16))
 	{
@@ -203,7 +301,7 @@ float() bot_util_fight =
 // how much do we want to retreat?
 float() bot_util_retreat =
 {
-	local float score, mysz, foesz, health_ratio;
+	local float score, mysz, foesz, health_ratio, allies;
 
 	score = 20;		// baseline: retreating is not default
 
@@ -246,6 +344,16 @@ float() bot_util_retreat =
 		// enemy has RL/LG and is closing
 		if ((self.b_opp_weapon == 32 || self.b_opp_weapon == 64) && self.b_opp_aggro > 0.6)
 			score = score + 10;
+	}
+
+	// team coordination: less retreat incentive with teammates nearby
+	if (teamplay && self.b_skill >= 1)
+	{
+		allies = bot_team_fighting_enemy(self.enemy);
+		if (allies >= 1)
+			score = score - 15;	// teammate has your back
+		if (allies >= 2)
+			score = score - 10;	// strong numbers advantage
 	}
 
 	if (score < 0) score = 0;
@@ -297,6 +405,13 @@ float() bot_util_pressure =
 	{
 		if (self.b_opp_aggro < 0.3)
 			score = score + 12;
+	}
+
+	// team coordination: teammates fighting same enemy = pack mentality
+	if (teamplay && self.b_skill >= 1)
+	{
+		if (bot_team_fighting_enemy(self.enemy) >= 1)
+			score = score + 10;	// teammate softening them up
 	}
 
 	// only skill 1+ can pressure
@@ -974,7 +1089,8 @@ enemy's strong side.
 
 void() bot_retreat =
 {
-	local vector away, org, right, movedir;
+	local vector away, org, right, movedir, toward_mate;
+	local entity mate;
 
 	org = realorigin(self.enemy);
 	away = normalize(self.origin - org);
@@ -988,9 +1104,19 @@ void() bot_retreat =
 		return;
 	}
 
-	// skill 1: run directly away
+	// skill 1: run directly away (with teammate bias in teamplay)
 	if (self.b_skill == 1)
 	{
+		if (teamplay)
+		{
+			mate = bot_nearest_teammate();
+			if (mate != world)
+			{
+				toward_mate = normalize(mate.origin - self.origin);
+				// blend: mostly away from enemy, slightly toward teammate
+				away = normalize(away + toward_mate * 0.3);
+			}
+		}
 		frik_walkmove(away);
 		return;
 	}
@@ -1016,6 +1142,18 @@ void() bot_retreat =
 			self.b_strafe_dir = -1;
 		else if (self.b_opp_strafe < -0.3)
 			self.b_strafe_dir = 1;
+	}
+
+	// team coordination: bias retreat toward nearest teammate
+	if (teamplay)
+	{
+		mate = bot_nearest_teammate();
+		if (mate != world)
+		{
+			toward_mate = normalize(mate.origin - self.origin);
+			// blend teammate direction into retreat vector
+			away = normalize(away + toward_mate * 0.35);
+		}
 	}
 
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
