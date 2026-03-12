@@ -16,11 +16,11 @@
 - [x] Elevator/platform timing
 
 ## Strategic Awareness
-- [ ] Item respawn timers (mega health, red armor, quad)
-- [ ] Map control / positional advantage
-- [ ] Chokepoint and high-ground awareness
-- [ ] Smarter item prioritization based on current loadout
-- [ ] Track recent death locations as danger zones
+- [x] Item respawn timers (mega health, red armor, quad)
+- [x] Map control / positional advantage
+- [x] Chokepoint and high-ground awareness
+- [x] Smarter item prioritization based on current loadout
+- [x] Track recent death locations as danger zones
 
 ## Waypoint System
 - [ ] Auto-waypointing from BSP geometry (needs decision: engine extensions vs external tool)

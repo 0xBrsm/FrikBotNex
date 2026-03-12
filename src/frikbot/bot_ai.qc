@@ -645,6 +645,30 @@ float(entity thing) priority_for_thing =
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
 
+	// skill 2+: anticipate item respawns by positioning near items about to reappear
+	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 2)
+	{
+		if (thing.nextthink > 0 && (thing.nextthink - time) < 5 && (thing.nextthink - time) > 0)
+		{
+			// item is about to respawn - go camp it
+			if (thing.classname == "item_artifact_super_damage")
+				return 80;
+			else if (thing.classname == "item_artifact_invulnerability")
+				return 80;
+			else if (thing.classname == "item_artifact_invisibility")
+				return 75;
+			else if (thing.classname == "item_health")
+			{
+				if (thing.spawnflags & 2) // megahealth
+					return 65;
+			}
+			else if (thing.classname == "item_armorInv")
+				return 55;
+			else if (thing.classname == "item_armor2")
+				return 45;
+		}
+	}
+
 	if ((thing.flags & FL_ITEM) && thing.model != string_null && thing.search_time < time)
 	{
 
@@ -652,59 +676,6 @@ float(entity thing) priority_for_thing =
                 if (thing._last != self)
                         thisp = 20;
 		//~ ai fix start
-		/* 					 
-		if (thing.classname == "item_artifact_super_damage")
-			thisp = 65;
-		else if (thing.classname == "item_artifact_invulnerability")
-			thisp = 65;
-		else if (thing.classname == "item_health")
-		{
-			if (thing.spawnflags & 2)
-				thisp = 55;
-			if (self.health < 40)
-				thisp = thisp + 50;
-		}
-		else if (thing.model == "progs/armor.mdl")
-		{
-			if (self.armorvalue < 200)
-			{		
-				if (thing.skin == 2)
-					thisp = 60;
-				else if (self.armorvalue < 100)			
-					thisp = thisp + 25;
-			}
-		}
-		else if (thing.classname == "weapon_supershotgun")
-		{
-			if (!(self.items & 2)) // IT_SUPER_SHOTGUN  
-				thisp = 25;
-		}
-		else if (thing.classname == "weapon_nailgun")
-		{
-			if (!(self.items & 4)) // IT_NAILGUN 
-				thisp = 30;
-		}
-		else if (thing.classname == "weapon_supernailgun")
-		{
-			if (!(self.items & 8)) // IT_SUPER_NAILGUN
-				thisp = 35;
-		}
-		else if (thing.classname == "weapon_grenadelauncher")
-		{
-			if (!(self.items & 16)) // IT_GRENADE_LAUNCHER
-				thisp = 45;
-		}
-		else if (thing.classname == "weapon_rocketlauncher")
-		{
-			if (!(self.items & 32)) // IT_ROCKET_LAUNCHER
-				thisp = 60;
-		}
-		else if (thing.classname == "weapon_lightning")
-		{
-			if (!(self.items & 64)) // IT_LIGHTNING
-				thisp = 50;
-		}
-		*/
 		if (thing.classname == "item_artifact_super_damage")
 			thisp = 10*(random()) + 55;
 		else if (thing.classname == "item_artifact_invulnerability")
@@ -764,6 +735,43 @@ float(entity thing) priority_for_thing =
 			thisp = 45;
 		else if (thing.classname == "item_artifact_envirosuit")
 			thisp = 30;
+
+		// skill 1+: loadout-aware adjustments
+		if (self.b_skill >= 1 && thisp > 0)
+		{
+			// weapons we already own are still worth picking up for ammo
+			if (thing.classname == "weapon_rocketlauncher" && (self.items & 32))
+			{
+				if (self.ammo_rockets < 5)
+					thisp = 40; // need rockets badly
+			}
+			else if (thing.classname == "weapon_lightning" && (self.items & 64))
+			{
+				if (self.ammo_cells < 10)
+					thisp = 35;
+			}
+			else if (thing.classname == "weapon_supernailgun" && (self.items & 8))
+			{
+				if (self.ammo_nails < 20)
+					thisp = 30;
+			}
+
+			// reduce health priority when healthy
+			if (thing.classname == "item_health" && !(thing.spawnflags & 2))
+			{
+				if (self.health >= 90)
+					thisp = thisp * 0.3;
+			}
+
+			// boost ammo backpacks when running low on primary ammo
+			if (thing.model == "progs/backpack.mdl")
+			{
+				if (self.ammo_rockets < 3 && (self.items & 32))
+					thisp = thisp + 15;
+				else if (self.ammo_cells < 5 && (self.items & 64))
+					thisp = thisp + 10;
+			}
+		}
 	}
 	//~ ai fix end
 	else if ((thing.flags & FL_MONSTER) && thing.health > 0)
@@ -798,9 +806,26 @@ float(entity thing) priority_for_thing =
 	else if (thing.classname == "waypoint")
 	{
 		if (thing.b_aiflags & AI_SNIPER)
-			thisp = 45; //~ ai fix
+			thisp = 45;
 		else if (thing.b_aiflags & AI_AMBUSH)
 			thisp = 30;
+
+		// skill 2+: map control - prefer high ground and power positions when well-armed
+		if (self.b_skill >= 2 && thisp > 0)
+		{
+			if ((self.items & 32) && self.ammo_rockets >= 3) // have RL + ammo
+			{
+				// high ground bonus: waypoints above current position
+				if ((thing.origin_z - self.origin_z) > 64)
+					thisp = thisp + 10;
+
+				// extra value for sniper/ambush spots when armed
+				if (thing.b_aiflags & AI_SNIPER)
+					thisp = thisp + 10;
+				else if (thing.b_aiflags & AI_AMBUSH)
+					thisp = thisp + 8;
+			}
+		}
 	}
 	if (pointcontents(thing.origin) < -3)
 		return 0;
@@ -812,9 +837,30 @@ float(entity thing) priority_for_thing =
 			if (thing.current_way.items == -1)
 				return 0;
 			else
-				thisp = thisp + (13000 - thing.current_way.items) * 0.05; 
+				thisp = thisp + (13000 - thing.current_way.items) * 0.05;
 		}
-	} 		
+
+		// skill 1+: penalize areas near recent deaths (danger zones)
+		// death memory fades over 60 seconds
+		if (self.b_skill >= 1 && self.b_death1 != '0 0 0')
+		{
+			if (vlen(thing.origin - self.b_death1) < 256)
+			{
+				if ((time - self.b_death_time) < 60)
+					thisp = thisp * 0.5;
+			}
+			if (self.b_death2 != '0 0 0')
+			{
+				if (vlen(thing.origin - self.b_death2) < 256)
+					thisp = thisp * 0.7;
+			}
+			if (self.b_death3 != '0 0 0')
+			{
+				if (vlen(thing.origin - self.b_death3) < 256)
+					thisp = thisp * 0.85;
+			}
+		}
+	}
 	return thisp;
 };
 
@@ -1058,7 +1104,17 @@ void() BotAI =
 	// status bars, and the mod probably already compensated for that
 
 	if (self.health < 1)
-	{ 
+	{
+		// record death location once per death (skill 1+)
+		// only record if last death was more than 2s ago (new death)
+		if ((time - self.b_death_time) > 2 && self.b_skill >= 1)
+		{
+			self.b_death3 = self.b_death2;
+			self.b_death2 = self.b_death1;
+			self.b_death1 = self.origin;
+			self.b_death_time = time;
+		}
+
 		self.button0 = floor(random() * 2);
 		self.button2 = 0;
 		self.keys = 0;
@@ -1074,7 +1130,7 @@ void() BotAI =
 		self.b_bhop_land = 0;
 		return;
 	}
-		
+
 	// stagger the bot's AI out so they all don't think at the same time, causing game
 	// 'spikes'
 	if (self.b_skill < 2)
