@@ -161,6 +161,7 @@ void(entity targ, float success) bot_lost =
 		self.last_way = FindWayPoint(self.current_way);
 		ClearMyRoute();
 		self.b_aiflags = 0;
+		self.b_ambush_time = 0;
 	}
         else
         {
