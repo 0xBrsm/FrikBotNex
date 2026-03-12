@@ -1202,6 +1202,7 @@ void() BotAI =
 		self.b_bhop_land = 0;
 		self.b_combat_state = CSTATE_NONE;
 		self.b_los_time = 0;
+		self.b_combo_time = 0;
 		bot_opp_model_reset();
 		return;
 	}

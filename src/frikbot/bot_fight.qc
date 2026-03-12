@@ -1313,6 +1313,7 @@ void() bot_fight_style =
 		self.enemy = world;
 		self.b_strafe_dir = 0;
 		self.b_combat_state = CSTATE_NONE;
+		self.b_combo_time = 0;
 		return;
 	}
 	else if (!self.enemy.takedamage)
@@ -1320,6 +1321,7 @@ void() bot_fight_style =
 		self.enemy = world;
 		self.b_strafe_dir = 0;
 		self.b_combat_state = CSTATE_NONE;
+		self.b_combo_time = 0;
 		return;
 	}
 	else if (!fisible(self.enemy))
@@ -1336,6 +1338,7 @@ void() bot_fight_style =
 			self.enemy = world;
 			self.b_strafe_dir = 0;
 			self.b_combat_state = CSTATE_NONE;
+			self.b_combo_time = 0;
 			return;
 		}
 	}
@@ -1355,6 +1358,27 @@ void() bot_fight_style =
 	foedist = vlen(org - self.origin);
 	v = weapon_range(self.weapon);
 
+	// --- RL->LG combo: execute phase (skill 3, PRESSURE state) ---
+	// after firing RL, switch to LG for hitscan damage while rocket flies
+	if (self.b_combo_time > 0)
+	{
+		if (time > self.b_combo_time + 0.6 || self.enemy.health <= 0)
+		{
+			// combo expired or enemy dead — resume normal weapon logic
+			self.b_combo_time = 0;
+		}
+		else if (self.weapon != 64)
+		{
+			// haven't switched yet — force LG
+			self.impulse = 8;
+		}
+		else
+		{
+			// LG is active — shoot it, combo is running
+			bot_shoot();
+		}
+	}
+
 	if (foedist > v_y && foedist < v_z)
 	{
 		traceline(self.origin + self.view_ofs, self.origin + self.view_ofs + v_forward * v_z, FALSE, self);
@@ -1368,14 +1392,29 @@ void() bot_fight_style =
 			}
 			else
 				bot_shoot();
+
+			// --- RL->LG combo: initiate phase ---
+			// skill 3 in PRESSURE: after firing RL at mid range, start combo
+			if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
+				&& self.b_combo_time == 0
+				&& self.weapon == 32	// IT_ROCKET_LAUNCHER
+				&& (self.items & 64)	// have LG
+				&& self.ammo_cells >= 1
+				&& self.waterlevel <= 1	// LG doesn't work underwater
+				&& foedist > 200 && foedist < 600)
+			{
+				// rocket is in flight — switch to LG next frame
+				self.b_combo_time = time;
+				self.b_wepswitch_time = time + 1.5; // suppress normal switching
+			}
 		}
-		if (self.b_skill >= 1 && time > self.b_wepswitch_time)
+		if (self.b_skill >= 1 && time > self.b_wepswitch_time && self.b_combo_time == 0)
 		{
 			bot_weapon_switch(foedist);
 			self.b_wepswitch_time = time + 1.5;
 		}
 	}
-	else
+	else if (self.b_combo_time == 0)
 		bot_weapon_switch(foedist);
 
 	self.b_retreat = 0;
@@ -1501,6 +1540,9 @@ void() bot_fight_style =
 	// state transition
 	if (new_state != self.b_combat_state)
 	{
+		// cancel RL->LG combo if leaving PRESSURE
+		if (self.b_combat_state == CSTATE_PRESSURE)
+			self.b_combo_time = 0;
 		self.b_combat_state = new_state;
 		self.b_combat_time = time;
 	}
