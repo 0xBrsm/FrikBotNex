@@ -255,7 +255,7 @@ float() bot_util_fight =
 	foesz = bot_size_player(self.enemy);
 
 	// health+armor ratio
-	health_ratio = mysz / (foesz + 1);
+	health_ratio = mysz / foesz;
 	if (health_ratio > 1.5)
 		score = score + 15;		// we're stronger
 	else if (health_ratio > 1.0)
@@ -320,7 +320,7 @@ float() bot_util_retreat =
 	mysz = bot_size_player(self);
 	foesz = bot_size_player(self.enemy);
 
-	health_ratio = mysz / (foesz + 1);
+	health_ratio = mysz / foesz;
 	if (health_ratio < 0.4)
 		score = score + 40;		// badly outgunned
 	else if (health_ratio < 0.6)

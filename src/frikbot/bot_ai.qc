@@ -1035,7 +1035,7 @@ void() bot_angle_set =
 
 		if (self.enemy.solid == SOLID_BSP)
 		{
-			view = (((self.enemy.absmin + self.enemy.absmax) * 0.5) - self.origin);
+			view = realorigin(self.enemy) - self.origin;
 		}
 		else
 		{
@@ -1469,14 +1469,15 @@ void() BotAI =
 		if (self.b_skill >= 1)
 		{
 			// personality: campers are hyper-aware, aggressive have tunnel vision
+			// uses squared distances to avoid sqrt in this loop
 			if (self.b_personality == PERSONALITY_CAMPER)
-				snd_best = 1000;
+				snd_best = 1000000;	// 1000^2
 			else if (self.b_personality == PERSONALITY_DEFENSIVE)
-				snd_best = 900;
+				snd_best = 810000;	// 900^2
 			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
-				snd_best = 600;
+				snd_best = 360000;	// 600^2
 			else
-				snd_best = 800;
+				snd_best = 640000;	// 800^2
 			snd_foe = player_head;
 			while (snd_foe)
 			{
@@ -1484,7 +1485,8 @@ void() BotAI =
 				{
 					if (!(teamplay && snd_foe.team == self.team) && !coop)
 					{
-						snd_dist = vlen(snd_foe.origin - self.origin);
+						snd_view = snd_foe.origin - self.origin;
+						snd_dist = snd_view_x * snd_view_x + snd_view_y * snd_view_y + snd_view_z * snd_view_z;
 						if (snd_dist < snd_best)
 						{
 							snd_best = snd_dist;

@@ -496,7 +496,7 @@ void() bot_fight_style =
 			bot_retreat();
 			if (self.b_skill >= 1)
 			{
-				bot_weapon_switch(vlen(org - self.origin));
+				bot_weapon_switch(foedist);
 				bot_shoot();
 			}
 			return;
@@ -546,7 +546,7 @@ void() bot_fight_style =
 			}
 			if (self.b_skill >= 1)
 			{
-				bot_weapon_switch(vlen(org - self.origin));
+				bot_weapon_switch(foedist);
 				bot_shoot();
 			}
 			return;
@@ -632,7 +632,7 @@ void() bot_fight_style =
 			self.b_chattime = 1;
 		}
 		// always shoot while retreating at skill 2+
-		bot_weapon_switch(vlen(org - self.origin));
+		bot_weapon_switch(foedist);
 		bot_shoot();
 	}
 	else if (self.b_combat_state == CSTATE_PRESSURE)
