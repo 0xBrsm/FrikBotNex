@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-nav2way.py — Convert Quake Enhanced .nav files to FrikBot .way files.
+nav2way.py — Convert Quake Enhanced .nav/.navjson files to FrikBot .way files.
 
-Reads the binary .nav format (version 14/15) used by the Quake 2021 Re-Release
-KEX engine and outputs .way text files compatible with FrikBot X's waypoint
-loader (exec-based cvar pipeline).
+Reads the binary .nav format (version 14/15) or the text .navjson format used
+by the Quake 2021 Re-Release KEX engine and outputs .way text files compatible
+with FrikBot X's waypoint loader (exec-based cvar pipeline).
 
 Usage:
-    python nav2way.py <input.nav> [output.way]
+    python nav2way.py <input.nav|input.navjson> [output.way]
     python nav2way.py --batch <nav_dir> [way_dir]
 
 The .nav format spec is from jpiolho's reverse engineering:
 https://steamcommunity.com/sharedfiles/filedetails/?id=2584757297
+The .navjson format is from jpiolho's QuakeNavSharp library:
+https://github.com/jpiolho/QuakeNavSharp
 """
 
 import struct
+import json
 import sys
 import os
 import glob
@@ -146,6 +149,64 @@ def read_nav(filepath):
     return nodes
 
 
+def read_navjson(filepath):
+    """Parse a .navjson file. Returns list of NavNode with links resolved.
+
+    In .navjson, links reference targets by coordinate rather than index.
+    We build a coordinate-to-index lookup to resolve them.
+    """
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+
+    json_nodes = data.get('Nodes', [])
+
+    # Build coordinate -> index lookup.
+    # navjson uses coordinates as node identity; round to avoid float mismatch.
+    def coord_key(origin):
+        return (round(origin[0], 3), round(origin[1], 3), round(origin[2], 3))
+
+    coord_to_index = {}
+    for i, jn in enumerate(json_nodes):
+        key = coord_key(jn['Origin'])
+        coord_to_index[key] = i
+
+    nodes = []
+    for i, jn in enumerate(json_nodes):
+        n = NavNode()
+        n.origin = tuple(jn['Origin'])
+        n.flags = jn.get('Flags', 0)
+        n.radius = jn.get('Radius', 0)
+
+        for jl in jn.get('Links', []):
+            target_key = coord_key(jl['Target'])
+            dest_index = coord_to_index.get(target_key)
+            if dest_index is None:
+                continue  # skip links to unknown nodes
+            link_type = jl.get('Type', 0)
+            n.links.append((dest_index, link_type))
+
+        nodes.append(n)
+
+    # Accumulate link-type AI flags onto destination nodes
+    for node in nodes:
+        for dest_index, link_type in node.links:
+            if link_type in NAV_LINK_TO_AIFLAGS:
+                nodes[dest_index].aiflags |= NAV_LINK_TO_AIFLAGS[link_type]
+
+    return nodes
+
+
+def read_any(filepath):
+    """Read either .nav or .navjson based on file extension."""
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == '.navjson':
+        return read_navjson(filepath)
+    elif ext == '.nav':
+        return read_nav(filepath)
+    else:
+        raise ValueError(f"Unknown file extension: {ext} (expected .nav or .navjson)")
+
+
 def nodes_to_way(nodes, mapname="unknown"):
     """
     Convert NavNodes to .way file content (list of strings, one per output file).
@@ -267,12 +328,12 @@ def nodes_to_way(nodes, mapname="unknown"):
 
 
 def convert_nav_to_way(nav_path, way_path=None):
-    """Convert a single .nav file to .way file(s)."""
+    """Convert a single .nav or .navjson file to .way file(s)."""
     if way_path is None:
         way_path = os.path.splitext(nav_path)[0] + ".way"
 
     mapname = os.path.splitext(os.path.basename(nav_path))[0]
-    nodes = read_nav(nav_path)
+    nodes = read_any(nav_path)
 
     print(f"  {mapname}: {len(nodes)} nodes, "
           f"{sum(len(n.links) for n in nodes)} links")
@@ -300,11 +361,12 @@ def convert_nav_to_way(nav_path, way_path=None):
 def main():
     parser = argparse.ArgumentParser(
         description="Convert Quake Enhanced .nav files to FrikBot .way files")
-    parser.add_argument('input', help=".nav file or directory (with --batch)")
+    parser.add_argument('input',
+                        help=".nav/.navjson file or directory (with --batch)")
     parser.add_argument('output', nargs='?', default=None,
                         help=".way output file or directory (with --batch)")
     parser.add_argument('--batch', action='store_true',
-                        help="Convert all .nav files in input directory")
+                        help="Convert all .nav/.navjson files in input directory")
     args = parser.parse_args()
 
     if args.batch:
@@ -317,12 +379,15 @@ def main():
 
         os.makedirs(way_dir, exist_ok=True)
 
-        nav_files = sorted(glob.glob(os.path.join(nav_dir, "*.nav")))
+        nav_files = sorted(
+            glob.glob(os.path.join(nav_dir, "*.nav"))
+            + glob.glob(os.path.join(nav_dir, "*.navjson"))
+        )
         if not nav_files:
-            print(f"No .nav files found in {nav_dir}", file=sys.stderr)
+            print(f"No .nav/.navjson files found in {nav_dir}", file=sys.stderr)
             sys.exit(1)
 
-        print(f"Converting {len(nav_files)} .nav files...")
+        print(f"Converting {len(nav_files)} nav files...")
         for nav_path in nav_files:
             mapname = os.path.splitext(os.path.basename(nav_path))[0]
             way_path = os.path.join(way_dir, mapname + ".way")
