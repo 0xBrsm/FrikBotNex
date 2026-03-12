@@ -1,4 +1,5 @@
 # Compiled QuakeC output
 *.dat
 *.lno
+fteqcc.log
 .claude/
