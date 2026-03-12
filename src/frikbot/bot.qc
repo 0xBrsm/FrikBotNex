@@ -151,11 +151,32 @@ for all variables in the bot...
 .float b_death_time;
 .float b_personality;
 
+// combat state machine
+.float b_combat_state;
+.float b_combat_time;		// when we entered current state
+
+// opponent modeling (skill 2+)
+.entity b_opp_ent;		// which enemy we're tracking
+.float b_opp_weapon;		// enemy's current weapon
+.float b_opp_aggro;		// aggression estimate (0.0 = passive, 1.0 = rush)
+.float b_opp_strafe;		// enemy strafe tendency (-1 to +1)
+.float b_opp_dist;		// enemy preferred distance
+.float b_opp_track_time;	// last opponent model update
+.float b_opp_damage_in;	// damage we've taken from this enemy (rolling)
+.float b_opp_damage_out;	// damage we've dealt to this enemy (rolling)
+
 // personality types
 float PERSONALITY_BALANCED	= 0;
 float PERSONALITY_AGGRESSIVE	= 1;
 float PERSONALITY_DEFENSIVE	= 2;
 float PERSONALITY_CAMPER	= 3;
+
+// combat states (state machine)
+float CSTATE_NONE	= 0;	// not in combat
+float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
+float CSTATE_RETREAT	= 2;	// outgunned, falling back
+float CSTATE_PRESSURE	= 3;	// enemy weak, pushing for the kill
+float CSTATE_FLANK	= 4;	// circling to get splash angle
 
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
@@ -305,6 +326,14 @@ float(float wep, float brange) bot_weapon_score;
 void() bot_combat_strafe;
 void() bot_retreat;
 void(float scope) bot_look_for_crap;
+
+// opponent modeling & utility ai
+void() bot_opp_model_update;
+void() bot_opp_model_reset;
+float() bot_util_fight;
+float() bot_util_retreat;
+float() bot_util_pressure;
+float() bot_util_flank;
 
 // editor stuffs
 

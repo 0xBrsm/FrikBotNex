@@ -799,7 +799,16 @@ float(entity thing) priority_for_thing =
 					if (thing.target1.classname == "player")
 						return 0;
 				}
-				else thisp = 30;
+				else
+			{
+				thisp = 30;
+				// skill 2+ opponent model: de-prioritize enemies we're losing to
+				if (self.b_skill >= 2 && self.b_opp_ent == thing)
+				{
+					if (self.b_opp_aggro > 0.7 && self.health < 50)
+						thisp = thisp * 0.6;	// scary enemy, avoid
+				}
+			}
 			}
 		}
 	}
@@ -1060,6 +1069,16 @@ void() bot_angle_set =
 		if (self.b_aim_offset > 30)
 			self.b_aim_offset = 30;
 
+		// skill 3 opponent model: bias aim toward enemy strafe tendency
+		// if we've modeled that they tend to strafe right, lead right
+		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy)
+		{
+			if (self.b_opp_strafe > 0.2 || self.b_opp_strafe < -0.2)
+			{
+				view_y = view_y - self.b_opp_strafe * 3;
+			}
+		}
+
 		// apply random jitter within the offset envelope
 		aim_error = self.b_aim_offset;
 		view_x = view_x + (random() - 0.5) * aim_error;
@@ -1171,6 +1190,8 @@ void() BotAI =
 		self.b_retreat = 0;
 		self.b_ambush_time = 0;
 		self.b_bhop_land = 0;
+		self.b_combat_state = CSTATE_NONE;
+		bot_opp_model_reset();
 		return;
 	}
 

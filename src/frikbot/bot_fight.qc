@@ -44,6 +44,305 @@ this notice in its entirety.
 
 .entity avoid;
 
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Opponent Modeling
+
+Skill 2+ bots track their current enemy's
+behavior: weapon, aggression, strafe pattern,
+preferred distance. Updated each AI frame
+while in combat. The model persists as long
+as the same enemy is engaged.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_opp_model_reset =
+{
+	self.b_opp_ent = world;
+	self.b_opp_weapon = 0;
+	self.b_opp_aggro = 0.5;
+	self.b_opp_strafe = 0;
+	self.b_opp_dist = 300;
+	self.b_opp_track_time = 0;
+	self.b_opp_damage_in = 0;
+	self.b_opp_damage_out = 0;
+};
+
+void() bot_opp_model_update =
+{
+	local float dist, blend, delta_hp;
+	local vector v;
+
+	if (self.b_skill < 2)
+		return;
+	if (!self.enemy)
+		return;
+
+	// new enemy — reset model
+	if (self.b_opp_ent != self.enemy)
+	{
+		bot_opp_model_reset();
+		self.b_opp_ent = self.enemy;
+		self.b_opp_track_time = time;
+		self.b_opp_weapon = self.enemy.weapon;
+		return;
+	}
+
+	if (time < self.b_opp_track_time + 0.1)
+		return;
+
+	// exponential moving average blend factor
+	// quick adaptation for skill 3, slower for skill 2
+	if (self.b_skill >= 3)
+		blend = 0.3;
+	else
+		blend = 0.15;
+
+	// track weapon changes
+	self.b_opp_weapon = self.enemy.weapon;
+
+	// track distance preference
+	v = self.enemy.origin - self.origin;
+	dist = vlen(v);
+	self.b_opp_dist = self.b_opp_dist * (1 - blend) + dist * blend;
+
+	// track aggression: enemy closing distance = aggressive
+	// enemy increasing distance = passive
+	// normalize: closing at 400ups+ = 1.0, backing at 400ups+ = 0.0
+	v = normalize(self.origin - self.enemy.origin);
+	delta_hp = self.enemy.velocity * v;	// positive = closing
+	delta_hp = delta_hp / 400;			// normalize to 0-1 range
+	if (delta_hp > 1) delta_hp = 1;
+	if (delta_hp < -1) delta_hp = -1;
+	delta_hp = (delta_hp + 1) * 0.5;		// shift to 0-1
+	self.b_opp_aggro = self.b_opp_aggro * (1 - blend) + delta_hp * blend;
+
+	// track strafe tendency from lateral velocity
+	makevectors(self.v_angle);
+	delta_hp = self.enemy.velocity * v_right;
+	if (delta_hp > 50)
+		self.b_opp_strafe = self.b_opp_strafe * (1 - blend) + 1 * blend;
+	else if (delta_hp < -50)
+		self.b_opp_strafe = self.b_opp_strafe * (1 - blend) + (-1) * blend;
+	else
+		self.b_opp_strafe = self.b_opp_strafe * (1 - blend * 0.5);
+
+	self.b_opp_track_time = time;
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Utility AI — Combat Decision Scoring
+
+Each possible combat action is scored 0-100.
+The state machine picks the highest-scoring
+action each evaluation cycle. This replaces
+the binary fight-or-retreat check.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+// how good is staying and fighting right now?
+float() bot_util_fight =
+{
+	local float score, mysz, foesz, health_ratio, wep_adv;
+
+	score = 50;		// baseline: fighting is the default
+
+	mysz = bot_size_player(self);
+	foesz = bot_size_player(self.enemy);
+
+	// health+armor ratio
+	health_ratio = mysz / (foesz + 1);
+	if (health_ratio > 1.5)
+		score = score + 15;		// we're stronger
+	else if (health_ratio > 1.0)
+		score = score + 5;
+	else if (health_ratio < 0.5)
+		score = score - 25;		// we're much weaker
+	else if (health_ratio < 0.75)
+		score = score - 10;
+
+	// weapon advantage
+	wep_adv = bot_weapon_score(self.weapon, vlen(self.enemy.origin - self.origin));
+	wep_adv = wep_adv - 40;	// center around 0
+	score = score + wep_adv * 0.3;
+
+	// aim convergence: if we're aimed in, fighting is better
+	if (self.b_aim_offset < 5)
+		score = score + 10;
+
+	// personality
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		score = score + 12;
+	else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		score = score - 8;
+
+	// opponent model: passive enemy is easier to fight
+	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	{
+		if (self.b_opp_aggro < 0.3)
+			score = score + 8;	// they're running, press advantage
+	}
+
+	if (score < 0) score = 0;
+	if (score > 100) score = 100;
+	return score;
+};
+
+// how much do we want to retreat?
+float() bot_util_retreat =
+{
+	local float score, mysz, foesz, health_ratio;
+
+	score = 20;		// baseline: retreating is not default
+
+	mysz = bot_size_player(self);
+	foesz = bot_size_player(self.enemy);
+
+	health_ratio = mysz / (foesz + 1);
+	if (health_ratio < 0.4)
+		score = score + 40;		// badly outgunned
+	else if (health_ratio < 0.6)
+		score = score + 25;
+	else if (health_ratio < 0.8)
+		score = score + 10;
+	else if (health_ratio > 1.5)
+		score = score - 15;		// we're winning, don't run
+
+	// low health absolute threshold
+	if (self.health < 30)
+		score = score + 20;
+	else if (self.health < 50)
+		score = score + 10;
+
+	// enemy has powerup
+	if (self.enemy.items & 4194304)	// quad
+		score = score + 30;
+	if (self.enemy.items & 1048576)	// invuln
+		score = score + 40;
+
+	// personality
+	if (self.b_personality == PERSONALITY_DEFENSIVE)
+		score = score + 15;
+	else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		score = score - 20;
+
+	// opponent model: aggressive enemy is scarier
+	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	{
+		if (self.b_opp_aggro > 0.7)
+			score = score + 10;
+		// enemy has RL/LG and is closing
+		if ((self.b_opp_weapon == 32 || self.b_opp_weapon == 64) && self.b_opp_aggro > 0.6)
+			score = score + 10;
+	}
+
+	if (score < 0) score = 0;
+	if (score > 100) score = 100;
+	return score;
+};
+
+// should we rush a weakened enemy?
+float() bot_util_pressure =
+{
+	local float score, foesz;
+
+	score = 10;		// baseline: only pressure when clearly winning
+
+	foesz = bot_size_player(self.enemy);
+
+	// enemy is weak
+	if (self.enemy.health <= 30)
+		score = score + 35;
+	else if (self.enemy.health <= 50)
+		score = score + 20;
+	else if (self.enemy.health <= 75)
+		score = score + 8;
+
+	// we have a strong weapon
+	if (self.weapon == 32 || self.weapon == 64)
+		score = score + 15;
+	else if (self.weapon == 8)
+		score = score + 8;
+
+	// we're healthy
+	if (self.health > 80)
+		score = score + 10;
+
+	// we have powerup
+	if (self.items & 4194304)	// quad
+		score = score + 30;
+
+	// personality
+	if (self.b_personality == PERSONALITY_AGGRESSIVE)
+		score = score + 15;
+	else if (self.b_personality == PERSONALITY_DEFENSIVE)
+		score = score - 10;
+	else if (self.b_personality == PERSONALITY_CAMPER)
+		score = score - 15;
+
+	// opponent model: passive enemy is easier to pressure
+	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	{
+		if (self.b_opp_aggro < 0.3)
+			score = score + 12;
+	}
+
+	// only skill 1+ can pressure
+	if (self.b_skill < 1)
+		score = 0;
+
+	if (score < 0) score = 0;
+	if (score > 100) score = 100;
+	return score;
+};
+
+// should we try to get a better angle (splash weapons near walls)?
+float() bot_util_flank =
+{
+	local float score, foedist;
+
+	score = 5;		// baseline: rarely flank
+
+	// only useful with splash weapons
+	if (self.weapon != 32 && self.weapon != 16)
+		return 0;
+
+	foedist = vlen(self.enemy.origin - self.origin);
+
+	// mid-range is ideal for flanking
+	if (foedist > 200 && foedist < 600)
+		score = score + 15;
+	else
+		return 0;
+
+	// enemy not already near wall — flanking might push them toward one
+	if (!bot_enemy_near_wall())
+		score = score + 10;
+	else
+		score = score - 10;	// already have the angle, just fight
+
+	// we have rockets
+	if (self.weapon == 32 && self.ammo_rockets >= 3)
+		score = score + 10;
+
+	// skill 2+ only
+	if (self.b_skill < 2)
+		return 0;
+
+	// personality
+	if (self.b_personality == PERSONALITY_CAMPER)
+		score = score + 10;
+
+	if (score < 0) score = 0;
+	if (score > 100) score = 100;
+	return score;
+};
+
 float(entity e) bot_size_player =
 {
 	local float sz;
@@ -314,7 +613,7 @@ Higher score = better choice.
 float(float wep, float brange) bot_weapon_score =
 {
 	local float score;
-	local vector v;
+	local vector v, wr;
 
 	// base tier scores
 	if (wep == 32)
@@ -399,6 +698,29 @@ float(float wep, float brange) bot_weapon_score =
 						score = score - 25;
 				}
 			}
+		}
+	}
+
+	// opponent model weapon adjustments (skill 2+)
+	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	{
+		// counter-pick: if enemy has RL/LG and is aggressive, prefer LG for hitscan
+		if ((self.b_opp_weapon == 32) && self.b_opp_aggro > 0.6)
+		{
+			if (wep == 64) score = score + 12;	// LG to punish their rush
+		}
+		// enemy is passive/retreating: splash weapons to flush them out
+		if (self.b_opp_aggro < 0.3)
+		{
+			if (wep == 32 || wep == 16) score = score + 8;
+		}
+		// enemy at predictable distance: boost weapons that match their range
+		if (brange > 0)
+		{
+			wr = weapon_range(wep);
+			// weapon sweet spot matches their preferred distance
+			if (fabs(self.b_opp_dist - wr_x) < 100)
+				score = score + 5;
 		}
 	}
 
@@ -587,8 +909,19 @@ void() bot_combat_strafe =
 	// time to change direction
 	if (time > self.b_strafe_time)
 	{
+		// skill 3 opponent model: counter-strafe (go opposite their tendency)
+		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy)
+		{
+			if (self.b_opp_strafe > 0.4)
+				self.b_strafe_dir = -1;		// they go right, we go left
+			else if (self.b_opp_strafe < -0.4)
+				self.b_strafe_dir = 1;
+			else
+				self.b_strafe_dir = self.b_strafe_dir * -1;
+			self.b_strafe_time = time + strafe_interval;
+		}
 		// skill 2+: occasional quick fake (short strafe then switch)
-		if (self.b_skill >= 2 && random() < 0.2)
+		else if (self.b_skill >= 2 && random() < 0.2)
 		{
 			self.b_strafe_dir = self.b_strafe_dir * -1;
 			self.b_strafe_time = time + 0.15 + random() * 0.15;
@@ -624,6 +957,8 @@ bot_retreat
 
 Retreat behavior when outgunned. Skill-scaled
 from panic freeze to smart angular retreat.
+Skill 2+ uses opponent model to dodge away from
+enemy's strong side.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -664,6 +999,16 @@ void() bot_retreat =
 			self.b_strafe_dir = -1;
 	}
 
+	// opponent model: retreat away from enemy's strafe direction
+	// if they tend to strafe right, we go left to break their tracking
+	if (self.b_opp_ent == self.enemy && self.b_skill >= 3)
+	{
+		if (self.b_opp_strafe > 0.3)
+			self.b_strafe_dir = -1;
+		else if (self.b_opp_strafe < -0.3)
+			self.b_strafe_dir = 1;
+	}
+
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
 
 	if (!frik_walkmove(movedir))
@@ -685,10 +1030,105 @@ void() bot_retreat =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-Bot_fight_style
+bot_pressure_move
 
-Core combat decision loop: shoot, move, or
-retreat based on situation and skill.
+Aggressive push toward a weakened enemy.
+Close distance while strafing unpredictably.
+Skill 2+ only.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_pressure_move =
+{
+	local vector org, toward, right, movedir;
+	local float foedist;
+
+	org = realorigin(self.enemy);
+	toward = normalize(org - self.origin);
+	foedist = vlen(org - self.origin);
+	makevectors(self.v_angle);
+	right = v_right;
+
+	// close in aggressively but not into self-splash range
+	if (foedist > 200)
+		movedir = toward;
+	else if (foedist > 100)
+		movedir = toward * 0.3 + right * self.b_strafe_dir * 0.7;
+	else
+		movedir = right * self.b_strafe_dir;	// close enough, just strafe
+
+	// fast strafe changes when pressuring
+	if (time > self.b_strafe_time)
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.3 + random() * 0.4;
+	}
+
+	if (!frik_walkmove(movedir))
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.1;
+	}
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_flank_move
+
+Circle-strafe to get a better splash angle.
+Tries to push the enemy toward walls.
+Skill 2+ only.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_flank_move =
+{
+	local vector org, right, movedir;
+	local float foedist;
+
+	org = realorigin(self.enemy);
+	foedist = vlen(org - self.origin);
+	makevectors(self.v_angle);
+	right = v_right;
+
+	// circle-strafe: heavy lateral component, slight range maintenance
+	movedir = right * self.b_strafe_dir;
+	if (foedist > 400)
+		movedir = movedir + normalize(org - self.origin) * 0.4;
+	else if (foedist < 200)
+		movedir = movedir + normalize(self.origin - org) * 0.4;
+
+	// moderate strafe changes
+	if (time > self.b_strafe_time)
+	{
+		// flanking: longer commits to build angle
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.8 + random() * 0.6;
+	}
+
+	if (!frik_walkmove(movedir))
+	{
+		self.b_strafe_dir = self.b_strafe_dir * -1;
+		self.b_strafe_time = time + 0.1;
+	}
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_fight_style
+
+Combat state machine driven by utility scoring.
+
+Skill 0-1: simplified path (fight or retreat
+based on size comparison, like original logic).
+
+Skill 2+: full utility evaluation picks from
+FIGHT, RETREAT, PRESSURE, or FLANK each cycle.
+State transitions are smoothed to avoid jitter.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -697,30 +1137,39 @@ void() bot_fight_style =
 {
 	local vector v, v1, v2, org;
 	local float foedist, mysz, foesz;
+	local float u_fight, u_retreat, u_pressure, u_flank, u_best;
+	local float new_state, cur_score;
 
+	// --- enemy validity ---
 	if (self.enemy.health <= 0)
 	{
 		self.enemy = world;
 		self.b_strafe_dir = 0;
+		self.b_combat_state = CSTATE_NONE;
 		return;
 	}
 	else if (!self.enemy.takedamage)
 	{
 		self.enemy = world;
 		self.b_strafe_dir = 0;
+		self.b_combat_state = CSTATE_NONE;
 		return;
 	}
 	else if (!fisible(self.enemy))
 	{
 		self.enemy = world;
 		self.b_strafe_dir = 0;
+		self.b_combat_state = CSTATE_NONE;
 		return;
 	}
+
+	// --- update opponent model ---
+	bot_opp_model_update();
 
 	org = realorigin(self.enemy);
 	makevectors(self.v_angle);
 
-	// decide if I should shoot
+	// --- shooting decision (universal, all states) ---
 	foedist = vlen(org - self.origin);
 	v = weapon_range(self.weapon);
 
@@ -729,13 +1178,11 @@ void() bot_fight_style =
 		traceline(self.origin + self.view_ofs, self.origin + self.view_ofs + v_forward * v_z, FALSE, self);
 		if (vlen(trace_endpos - (self.origin + self.view_ofs)) >= v_y)
 		{
-			// try to avoid shooting teammates
 			if (trace_ent.classname == "player")
 				if ((trace_ent.team == self.team && teamplay) || (coop))
 					return;
 			bot_shoot();
 		}
-		// skill 1+: periodically re-evaluate weapon as range changes mid-fight
 		if (self.b_skill >= 1 && time > self.b_wepswitch_time)
 		{
 			bot_weapon_switch(foedist);
@@ -747,29 +1194,13 @@ void() bot_fight_style =
 
 	self.b_retreat = 0;
 
-	if (!(self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED)))
+	// --- movement constrained by AI flags ---
+	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
 	{
-		foesz = bot_size_player(self.enemy);
-		mysz = bot_size_player(self) + 5;
-
-		// personality adjusts retreat threshold
-		if (self.b_personality == PERSONALITY_AGGRESSIVE)
-			mysz = mysz + 40; // fights even when outgunned
-		else if (self.b_personality == PERSONALITY_DEFENSIVE)
-			mysz = mysz - 30; // retreats earlier
-
-		if (foesz > mysz)
+		// constrained: simplified fight-or-retreat only
+		if (bot_size_player(self.enemy) > bot_size_player(self) + 5)
 		{
 			bot_retreat();
-			if (teamplay)
-			{
-				if (random() < 0.02)
-				{
-					bot_start_topic(5);
-					self.b_chattime = 1;
-				}
-			}
-			// skill 1+: shoot while retreating instead of fleeing silently
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(vlen(org - self.origin));
@@ -777,47 +1208,143 @@ void() bot_fight_style =
 			}
 			return;
 		}
-		else if (mysz < 140)
+		self.keys = self.keys & 960;
+		return;
+	}
+
+	// --- projectile dodge takes priority over state movement ---
+	if (self.avoid)
+	{
+		if (self.avoid.velocity)
+			v = self.avoid.velocity;
+		else
+			v = normalize(self.avoid.origin - self.origin);
+		v1_x = v_y * -1;
+		v1_y = v_x;
+		v2_x = v_y;
+		v2_y = v_x * -1;
+		foedist = vlen(self.avoid.origin - (self.origin + v1));
+		if (foedist < vlen(self.avoid.origin - (self.origin + v2)))
+			frik_walkmove(v2);
+		else
+			frik_walkmove(v1);
+		return;
+	}
+
+	// --- skill 0-1: classic binary fight/retreat ---
+	if (self.b_skill < 2)
+	{
+		foesz = bot_size_player(self.enemy);
+		mysz = bot_size_player(self) + 5;
+
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			mysz = mysz + 40;
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			mysz = mysz - 30;
+
+		if (foesz > mysz)
+		{
+			self.b_combat_state = CSTATE_RETREAT;
+			bot_retreat();
+			if (teamplay && random() < 0.02)
+			{
+				bot_start_topic(5);
+				self.b_chattime = 1;
+			}
+			if (self.b_skill >= 1)
+			{
+				bot_weapon_switch(vlen(org - self.origin));
+				bot_shoot();
+			}
 			return;
-		else if (self.avoid)
-		{
-			if (self.avoid.velocity)
-				v = self.avoid.velocity;
-			else
-				v = normalize(self.avoid.origin - self.origin);
-			v1_x = v_y * -1;
-			v1_y = v_x;
-			v2_x = v_y;
-			v2_y = v_x * -1;
-			foedist = vlen(self.avoid.origin - (self.origin + v1));
-			if (foedist < vlen(self.avoid.origin - (self.origin + v2)))
-				frik_walkmove(v2);
-			else
-				frik_walkmove(v1);
 		}
-		else if (!(self.enemy.flags & FL_MONSTER))
-		{
+		if (mysz < 140)
+			return;
+		self.b_combat_state = CSTATE_FIGHT;
+		if (!(self.enemy.flags & FL_MONSTER))
 			bot_combat_strafe();
+		return;
+	}
+
+	// --- skill 2+: utility-scored state machine ---
+
+	u_fight = bot_util_fight();
+	u_retreat = bot_util_retreat();
+	u_pressure = bot_util_pressure();
+	u_flank = bot_util_flank();
+
+	// find best action
+	u_best = u_fight;
+	new_state = CSTATE_FIGHT;
+
+	if (u_retreat > u_best)
+	{
+		u_best = u_retreat;
+		new_state = CSTATE_RETREAT;
+	}
+	if (u_pressure > u_best)
+	{
+		u_best = u_pressure;
+		new_state = CSTATE_PRESSURE;
+	}
+	if (u_flank > u_best)
+	{
+		u_best = u_flank;
+		new_state = CSTATE_FLANK;
+	}
+
+	// hysteresis: require margin to switch states (prevents jitter)
+	// must beat current state by 10+ points, or 0.5s in current state
+	if (new_state != self.b_combat_state)
+	{
+		if (self.b_combat_state == CSTATE_FIGHT)
+			cur_score = u_fight;
+		else if (self.b_combat_state == CSTATE_RETREAT)
+			cur_score = u_retreat;
+		else if (self.b_combat_state == CSTATE_PRESSURE)
+			cur_score = u_pressure;
+		else if (self.b_combat_state == CSTATE_FLANK)
+			cur_score = u_flank;
+		else
+			cur_score = 0;
+
+		if (u_best < cur_score + 10 && (time - self.b_combat_time) < 0.5)
+			new_state = self.b_combat_state;	// keep current state
+	}
+
+	// state transition
+	if (new_state != self.b_combat_state)
+	{
+		self.b_combat_state = new_state;
+		self.b_combat_time = time;
+	}
+
+	// --- execute current state ---
+	if (self.b_combat_state == CSTATE_RETREAT)
+	{
+		bot_retreat();
+		if (teamplay && random() < 0.02)
+		{
+			bot_start_topic(5);
+			self.b_chattime = 1;
 		}
+		// always shoot while retreating at skill 2+
+		bot_weapon_switch(vlen(org - self.origin));
+		bot_shoot();
+	}
+	else if (self.b_combat_state == CSTATE_PRESSURE)
+	{
+		bot_pressure_move();
+	}
+	else if (self.b_combat_state == CSTATE_FLANK)
+	{
+		bot_flank_move();
 	}
 	else
 	{
-		foesz = bot_size_player(self.enemy);
-		mysz = bot_size_player(self) + 5;
-
-		if (foesz > mysz)
-		{
-			bot_retreat();
-			if (self.b_skill >= 1)
-			{
-				bot_weapon_switch(vlen(org - self.origin));
-				bot_shoot();
-			}
-			return;
-		}
-		else if (mysz < 140)
-			return;
-		self.keys = self.keys & 960;
+		// CSTATE_FIGHT: standard combat strafe
+		if (!(self.enemy.flags & FL_MONSTER))
+			bot_combat_strafe();
 	}
 };
 
