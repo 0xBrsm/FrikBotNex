@@ -999,6 +999,7 @@ void() bot_angle_set =
 	local float h;
 	local vector view, pred_vel, foe_fwd, foe_right;
 	local float aim_error, espeed, decay, glance_chance, glance_interval;
+	local float drift_sin;
 
 	if (self.enemy)
 	{
@@ -1170,12 +1171,15 @@ void() bot_angle_set =
 		self.b_aim_drift_phase = self.b_aim_drift_phase + real_frametime * 1.8;
 		if (self.b_aim_drift_phase > 6.28)
 			self.b_aim_drift_phase = self.b_aim_drift_phase - 6.28;
+		// compute sin via makevectors (no sin builtin in standard QuakeC)
+		makevectors(self.b_aim_drift_phase * 57.2958 * '0 1 0');
+		drift_sin = v_forward_y;
 		if (self.b_skill <= 1)
-			view_y = view_y + sin(self.b_aim_drift_phase) * 2.5;
+			view_y = view_y + drift_sin * 2.5;
 		else if (self.b_skill == 2)
-			view_y = view_y + sin(self.b_aim_drift_phase) * 1.0;
+			view_y = view_y + drift_sin * 1.0;
 		else
-			view_y = view_y + sin(self.b_aim_drift_phase) * 0.4;
+			view_y = view_y + drift_sin * 0.4;
 
 		// 3. overcorrection: correlated jitter
 		// if last frame's error was right, this frame tends left (and vice versa)
