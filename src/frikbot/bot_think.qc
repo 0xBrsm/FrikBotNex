@@ -247,7 +247,7 @@ the binary fight-or-retreat check.
 // how good is staying and fighting right now?
 float() bot_util_fight =
 {
-	local float score, mysz, foesz, health_ratio, wep_adv, allies;
+	local float score, mysz, foesz, health_ratio, wep_adv, allies, fdist;
 
 	score = 50;		// baseline: fighting is the default
 
@@ -300,7 +300,6 @@ float() bot_util_fight =
 	// splash weapons at mid-range with no wall angle: flanking would be better
 	if (self.b_skill >= 2 && (self.weapon == 32 || self.weapon == 16))
 	{
-		local float fdist;
 		fdist = vlen(self.enemy.origin - self.origin);
 		if (fdist > 200 && fdist < 600 && !bot_enemy_near_wall())
 			score = score - 12;
@@ -377,11 +376,9 @@ float() bot_util_retreat =
 // should we rush a weakened enemy?
 float() bot_util_pressure =
 {
-	local float score, foesz;
+	local float score;
 
 	score = 10;		// baseline: only pressure when clearly winning
-
-	foesz = bot_size_player(self.enemy);
 
 	// enemy is weak
 	if (self.enemy.health <= 30)
