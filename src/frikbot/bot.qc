@@ -120,6 +120,68 @@ void() bot_map_load =
 		map_dm5();
 	else if (mapname == "dm6")
 		map_dm6();
+	else if (mapname == "start")
+		map_start();
+	else if (mapname == "e1m1")
+		map_e1m1();
+	else if (mapname == "e1m2")
+		map_e1m2();
+	else if (mapname == "e1m3")
+		map_e1m3();
+	else if (mapname == "e1m4")
+		map_e1m4();
+	else if (mapname == "e1m5")
+		map_e1m5();
+	else if (mapname == "e1m6")
+		map_e1m6();
+	else if (mapname == "e1m7")
+		map_e1m7();
+	else if (mapname == "e2m1")
+		map_e2m1();
+	else if (mapname == "e2m2")
+		map_e2m2();
+	else if (mapname == "e2m3")
+		map_e2m3();
+	else if (mapname == "e2m4")
+		map_e2m4();
+	else if (mapname == "e2m5")
+		map_e2m5();
+	else if (mapname == "e2m6")
+		map_e2m6();
+	else if (mapname == "e2m7")
+		map_e2m7();
+	else if (mapname == "e3m1")
+		map_e3m1();
+	else if (mapname == "e3m2")
+		map_e3m2();
+	else if (mapname == "e3m3")
+		map_e3m3();
+	else if (mapname == "e3m4")
+		map_e3m4();
+	else if (mapname == "e3m5")
+		map_e3m5();
+	else if (mapname == "e3m6")
+		map_e3m6();
+	else if (mapname == "e3m7")
+		map_e3m7();
+	else if (mapname == "e4m1")
+		map_e4m1();
+	else if (mapname == "e4m2")
+		map_e4m2();
+	else if (mapname == "e4m3")
+		map_e4m3();
+	else if (mapname == "e4m4")
+		map_e4m4();
+	else if (mapname == "e4m5")
+		map_e4m5();
+	else if (mapname == "e4m6")
+		map_e4m6();
+	else if (mapname == "e4m7")
+		map_e4m7();
+	else if (mapname == "e4m8")
+		map_e4m8();
+	else if (mapname == "end")
+		map_end();
 };
 
 /*
