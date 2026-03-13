@@ -1,21 +1,3 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 
 /*
 ==============================================================================
@@ -64,9 +46,9 @@ float		parm1, parm2, parm3, parm4, parm5, parm6, parm7, parm8, parm9, parm10, pa
 
 //
 // global variables set by built in functions
-//
+//	
 vector		v_forward, v_up, v_right;	// set by makevectors()
-
+	
 // set by traceline / tracebox
 float		trace_allsolid;
 float		trace_startsolid;
@@ -195,7 +177,7 @@ void		end_sys_globals;		// flag for structure dumping
 .float		armortype;		// save this fraction of incoming damage
 .float		armorvalue;
 
-.float		waterlevel;		// 0 = not in, 1 = feet, 2 = waist, 3 = eyes
+.float		waterlevel;		// 0 = not in, 1 = feet, 2 = wast, 3 = eyes
 .float		watertype;		// a contents value
 
 .float		ideal_yaw;
@@ -374,7 +356,7 @@ float	TE_TELEPORT		= 11;
 
 // sound channels
 // channel 0 never willingly overrides
-// other channels (1-7) always override a playing sound on that channel
+// other channels (1-7) allways override a playing sound on that channel
 float	CHAN_AUTO		= 0;
 float	CHAN_WEAPON		= 1;
 float	CHAN_VOICE		= 2;
@@ -415,15 +397,14 @@ float	MSG_INIT		= 3;		// write to the init string
 float	movedist;
 float	gameover;		// set when a rule exits
 
-// evaluates as FALSE (like NULL or 0) but treated like "" (empty string)
 string	string_null;	// null string, nothing should be held here
+float	empty_float;
 
 entity	newmis;			// launch_spike sets this after spawning it
 
 entity	activator;		// the entity that activated a trigger or brush
 
 entity	damage_attacker;	// set by T_Damage
-entity	damage_inflictor;	// track source of damage for throwing gibs
 float	framecount;
 
 float		skill;
@@ -535,12 +516,12 @@ float	AS_MISSILE		= 4;
 //
 .float		aflag;
 .float		dmg;			// damage done by door when hit
-
+	
 //
 // misc
 //
 .float		cnt; 			// misc flag
-
+	
 //
 // subs
 //
@@ -572,7 +553,7 @@ float	AS_MISSILE		= 4;
 
 
 //===========================================================================
-
+	
 
 //
 // builtin functions
@@ -585,8 +566,7 @@ void(entity e, vector min, vector max) setsize = #4;
 // #5 was removed
 void() break						= #6;
 float() random						= #7;		// returns 0 - 1
-// FrikBot: commented out - overridden by bot.qc
-//void(entity e, float chan, string samp, float vol, float atten) sound = #8;
+//~ void(entity e, float chan, string samp, float vol, float atten) sound = #8;
 vector(vector v) normalize			= #9;
 void(string e) error				= #10;
 void(string e) objerror				= #11;
@@ -600,18 +580,16 @@ void(entity e) remove				= #15;
 // An entity will also be ignored for testing if forent == test,
 // forent->owner == test, or test->owner == forent
 // a forent of world is ignored
-void(vector v1, vector v2, float nomonsters, entity forent) traceline = #16;
+void(vector v1, vector v2, float nomonsters, entity forent) traceline = #16;	
 
 entity() checkclient				= #17;	// returns a client to look for
 entity(entity start, .string fld, string match) find = #18;
 string(string s) precache_sound		= #19;
 string(string s) precache_model		= #20;
-// FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s)stuffcmd = #21;
+//~ void(entity client, string s)stuffcmd = #21;
 entity(vector org, float rad) findradius = #22;
 void(string s) bprint				= #23;
-// FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s) sprint = #24;
+//~ void(entity client, string s) sprint = #24;
 void(string s) dprint				= #25;
 string(float f) ftos				= #26;
 string(vector v) vtos				= #27;
@@ -631,8 +609,7 @@ float(entity e) checkbottom			= #40;		// true if self is on ground
 float(vector v) pointcontents		= #41;		// returns a CONTENT_*
 // #42 was removed
 float(float f) fabs = #43;
-// FrikBot: commented out - overridden by bot.qc
-//vector(entity e, float speed) aim = #44;		// returns the shooting vector
+//~ vector(entity e, float speed) aim = #44;		// returns the shooting vector
 float(string s) cvar = #45;						// return cvar.value
 void(string s) localcmd = #46;					// put string into local que
 entity(entity e) nextent = #47;					// for looping through all ents
@@ -645,16 +622,16 @@ vector(vector v) vectoangles			= #51;
 //
 // direct client message generation
 //
-// FrikBot: commented out - overridden by bot.qc
-//void(float to, float f) WriteByte		= #52;
-//void(float to, float f) WriteChar		= #53;
-//void(float to, float f) WriteShort		= #54;
-//void(float to, float f) WriteLong		= #55;
-//void(float to, float f) WriteCoord		= #56;
-//void(float to, float f) WriteAngle		= #57;
-//void(float to, string s) WriteString	= #58;
-//void(float to, entity s) WriteEntity	= #59;
-
+/* 
+void(float to, float f) WriteByte		= #52;
+void(float to, float f) WriteChar		= #53;
+void(float to, float f) WriteShort		= #54;
+void(float to, float f) WriteLong		= #55;
+void(float to, float f) WriteCoord		= #56;
+void(float to, float f) WriteAngle		= #57;
+void(float to, string s) WriteString	= #58;
+void(float to, entity s) WriteEntity	= #59;
+*/
 //
 // broadcast client message generation
 //
@@ -678,8 +655,7 @@ void(string s) changelevel = #70;
 
 void(string var, string val) cvar_set = #72;	// sets cvar.value
 
-// FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s) centerprint = #73;	// sprint, but in middle
+//~ void(entity client, string s) centerprint = #73;	// sprint, but in middle
 
 void(vector pos, string samp, float vol, float atten) ambientsound = #74;
 
@@ -687,8 +663,7 @@ string(string s) precache_model2	= #75;		// registered version only
 string(string s) precache_sound2	= #76;		// registered version only
 string(string s) precache_file2		= #77;		// registered version only
 
-// FrikBot: commented out - overridden by bot.qc
-//void(entity e) setspawnparms		= #78;		// set parm1... to the
+//~ void(entity e) setspawnparms		= #78;		// set parm1... to the
 												// values at level start
 												// for coop respawn
 
@@ -700,7 +675,7 @@ string(string s) precache_file2		= #77;		// registered version only
 void(vector tdest, float tspeed, void() func) SUB_CalcMove;
 void(entity ent, vector tdest, float tspeed, void() func) SUB_CalcMoveEnt;
 void(vector destangle, float tspeed, void() func) SUB_CalcAngleMove;
-void() SUB_CalcMoveDone;
+void()  SUB_CalcMoveDone;
 void() SUB_CalcAngleMoveDone;
 void() SUB_Null;
 void() SUB_UseTargets;

@@ -1,25 +1,7 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
-BOSS-ONE (Chthon)
+BOSS-ONE
 
 ==============================================================================
 */
@@ -30,7 +12,7 @@ $skin skin
 $scale 5
 
 $frame rise1 rise2 rise3 rise4 rise5 rise6 rise7 rise8 rise9 rise10
-$frame rise11 rise12 rise13 rise14 rise15 rise16 rise17
+$frame rise11 rise12 rise13 rise14 rise15 rise16 rise17 
 
 $frame walk1 walk2 walk3 walk4 walk5 walk6 walk7 walk8
 $frame walk9 walk10 walk11 walk12 walk13 walk14 walk15
@@ -45,11 +27,11 @@ $frame attack16 attack17 attack18 attack19 attack20 attack21 attack22
 $frame attack23
 
 $frame shocka1 shocka2 shocka3 shocka4 shocka5 shocka6 shocka7 shocka8
-$frame shocka9 shocka10
+$frame shocka9 shocka10 
 
 $frame shockb1 shockb2 shockb3 shockb4 shockb5 shockb6
 
-$frame shockc1 shockc2 shockc3 shockc4 shockc5 shockc6 shockc7 shockc8
+$frame shockc1 shockc2 shockc3 shockc4 shockc5 shockc6 shockc7 shockc8 
 $frame shockc9 shockc10
 
 
@@ -57,7 +39,8 @@ void(vector p) boss_missile;
 
 void() boss_face =
 {
-	// go for another player if multi player
+	
+// go for another player if multi player
 	if (self.enemy.health <= 0 || random() < 0.02)
 	{
 		self.enemy = find(self.enemy, classname, "player");
@@ -67,13 +50,11 @@ void() boss_face =
 	ai_face();
 };
 
-void() boss_rise1	=[	$rise1, boss_rise2 ]
-{
-	sound (self, CHAN_WEAPON, "boss1/out1.wav", 1, ATTN_NORM);
+void() boss_rise1	=[	$rise1, boss_rise2 ] {
+sound (self, CHAN_WEAPON, "boss1/out1.wav", 1, ATTN_NORM);
 };
-void() boss_rise2	=[	$rise2, boss_rise3 ]
-{
-	sound (self, CHAN_VOICE, "boss1/sight1.wav", 1, ATTN_NORM);
+void() boss_rise2	=[	$rise2, boss_rise3 ] {
+sound (self, CHAN_VOICE, "boss1/sight1.wav", 1, ATTN_NORM);
 };
 void() boss_rise3	=[	$rise3, boss_rise4 ] {};
 void() boss_rise4	=[	$rise4, boss_rise5 ] {};
@@ -183,9 +164,8 @@ void() boss_shockc8 =[	$shockc8, boss_shockc9 ] {};
 void() boss_shockc9 =[	$shockc9, boss_shockc10 ] {};
 void() boss_shockc10 =[	$shockc10, boss_death1 ] {};
 
-void() boss_death1 = [$death1, boss_death2]
-{
-	sound (self, CHAN_VOICE, "boss1/death.wav", 1, ATTN_NORM);
+void() boss_death1 = [$death1, boss_death2] {
+sound (self, CHAN_VOICE, "boss1/death.wav", 1, ATTN_NORM);
 };
 void() boss_death2 = [$death2, boss_death3] {};
 void() boss_death3 = [$death3, boss_death4] {};
@@ -214,39 +194,39 @@ void() boss_death10 = [$death9, boss_death10]
 
 void(vector p) boss_missile =
 {
-	local vector offang;
-	local vector org, vec, d;
-	local float t;
+	local	vector	offang;
+	local	vector	org, vec, d;
+	local	float	t;
 
-	offang = vectoangles (self.enemy.origin - self.origin);
+	offang = vectoangles (self.enemy.origin - self.origin);	
 	makevectors (offang);
 
 	org = self.origin + p_x*v_forward + p_y*v_right + p_z*'0 0 1';
-
-	// lead the player on hard mode
+	
+// lead the player on hard mode
 	if (skill > 1)
 	{
 		t = vlen(self.enemy.origin - org) / 300;
 		vec = self.enemy.velocity;
 		vec_z = 0;
-		d = self.enemy.origin + t * vec;
+		d = self.enemy.origin + t * vec;		
 	}
 	else
 	{
 		d = self.enemy.origin;
 	}
-
+	
 	vec = normalize (d - org);
 
 	launch_spike (org, vec);
 	setmodel (newmis, "progs/lavaball.mdl");
 	newmis.avelocity = '200 100 300';
-	setsize (newmis, VEC_ORIGIN, VEC_ORIGIN);
+	setsize (newmis, VEC_ORIGIN, VEC_ORIGIN);		
 	newmis.velocity = vec*300;
 	newmis.touch = T_MissileTouch; // rocket explosion
 	sound (self, CHAN_WEAPON, "boss1/throw.wav", 1, ATTN_NORM);
 
-	// check for dead enemy
+// check for dead enemy
 	if (self.enemy.health <= 0)
 		boss_idle1 ();
 };
@@ -257,10 +237,10 @@ void() boss_awake =
 	self.solid = SOLID_SLIDEBOX;
 	self.movetype = MOVETYPE_STEP;
 	self.takedamage = DAMAGE_NO;
-
+	
 	setmodel (self, "progs/boss.mdl");
 	setsize (self, '-128 -128 -24', '128 128 256');
-
+	
 	if (skill == 0)
 		self.health = 1;
 	else
@@ -312,23 +292,22 @@ float	lightning_end;
 void() lightning_fire =
 {
 	local vector p1, p2;
-
+	
 	if (time >= lightning_end)
-	{
-		// done here, put the terminals back up
+	{	// done here, put the terminals back up
 		self = le1;
 		door_go_down ();
 		self = le2;
 		door_go_down ();
 		return;
 	}
-
+	
 	p1 = (le1.mins + le1.maxs) * 0.5;
 	p1_z = le1.absmin_z - 16;
-
+	
 	p2 = (le2.mins + le2.maxs) * 0.5;
 	p2_z = le2.absmin_z - 16;
-
+	
 	// compensate for length of bolt
 	p2 = p2 - normalize(p2-p1)*100;
 
@@ -358,23 +337,25 @@ void() lightning_use =
 		dprint ("missing lightning targets\n");
 		return;
 	}
-
-	if ((le1.state != STATE_TOP && le1.state != STATE_BOTTOM)
-		|| (le2.state != STATE_TOP && le2.state != STATE_BOTTOM)
-		|| (le1.state != le2.state))
+	
+	if (
+	 (le1.state != STATE_TOP && le1.state != STATE_BOTTOM)
+	|| (le2.state != STATE_TOP && le2.state != STATE_BOTTOM)
+	|| (le1.state != le2.state) )
 	{
+//		dprint ("not aligned\n");
 		return;
 	}
 
-	// don't let the electrodes go back up until the bolt is done
+// don't let the electrodes go back up until the bolt is done
 	le1.nextthink = -1;
 	le2.nextthink = -1;
 	lightning_end = time + 1;
 
 	sound (self, CHAN_VOICE, "misc/power.wav", 1, ATTN_NORM);
-	lightning_fire ();
+	lightning_fire ();		
 
-	// advance the boss pain if down
+// advance the boss pain if down
 	self = find (world, classname, "monster_boss");
 	if (!self)
 		return;
@@ -389,7 +370,7 @@ void() lightning_use =
 			boss_shockb1();
 		else if (self.health == 0)
 			boss_shockc1();
-	}
+	}	
 };
 
 
@@ -400,4 +381,5 @@ void() event_lightning =
 {
 	self.use = lightning_use;
 };
+
 

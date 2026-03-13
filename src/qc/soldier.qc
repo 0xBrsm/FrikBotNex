@@ -1,32 +1,14 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
-SOLDIER / PLAYER (Grunt)
+SOLDIER / PLAYER
 
 ==============================================================================
 */
 
 $cd id1/models/soldier3
 $origin 0 -6 24
-$base base
+$base base		
 $skin skin
 
 $frame stand1 stand2 stand3 stand4 stand5 stand6 stand7 stand8
@@ -72,12 +54,10 @@ void()	army_stand6	=[	$stand6,	army_stand7	] {ai_stand();};
 void()	army_stand7	=[	$stand7,	army_stand8	] {ai_stand();};
 void()	army_stand8	=[	$stand8,	army_stand1	] {ai_stand();};
 
-void()	army_walk1	=[	$prowl_1,	army_walk2	]
-{
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "soldier/idle.wav", 1, ATTN_IDLE);
-	ai_walk(1);
-};
+void()	army_walk1	=[	$prowl_1,	army_walk2	] {
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "soldier/idle.wav", 1, ATTN_IDLE);
+ai_walk(1);};
 void()	army_walk2	=[	$prowl_2,	army_walk3	] {ai_walk(1);};
 void()	army_walk3	=[	$prowl_3,	army_walk4	] {ai_walk(1);};
 void()	army_walk4	=[	$prowl_4,	army_walk5	] {ai_walk(1);};
@@ -102,12 +82,10 @@ void()	army_walk22	=[	$prowl_22,	army_walk23	] {ai_walk(1);};
 void()	army_walk23	=[	$prowl_23,	army_walk24	] {ai_walk(1);};
 void()	army_walk24	=[	$prowl_24,	army_walk1	] {ai_walk(1);};
 
-void()	army_run1	=[	$run1,		army_run2	]
-{
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "soldier/idle.wav", 1, ATTN_IDLE);
-	ai_run(11);
-};
+void()	army_run1	=[	$run1,		army_run2	] {
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "soldier/idle.wav", 1, ATTN_IDLE);
+ai_run(11);};
 void()	army_run2	=[	$run2,		army_run3	] {ai_run(15);};
 void()	army_run3	=[	$run3,		army_run4	] {ai_run(10);};
 void()	army_run4	=[	$run4,		army_run5	] {ai_run(10);};
@@ -120,12 +98,8 @@ void()	army_atk1	=[	$shoot1,	army_atk2	] {ai_face();};
 void()	army_atk2	=[	$shoot2,	army_atk3	] {ai_face();};
 void()	army_atk3	=[	$shoot3,	army_atk4	] {ai_face();};
 void()	army_atk4	=[	$shoot4,	army_atk5	] {ai_face();};
-void()	army_atk5	=[	$shoot5,	army_atk6	]
-{
-	ai_face();
-	army_fire();
-	self.effects = self.effects | EF_MUZZLEFLASH;
-};
+void()	army_atk5	=[	$shoot5,	army_atk6	] {ai_face();army_fire();
+self.effects = self.effects | EF_MUZZLEFLASH;};
 void()	army_atk6	=[	$shoot6,	army_atk7	] {ai_face();};
 void()	army_atk7	=[	$shoot7,	army_atk8	] {ai_face();SUB_CheckRefire (army_atk1);};
 void()	army_atk8	=[	$shoot8,	army_atk9	] {ai_face();};
@@ -171,7 +145,7 @@ void()	army_painc13=[	$painc13,	army_run1] {};
 void(entity attacker, float damage)	army_pain =
 {
 	local float r;
-
+	
 	if (self.pain_finished > time)
 		return;
 
@@ -200,19 +174,19 @@ void(entity attacker, float damage)	army_pain =
 
 void() army_fire =
 {
-	local vector dir;
-	local entity en;
-
+	local	vector	dir;
+	local	entity	en;
+	
 	ai_face();
+	
+	sound (self, CHAN_WEAPON, "soldier/sattck1.wav", 1, ATTN_NORM);	
 
-	sound (self, CHAN_WEAPON, "soldier/sattck1.wav", 1, ATTN_NORM);
-
-	// fire somewhat behind the player, so a dodging player is harder to hit
+// fire somewhat behind the player, so a dodging player is harder to hit
 	en = self.enemy;
-
+	
 	dir = en.origin - en.velocity*0.2;
 	dir = normalize (dir - self.origin);
-
+	
 	FireBullets (4, dir, '0.1 0.1 0');
 };
 
@@ -221,11 +195,7 @@ void() army_fire =
 void()	army_die1	=[	$death1,	army_die2	] {};
 void()	army_die2	=[	$death2,	army_die3	] {};
 void()	army_die3	=[	$death3,	army_die4	]
-{
-	self.solid = SOLID_NOT;
-	self.ammo_shells = 5;
-	DropBackpack();
-};
+{self.solid = SOLID_NOT;self.ammo_shells = 5;DropBackpack();};
 void()	army_die4	=[	$death4,	army_die5	] {};
 void()	army_die5	=[	$death5,	army_die6	] {};
 void()	army_die6	=[	$death6,	army_die7	] {};
@@ -237,12 +207,7 @@ void()	army_die10	=[	$death10,	army_die10	] {};
 void()	army_cdie1	=[	$deathc1,	army_cdie2	] {};
 void()	army_cdie2	=[	$deathc2,	army_cdie3	] {ai_back(5);};
 void()	army_cdie3	=[	$deathc3,	army_cdie4	]
-{
-	self.solid = SOLID_NOT;
-	self.ammo_shells = 5;
-	DropBackpack();
-	ai_back(4);
-};
+{self.solid = SOLID_NOT;self.ammo_shells = 5;DropBackpack();ai_back(4);};
 void()	army_cdie4	=[	$deathc4,	army_cdie5	] {ai_back(13);};
 void()	army_cdie5	=[	$deathc5,	army_cdie6	] {ai_back(3);};
 void()	army_cdie6	=[	$deathc6,	army_cdie7	] {ai_back(4);};
@@ -255,7 +220,7 @@ void()	army_cdie11	=[	$deathc11,	army_cdie11	] {};
 
 void() army_die =
 {
-	// check for gib
+// check for gib
 	if (self.health < -35)
 	{
 		sound (self, CHAN_VOICE, "player/udeath.wav", 1, ATTN_NORM);
@@ -266,7 +231,7 @@ void() army_die =
 		return;
 	}
 
-	// regular death
+// regular death
 	sound (self, CHAN_VOICE, "soldier/death1.wav", 1, ATTN_NORM);
 	if (random() < 0.5)
 		army_die1 ();
@@ -278,7 +243,7 @@ void() army_die =
 /*QUAKED monster_army (1 0 0) (-16 -16 -24) (16 16 40) Ambush
 */
 void() monster_army =
-{
+{	
 	if (deathmatch)
 	{
 		remove(self);
@@ -297,8 +262,7 @@ void() monster_army =
 	precache_sound ("soldier/sattck1.wav");
 	precache_sound ("soldier/sight1.wav");
 
-	// gib death
-	precache_sound ("player/udeath.wav");
+	precache_sound ("player/udeath.wav");		// gib death
 
 
 	self.solid = SOLID_SLIDEBOX;

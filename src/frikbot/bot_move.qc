@@ -213,80 +213,6 @@ Also responsible for jumping gaps.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-frik_check_hazard
-
-Proactive hazard scanning: checks the ground
-ahead and to the sides for lava/slime.
-Returns TRUE and calls frik_obstructed if
-a hazard is detected.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float() frik_check_hazard =
-{
-	local vector ang, check, side;
-	local float conts;
-
-	if (!(self.flags & FL_ONGROUND))
-		return FALSE;
-
-	ang = self.velocity;
-	ang_z = 0;
-	if (vlen(ang) < 0.1)
-		return FALSE;
-	ang = normalize(ang);
-
-	// check ground 48 units ahead
-	check = self.origin + ang * 48;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
-	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
-		{
-			frik_obstructed(ang, TRUE);
-			return TRUE;
-		}
-	}
-
-	// check to the left and right (24 units out, 48 ahead)
-	side_x = ang_y * -1;
-	side_y = ang_x;
-
-	check = self.origin + ang * 48 + side * 24;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
-	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
-		{
-			frik_obstructed(ang + side, TRUE);
-			return TRUE;
-		}
-	}
-
-	check = self.origin + ang * 48 - side * 24;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
-	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
-		{
-			frik_obstructed(ang - side, TRUE);
-			return TRUE;
-		}
-	}
-
-	return FALSE;
-};
-
 void() frik_obstacles =
 {
 	local vector start, stop, ang;
@@ -295,10 +221,6 @@ void() frik_obstacles =
 	if (!(self.flags & FL_ONGROUND))
 		return;
 	if (self.b_aiflags & AI_BLIND)
-		return;
-
-	// proactive hazard scan (lava/slime ahead and to sides)
-	if (frik_check_hazard())
 		return;
 
 	ang = normalize(self.velocity);
@@ -489,127 +411,10 @@ blah
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_bhop
-
-Bunny hop / strafe jump logic for skill 2+.
-Chains jumps on landing and adds air strafe
-to gain speed via SV_AirAccelerate.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void() bot_bhop =
-{
-	local float spd, yaw_nudge;
-	local vector vel;
-
-	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
-	if (self.b_personality == PERSONALITY_AGGRESSIVE)
-	{
-		if (self.b_skill < 1)
-			return;
-	}
-	else if (self.b_personality == PERSONALITY_DEFENSIVE || self.b_personality == PERSONALITY_CAMPER)
-	{
-		// defensive/camper: rarely bhop
-		if (self.b_skill < 3)
-			return;
-	}
-	else
-	{
-		if (self.b_skill < 2)
-			return;
-	}
-
-	// don't bhop during precision movement, on trains, or in water
-	if (self.b_aiflags & (AI_PRECISION | AI_RIDE_TRAIN | AI_WAIT))
-		return;
-	if (self.waterlevel > 1)
-		return;
-
-	// don't bhop when target is very close (prevents overshooting)
-	if (self.target1)
-	{
-		if (vlen(realorigin(self.target1) - self.origin) < 128)
-			return;
-	}
-
-	vel = self.velocity;
-	vel_z = 0;
-	spd = vlen(vel);
-
-	if (self.flags & FL_ONGROUND)
-	{
-		// in a chain - keep jumping if speed is above a lower "stop" threshold
-		if (self.b_bhop_land)
-		{
-			if (spd > 80)
-			{
-				// human emulation: occasionally fumble a bhop in the chain
-				if (random() < self.b_bhop_fumble)
-				{
-					self.b_bhop_land = 0;
-					return;
-				}
-				bot_jump();
-				return;
-			}
-			else
-			{
-				// speed dropped too low, break the chain
-				self.b_bhop_land = 0;
-				return;
-			}
-		}
-
-		// start a bhop chain if moving fast enough
-		// skill 3: initiates more aggressively
-		if (spd > 150 || (self.b_skill >= 3 && spd > 50))
-		{
-			bot_jump();
-			self.b_bhop_land = 1;
-			// set fumble rate for this chain based on skill
-			// skill 2: 15% miss chance, skill 3: 5%
-			if (self.b_skill >= 3)
-				self.b_bhop_fumble = 0.05;
-			else
-				self.b_bhop_fumble = 0.15;
-		}
-	}
-	else if (self.b_bhop_land)
-	{
-		// in air during bhop - strafe + yaw turn for air acceleration
-		// SV_AirAccelerate requires wish direction offset from velocity,
-		// achieved by holding strafe and turning into the strafe direction
-		if (self.b_strafe_dir == 0)
-		{
-			if (random() < 0.5)
-				self.b_strafe_dir = 1;
-			else
-				self.b_strafe_dir = -1;
-		}
-		if (self.b_strafe_dir > 0)
-			self.keys = self.keys | KEY_MOVERIGHT;
-		else
-			self.keys = self.keys | KEY_MOVELEFT;
-
-		// turn view into strafe direction for actual speed gain
-		// skill 3: 5-8 deg/frame, skill 2: 3-5 deg/frame
-		if (self.b_skill >= 3)
-			yaw_nudge = 5 + random() * 3;
-		else
-			yaw_nudge = 3 + random() * 2;
-		self.b_angle_y = self.b_angle_y + self.b_strafe_dir * yaw_nudge;
-	}
-};
-
 void() frik_movetogoal =
 {
 	local vector way, start, stop, ang;
-	local float g, jitter_chance, jitter_wait;
+	local float g;
 
 	if (self.target1 == world)
 	{
@@ -627,30 +432,6 @@ void() frik_movetogoal =
 	way = normalize(way);
 	self.keys = self.keys & 960 + frik_KeysForDir(way);
 
-	// human emulation: occasional strafe jitter during navigation
-	// humans don't run in perfectly straight lines
-	// personality: aggressive bots are fidgety, campers/defensive move clean
-	if (!self.enemy && time > self.b_nav_jitter_time)
-	{
-		if (self.b_personality == PERSONALITY_AGGRESSIVE)
-		{	jitter_chance = 0.25; jitter_wait = 0.2 + random() * 0.3; }
-		else if (self.b_personality == PERSONALITY_CAMPER)
-		{	jitter_chance = 0.06; jitter_wait = 0.5 + random() * 0.8; }
-		else if (self.b_personality == PERSONALITY_DEFENSIVE)
-		{	jitter_chance = 0.08; jitter_wait = 0.4 + random() * 0.6; }
-		else
-		{	jitter_chance = 0.15; jitter_wait = 0.3 + random() * 0.5; }
-
-		if (random() < jitter_chance)
-		{
-			if (random() < 0.5)
-				self.keys = self.keys | KEY_MOVELEFT;
-			else
-				self.keys = self.keys | KEY_MOVERIGHT;
-		}
-		self.b_nav_jitter_time = time + jitter_wait;
-	}
-
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
 
@@ -663,8 +444,6 @@ void() frik_movetogoal =
 		if (fabs(g) > 10)
 			self.keys = self.keys & 960;
 	}
-	else
-		bot_bhop();
 };
 
 float(vector weird) frik_walkmove =

@@ -1,25 +1,7 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
-DOG (Rottweiler)
+DOG
 
 ==============================================================================
 */
@@ -60,8 +42,8 @@ dog_bite
 */
 void() dog_bite =
 {
-	local vector delta;
-	local float ldmg;
+local vector	delta;
+local float 	ldmg;
 
 	if (!self.enemy)
 		return;
@@ -75,35 +57,40 @@ void() dog_bite =
 
 	if (vlen(delta) > 100)
 		return;
-
+		
 	ldmg = (random() + random() + random()) * 8;
 	T_Damage (self.enemy, self, self, ldmg);
 };
 
 void()	Dog_JumpTouch =
 {
-	local float ldmg;
+	local	float	ldmg;
 
 	if (self.health <= 0)
 		return;
-
+		
 	if (other.takedamage)
 	{
 		if ( vlen(self.velocity) > 300 )
 		{
 			ldmg = 10 + 10*random();
-			T_Damage (other, self, self, ldmg);
+			T_Damage (other, self, self, ldmg);	
 		}
 	}
 
 	if (!checkbottom(self))
 	{
 		if (self.flags & FL_ONGROUND)
-		{
-			// jump randomly to not get hung up
-			self.touch = SUB_Null;
-			self.think = dog_leap1;
-			self.nextthink = time + 0.1;
+		{	// jump randomly to not get hung up
+//dprint ("popjump\n");
+	self.touch = SUB_Null;
+	self.think = dog_leap1;
+	self.nextthink = time + 0.1;
+
+//			self.velocity_x = (random() - 0.5) * 600;
+//			self.velocity_y = (random() - 0.5) * 600;
+//			self.velocity_z = 200;
+//			self.flags = self.flags - FL_ONGROUND;
 		}
 		return;	// not on ground yet
 	}
@@ -124,12 +111,10 @@ void() dog_stand7	=[	$stand7,	dog_stand8	] {ai_stand();};
 void() dog_stand8	=[	$stand8,	dog_stand9	] {ai_stand();};
 void() dog_stand9	=[	$stand9,	dog_stand1	] {ai_stand();};
 
-void() dog_walk1	=[	$walk1 ,	dog_walk2	]
-{
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "dog/idle.wav", 1, ATTN_IDLE);
-	ai_walk(8);
-};
+void() dog_walk1	=[	$walk1 ,	dog_walk2	] {
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "dog/idle.wav", 1, ATTN_IDLE);
+ai_walk(8);};
 void() dog_walk2	=[	$walk2 ,	dog_walk3	] {ai_walk(8);};
 void() dog_walk3	=[	$walk3 ,	dog_walk4	] {ai_walk(8);};
 void() dog_walk4	=[	$walk4 ,	dog_walk5	] {ai_walk(8);};
@@ -138,12 +123,10 @@ void() dog_walk6	=[	$walk6 ,	dog_walk7	] {ai_walk(8);};
 void() dog_walk7	=[	$walk7 ,	dog_walk8	] {ai_walk(8);};
 void() dog_walk8	=[	$walk8 ,	dog_walk1	] {ai_walk(8);};
 
-void() dog_run1		=[	$run1  ,	dog_run2	]
-{
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "dog/idle.wav", 1, ATTN_IDLE);
-	ai_run(16);
-};
+void() dog_run1		=[	$run1  ,	dog_run2	] {
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "dog/idle.wav", 1, ATTN_IDLE);
+ai_run(16);};
 void() dog_run2		=[	$run2  ,	dog_run3	] {ai_run(32);};
 void() dog_run3		=[	$run3  ,	dog_run4	] {ai_run(32);};
 void() dog_run4		=[	$run4  ,	dog_run5	] {ai_run(20);};
@@ -159,11 +142,9 @@ void() dog_run12	=[	$run12  ,	dog_run1	] {ai_run(32);};
 void() dog_atta1	=[	$attack1,	dog_atta2	] {ai_charge(10);};
 void() dog_atta2	=[	$attack2,	dog_atta3	] {ai_charge(10);};
 void() dog_atta3	=[	$attack3,	dog_atta4	] {ai_charge(10);};
-void() dog_atta4	=[	$attack4,	dog_atta5	]
-{
-	sound (self, CHAN_VOICE, "dog/dattack1.wav", 1, ATTN_NORM);
-	dog_bite();
-};
+void() dog_atta4	=[	$attack4,	dog_atta5	] {
+sound (self, CHAN_VOICE, "dog/dattack1.wav", 1, ATTN_NORM);
+dog_bite();};
 void() dog_atta5	=[	$attack5,	dog_atta6	] {ai_charge(10);};
 void() dog_atta6	=[	$attack6,	dog_atta7	] {ai_charge(10);};
 void() dog_atta7	=[	$attack7,	dog_atta8	] {ai_charge(10);};
@@ -173,7 +154,7 @@ void() dog_leap1	=[	$leap1,		dog_leap2	] {ai_face();};
 void() dog_leap2	=[	$leap2,		dog_leap3	]
 {
 	ai_face();
-
+	
 	self.touch = Dog_JumpTouch;
 	makevectors (self.angles);
 	self.origin_z = self.origin_z + 1;
@@ -214,7 +195,7 @@ void() dog_painb14	=[	$painb14 ,	dog_painb15	] {};
 void() dog_painb15	=[	$painb15 ,	dog_painb16	] {};
 void() dog_painb16	=[	$painb16 ,	dog_run1	] {};
 
-void(entity attacker, float damage) dog_pain =
+void() dog_pain =
 {
 	sound (self, CHAN_VOICE, "dog/dpain1.wav", 1, ATTN_NORM);
 
@@ -247,7 +228,7 @@ void() dog_dieb9		=[	$deathb9,	dog_dieb9	] {};
 
 void() dog_die =
 {
-	// check for gib
+// check for gib
 	if (self.health < -35)
 	{
 		sound (self, CHAN_VOICE, "player/udeath.wav", 1, ATTN_NORM);
@@ -258,7 +239,7 @@ void() dog_die =
 		return;
 	}
 
-	// regular death
+// regular death
 	sound (self, CHAN_VOICE, "dog/ddeath.wav", 1, ATTN_NORM);
 	self.solid = SOLID_NOT;
 
@@ -295,44 +276,48 @@ CheckDogJump
 */
 float()	CheckDogJump =
 {
-	local vector dist;
-	local float	d;
+	local	vector	dist;
+	local	float	d;
 
-	if (self.origin_z + self.mins_z > self.enemy.origin_z + self.enemy.mins_z + 0.75 * self.enemy.size_z)
+	if (self.origin_z + self.mins_z > self.enemy.origin_z + self.enemy.mins_z
+	+ 0.75 * self.enemy.size_z)
 		return FALSE;
-
-	if (self.origin_z + self.maxs_z < self.enemy.origin_z + self.enemy.mins_z + 0.25 * self.enemy.size_z)
+		
+	if (self.origin_z + self.maxs_z < self.enemy.origin_z + self.enemy.mins_z
+	+ 0.25 * self.enemy.size_z)
 		return FALSE;
-
+		
 	dist = self.enemy.origin - self.origin;
 	dist_z = 0;
-
+	
 	d = vlen(dist);
-
+	
 	if (d < 80)
 		return FALSE;
-
+		
 	if (d > 150)
 		return FALSE;
-
+		
 	return TRUE;
 };
 
 float()	DogCheckAttack =
 {
-	// if close enough for slashing, go for it
+	local	vector	vec;
+	
+// if close enough for slashing, go for it
 	if (CheckDogMelee ())
 	{
 		self.attack_state = AS_MELEE;
 		return TRUE;
 	}
-
+	
 	if (CheckDogJump ())
 	{
 		self.attack_state = AS_MISSILE;
 		return TRUE;
 	}
-
+	
 	return FALSE;
 };
 
@@ -340,6 +325,7 @@ float()	DogCheckAttack =
 //===========================================================================
 
 /*QUAKED monster_dog (1 0 0) (-32 -32 -24) (32 32 40) Ambush
+
 */
 void() monster_dog =
 {

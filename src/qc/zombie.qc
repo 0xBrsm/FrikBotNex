@@ -1,21 +1,3 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
@@ -90,11 +72,9 @@ void() zombie_stand13	=[	$stand13,		zombie_stand14	] {ai_stand();};
 void() zombie_stand14	=[	$stand14,		zombie_stand15	] {ai_stand();};
 void() zombie_stand15	=[	$stand15,		zombie_stand1	] {ai_stand();};
 
-void() zombie_cruc1	=	[	$cruc_1,		zombie_cruc2	]
-{
-	if (random() < 0.1)
-		sound (self, CHAN_VOICE, "zombie/idle_w2.wav", 1, ATTN_STATIC);
-};
+void() zombie_cruc1	=	[	$cruc_1,		zombie_cruc2	] {
+if (random() < 0.1)
+	sound (self, CHAN_VOICE, "zombie/idle_w2.wav", 1, ATTN_STATIC);};
 void() zombie_cruc2	=	[	$cruc_2,		zombie_cruc3	] {self.nextthink = time + 0.1 + random()*0.1;};
 void() zombie_cruc3	=	[	$cruc_3,		zombie_cruc4	] {self.nextthink = time + 0.1 + random()*0.1;};
 void() zombie_cruc4	=	[	$cruc_4,		zombie_cruc5	] {self.nextthink = time + 0.1 + random()*0.1;};
@@ -119,12 +99,10 @@ void() zombie_walk15	=[	$walk15,	zombie_walk16	] {ai_walk(0);};
 void() zombie_walk16	=[	$walk16,	zombie_walk17	] {ai_walk(0);};
 void() zombie_walk17	=[	$walk17,	zombie_walk18	] {ai_walk(0);};
 void() zombie_walk18	=[	$walk18,	zombie_walk19	] {ai_walk(0);};
-void() zombie_walk19	=[	$walk19,	zombie_walk1	]
-{
-	ai_walk(0);
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);
-};
+void() zombie_walk19	=[	$walk19,	zombie_walk1	] {
+ai_walk(0);
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);};
 
 void() zombie_run1		=[	$run1,		zombie_run2	] {ai_run(1);self.inpain = 0;};
 void() zombie_run2		=[	$run2,		zombie_run3	] {ai_run(1);};
@@ -143,13 +121,12 @@ void() zombie_run14		=[	$run14,		zombie_run15	] {ai_run(4);};
 void() zombie_run15		=[	$run15,		zombie_run16	] {ai_run(6);};
 void() zombie_run16		=[	$run16,		zombie_run17	] {ai_run(7);};
 void() zombie_run17		=[	$run17,		zombie_run18	] {ai_run(3);};
-void() zombie_run18		=[	$run18,		zombie_run1	]
-{
-	ai_run(8);
-	if (random() < 0.2)
-		sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);
-	if (random() > 0.8)
-		sound (self, CHAN_VOICE, "zombie/z_idle1.wav", 1, ATTN_IDLE);
+void() zombie_run18		=[	$run18,		zombie_run1	] {
+ai_run(8);
+if (random() < 0.2)
+	sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);
+if (random() > 0.8)
+	sound (self, CHAN_VOICE, "zombie/z_idle1.wav", 1, ATTN_IDLE);
 };
 
 /*
@@ -163,8 +140,7 @@ ATTACKS
 void() ZombieGrenadeTouch =
 {
 	if (other == self.owner)
-		// don't explode on owner
-		return;
+		return;		// don't explode on owner
 	if (other.takedamage)
 	{
 		T_Damage (other, self, self.owner, 10 );
@@ -172,8 +148,7 @@ void() ZombieGrenadeTouch =
 		remove (self);
 		return;
 	}
-	// bounce sound
-	sound (self, CHAN_WEAPON, "zombie/z_miss.wav", 1, ATTN_NORM);
+	sound (self, CHAN_WEAPON, "zombie/z_miss.wav", 1, ATTN_NORM);	// bounce sound
 	self.velocity = '0 0 0';
 	self.avelocity = '0 0 0';
 	self.touch = SUB_Remove;
@@ -186,8 +161,8 @@ ZombieFireGrenade
 */
 void(vector st) ZombieFireGrenade =
 {
-	local entity missile;
-	local vector org;
+	local	entity missile, mpuff;
+	local	vector	org;
 
 	sound (self, CHAN_WEAPON, "zombie/z_shot1.wav", 1, ATTN_NORM);
 
@@ -196,10 +171,11 @@ void(vector st) ZombieFireGrenade =
 	missile.movetype = MOVETYPE_BOUNCE;
 	missile.solid = SOLID_BBOX;
 
-	// calc org
+// calc org
 	org = self.origin + st_x * v_forward + st_y * v_right + (st_z - 24) * v_up;
+	
+// set missile speed	
 
-	// set missile speed
 	makevectors (self.angles);
 
 	missile.velocity = normalize(self.enemy.origin - org);
@@ -209,13 +185,13 @@ void(vector st) ZombieFireGrenade =
 	missile.avelocity = '3000 1000 2000';
 
 	missile.touch = ZombieGrenadeTouch;
-
-	// set missile duration
+	
+// set missile duration
 	missile.nextthink = time + 2.5;
 	missile.think = SUB_Remove;
 
 	setmodel (missile, "progs/zom_gib.mdl");
-	setsize (missile, '0 0 0', '0 0 0');
+	setsize (missile, '0 0 0', '0 0 0');		
 	setorigin (missile, org);
 };
 
@@ -264,10 +240,10 @@ void() zombie_attc12	=[	$attc12,	zombie_run1		] {ai_face();ZombieFireGrenade('-1
 
 void() zombie_missile =
 {
-	local float r;
-
+	local float	r;
+	
 	r = random();
-
+	
 	if (r < 0.3)
 		zombie_atta1 ();
 	else if (r < 0.6)
@@ -360,10 +336,9 @@ void() zombie_paind11	=[	$paind11,	zombie_paind12	] {};
 void() zombie_paind12	=[	$paind12,	zombie_paind13	] {};
 void() zombie_paind13	=[	$paind13,	zombie_run1	] {};
 
-void() zombie_paine1	=[	$paine1,	zombie_paine2	]
-{
-	sound (self, CHAN_VOICE, "zombie/z_pain.wav", 1, ATTN_NORM);
-	self.health = 60;
+void() zombie_paine1	=[	$paine1,	zombie_paine2	] {
+sound (self, CHAN_VOICE, "zombie/z_pain.wav", 1, ATTN_NORM);
+self.health = 60;
 };
 void() zombie_paine2	=[	$paine2,	zombie_paine3	] {ai_pain(8);};
 void() zombie_paine3	=[	$paine3,	zombie_paine4	] {ai_pain(5);};
@@ -373,24 +348,22 @@ void() zombie_paine6	=[	$paine6,	zombie_paine7	] {ai_pain(2);};
 void() zombie_paine7	=[	$paine7,	zombie_paine8	] {ai_pain(1);};
 void() zombie_paine8	=[	$paine8,	zombie_paine9	] {ai_pain(1);};
 void() zombie_paine9	=[	$paine9,	zombie_paine10	] {ai_pain(2);};
-void() zombie_paine10	=[	$paine10,	zombie_paine11	]
-{
-	sound (self, CHAN_BODY, "zombie/z_fall.wav", 1, ATTN_NORM);
-	self.solid = SOLID_NOT;
+void() zombie_paine10	=[	$paine10,	zombie_paine11	] {
+sound (self, CHAN_BODY, "zombie/z_fall.wav", 1, ATTN_NORM);
+self.solid = SOLID_NOT;
 };
 void() zombie_paine11	=[	$paine11,	zombie_paine12	] {self.nextthink = self.nextthink + 5;self.health = 60;};
-void() zombie_paine12	=[	$paine12,	zombie_paine13	]
+void() zombie_paine12	=[	$paine12,	zombie_paine13	]{
+// see if ok to stand up
+self.health = 60;
+sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);
+self.solid = SOLID_SLIDEBOX;
+if (!walkmove (0, 0))
 {
-	// see if ok to stand up
-	self.health = 60;
-	sound (self, CHAN_VOICE, "zombie/z_idle.wav", 1, ATTN_IDLE);
-	self.solid = SOLID_SLIDEBOX;
-	if (!walkmove (0, 0))
-	{
-		self.think = zombie_paine11;
-		self.solid = SOLID_NOT;
-		return;
-	}
+	self.think = zombie_paine11;
+	self.solid = SOLID_NOT;
+	return;
+}
 };
 void() zombie_paine13	=[	$paine13,	zombie_paine14	] {};
 void() zombie_paine14	=[	$paine14,	zombie_paine15	] {};
@@ -427,7 +400,7 @@ zombie_pain
 Zombies can only be killed (gibbed) by doing 60 hit points of damage
 in a single frame (rockets, grenades, quad shotgun, quad nailgun).
 
-A hit of 25 points or more (super shotgun, quad nailgun) will always put it
+A hit of 25 points or more (super shotgun, quad nailgun) will allways put it
 down to the ground.
 
 A hit of from 10 to 40 points in one frame will cause it to go down if it
@@ -443,42 +416,38 @@ void(entity attacker, float take) zombie_pain =
 {
 	local float r;
 
-	// always reset health
-	self.health = 60;
+	self.health = 60;		// allways reset health
 
 	if (take < 9)
-		// totally ignore
-		return;
+		return;				// totally ignore
 
 	if (self.inpain == 2)
-		// down on ground, so don't reset any counters
-		return;
+		return;			// down on ground, so don't reset any counters
 
-	// go down immediately if a big enough hit
+// go down immediately if a big enough hit
 	if (take >= 25)
 	{
 		self.inpain = 2;
 		zombie_paine1 ();
 		return;
 	}
-
+	
 	if (self.inpain)
 	{
-		// if hit again in next gre seconds while not in pain frames, definitely drop
+// if hit again in next gre seconds while not in pain frames, definately drop
 		self.pain_finished = time + 3;
-		// currently going through an animation, don't change
-		return;
+		return;			// currently going through an animation, don't change
 	}
-
+	
 	if (self.pain_finished > time)
 	{
-		// hit again, so drop down
+// hit again, so drop down
 		self.inpain = 2;
 		zombie_paine1 ();
 		return;
 	}
 
-	// gp into one of the fast pain animations
+// gp into one of the fast pain animations	
 	self.inpain = 1;
 
 	r = random();

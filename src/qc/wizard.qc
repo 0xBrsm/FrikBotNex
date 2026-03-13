@@ -1,32 +1,14 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
-WIZARD (Scrag)
+WIZARD
 
 ==============================================================================
 */
 
 $cd id1/models/a_wizard
 $origin 0 0 24
-$base wizbase
+$base wizbase	
 $skin wizbase
 
 $frame hover1 hover2 hover3 hover4 hover5 hover6 hover7 hover8
@@ -64,35 +46,35 @@ if self.enemy maintains it's current velocity
 */
 void(entity missile, float mspeed, float accuracy) LaunchMissile =
 {
-	local vector vec, move;
-	local float fly;
+	local	vector	vec, move;
+	local	float	fly;
 
 	makevectors (self.angles);
-
-	// set missile speed
+		
+// set missile speed
 	vec = self.enemy.origin + self.enemy.mins + self.enemy.size * 0.7 - missile.origin;
 
-	// calc approximate time for missile to reach vec
+// calc aproximate time for missile to reach vec
 	fly = vlen (vec) / mspeed;
-
-	// get the entities xy velocity
+	
+// get the entities xy velocity
 	move = self.enemy.velocity;
 	move_z = 0;
 
-	// project the target forward in time
+// project the target forward in time
 	vec = vec + move * fly;
-
+	
 	vec = normalize(vec);
 	vec = vec + accuracy*v_up*(random()- 0.5) + accuracy*v_right*(random()- 0.5);
-
+	
 	missile.velocity = vec * mspeed;
 
 	missile.angles = '0 0 0';
 	missile.angles_y = vectoyaw(missile.velocity);
 
-	// set missile duration
+// set missile duration
 	missile.nextthink = time + 5;
-	missile.think = SUB_Remove;
+	missile.think = SUB_Remove;	
 };
 
 
@@ -106,9 +88,9 @@ WizardCheckAttack
 */
 float()	WizardCheckAttack =
 {
-	local vector spot1, spot2;
-	local entity targ;
-	local float chance;
+	local vector	spot1, spot2;	
+	local entity	targ;
+	local float		chance;
 
 	if (time < self.attack_finished)
 		return FALSE;
@@ -124,18 +106,17 @@ float()	WizardCheckAttack =
 		}
 		return FALSE;
 	}
-
+		
 	targ = self.enemy;
-
-	// see if any entities are in the way of the shot
+	
+// see if any entities are in the way of the shot
 	spot1 = self.origin + self.view_ofs;
 	spot2 = targ.origin + targ.view_ofs;
 
 	traceline (spot1, spot2, FALSE, self);
 
 	if (trace_ent != targ)
-	{
-		// don't have a clear shot, so move to a side
+	{	// don't have a clear shot, so move to a side
 		if (self.attack_state != AS_STRAIGHT)
 		{
 			self.attack_state = AS_STRAIGHT;
@@ -143,7 +124,7 @@ float()	WizardCheckAttack =
 		}
 		return FALSE;
 	}
-
+			
 	if (enemy_range == RANGE_MELEE)
 		chance = 0.9;
 	else if (enemy_range == RANGE_NEAR)
@@ -175,7 +156,7 @@ float()	WizardCheckAttack =
 			wiz_side1 ();
 		}
 	}
-
+	
 	return FALSE;
 };
 
@@ -208,16 +189,16 @@ FAST ATTACKS
 
 void() Wiz_FastFire =
 {
-	local vector vec;
-	local vector dst;
+	local vector		vec;
+	local vector		dst;
 
 	if (self.owner.health > 0)
 	{
 		self.owner.effects = self.owner.effects | EF_MUZZLEFLASH;
 
-		makevectors (self.enemy.angles);
+		makevectors (self.enemy.angles);	
 		dst = self.enemy.origin - 13*self.movedir;
-
+	
 		vec = normalize(dst - self.origin);
 		sound (self, CHAN_WEAPON, "wizard/wattack.wav", 1, ATTN_NORM);
 		launch_spike (self.origin, vec);
@@ -225,7 +206,7 @@ void() Wiz_FastFire =
 		newmis.owner = self.owner;
 		newmis.classname = "wizspike";
 		setmodel (newmis, "progs/w_spike.mdl");
-		setsize (newmis, VEC_ORIGIN, VEC_ORIGIN);
+		setsize (newmis, VEC_ORIGIN, VEC_ORIGIN);		
 	}
 
 	remove (self);
@@ -234,8 +215,8 @@ void() Wiz_FastFire =
 
 void() Wiz_StartFast =
 {
-	local entity missile;
-
+	local	entity	missile;
+	
 	sound (self, CHAN_WEAPON, "wizard/wattack.wav", 1, ATTN_NORM);
 	self.v_angle = self.angles;
 	makevectors (self.angles);
@@ -243,7 +224,7 @@ void() Wiz_StartFast =
 	missile = spawn ();
 	missile.owner = self;
 	missile.nextthink = time + 0.6;
-	setsize (missile, '0 0 0', '0 0 0');
+	setsize (missile, '0 0 0', '0 0 0');		
 	setorigin (missile, self.origin + '0 0 30' + v_forward*14 + v_right*14);
 	missile.enemy = self.enemy;
 	missile.nextthink = time + 0.8;
@@ -253,7 +234,7 @@ void() Wiz_StartFast =
 	missile = spawn ();
 	missile.owner = self;
 	missile.nextthink = time + 1;
-	setsize (missile, '0 0 0', '0 0 0');
+	setsize (missile, '0 0 0', '0 0 0');		
 	setorigin (missile, self.origin + '0 0 30' + v_forward*14 + v_right* -14);
 	missile.enemy = self.enemy;
 	missile.nextthink = time + 0.3;
@@ -265,14 +246,13 @@ void() Wiz_StartFast =
 
 void() Wiz_idlesound =
 {
-	local float wr;
-
+local float wr;
 	wr = random() * 5;
 
 	if (self.waitmin < time)
 	{
 	 	self.waitmin = time + 2;
-	 	if (wr > 4.5)
+	 	if (wr > 4.5) 
 	 		sound (self, CHAN_VOICE, "wizard/widle1.wav", 1,  ATTN_IDLE);
 	 	if (wr < 1.5)
 	 		sound (self, CHAN_VOICE, "wizard/widle2.wav", 1, ATTN_IDLE);
@@ -289,11 +269,8 @@ void()	wiz_stand6	=[	$hover6,		wiz_stand7	] {ai_stand();};
 void()	wiz_stand7	=[	$hover7,		wiz_stand8	] {ai_stand();};
 void()	wiz_stand8	=[	$hover8,		wiz_stand1	] {ai_stand();};
 
-void()	wiz_walk1	=[	$hover1,		wiz_walk2	]
-{
-	ai_walk(8);
-	Wiz_idlesound();
-};
+void()	wiz_walk1	=[	$hover1,		wiz_walk2	] {ai_walk(8);
+Wiz_idlesound();};
 void()	wiz_walk2	=[	$hover2,		wiz_walk3	] {ai_walk(8);};
 void()	wiz_walk3	=[	$hover3,		wiz_walk4	] {ai_walk(8);};
 void()	wiz_walk4	=[	$hover4,		wiz_walk5	] {ai_walk(8);};
@@ -302,11 +279,8 @@ void()	wiz_walk6	=[	$hover6,		wiz_walk7	] {ai_walk(8);};
 void()	wiz_walk7	=[	$hover7,		wiz_walk8	] {ai_walk(8);};
 void()	wiz_walk8	=[	$hover8,		wiz_walk1	] {ai_walk(8);};
 
-void()	wiz_side1	=[	$hover1,		wiz_side2	]
-{
-	ai_run(8);
-	Wiz_idlesound();
-};
+void()	wiz_side1	=[	$hover1,		wiz_side2	] {ai_run(8);
+Wiz_idlesound();};
 void()	wiz_side2	=[	$hover2,		wiz_side3	] {ai_run(8);};
 void()	wiz_side3	=[	$hover3,		wiz_side4	] {ai_run(8);};
 void()	wiz_side4	=[	$hover4,		wiz_side5	] {ai_run(8);};
@@ -315,10 +289,8 @@ void()	wiz_side6	=[	$hover6,		wiz_side7	] {ai_run(8);};
 void()	wiz_side7	=[	$hover7,		wiz_side8	] {ai_run(8);};
 void()	wiz_side8	=[	$hover8,		wiz_side1	] {ai_run(8);};
 
-void()	wiz_run1	=[	$fly1,		wiz_run2	]
-{
-	ai_run(16);
-	Wiz_idlesound();
+void()	wiz_run1	=[	$fly1,		wiz_run2	] {ai_run(16);
+Wiz_idlesound();
 };
 void()	wiz_run2	=[	$fly2,		wiz_run3	] {ai_run(16);};
 void()	wiz_run3	=[	$fly3,		wiz_run4	] {ai_run(16);};
@@ -350,13 +322,13 @@ void()	wiz_pain2	=[	$pain2,		wiz_pain3	] {};
 void()	wiz_pain3	=[	$pain3,		wiz_pain4	] {};
 void()	wiz_pain4	=[	$pain4,		wiz_run1	] {};
 
-void()	wiz_death1	=[	$death1,		wiz_death2	]
-{
-	self.velocity_x = -200 + 400*random();
-	self.velocity_y = -200 + 400*random();
-	self.velocity_z = 100 + 100*random();
-	self.flags = self.flags - (self.flags & FL_ONGROUND);
-	sound (self, CHAN_VOICE, "wizard/wdeath.wav", 1, ATTN_NORM);
+void()	wiz_death1	=[	$death1,		wiz_death2	] {
+
+self.velocity_x = -200 + 400*random();
+self.velocity_y = -200 + 400*random();
+self.velocity_z = 100 + 100*random();
+self.flags = self.flags - (self.flags & FL_ONGROUND);
+sound (self, CHAN_VOICE, "wizard/wdeath.wav", 1, ATTN_NORM);
 };
 void()	wiz_death2	=[	$death2,		wiz_death3	] {};
 void()	wiz_death3	=[	$death3,		wiz_death4	]{self.solid = SOLID_NOT;};
@@ -368,7 +340,7 @@ void()	wiz_death8	=[	$death8,		wiz_death8	] {};
 
 void() wiz_die =
 {
-	// check for gib
+// check for gib
 	if (self.health < -40)
 	{
 		sound (self, CHAN_VOICE, "player/udeath.wav", 1, ATTN_NORM);
@@ -387,8 +359,7 @@ void(entity attacker, float damage) Wiz_Pain =
 {
 	sound (self, CHAN_VOICE, "wizard/wpain.wav", 1, ATTN_NORM);
 	if (random()*70 > damage)
-		// didn't flinch
-		return;
+		return;		// didn't flinch
 
 	wiz_pain1 ();
 };
@@ -412,8 +383,7 @@ void() monster_wizard =
 	precache_model ("progs/h_wizard.mdl");
 	precache_model ("progs/w_spike.mdl");
 
-	// used by c code
-	precache_sound ("wizard/hit.wav");
+	precache_sound ("wizard/hit.wav");		// used by c code
 	precache_sound ("wizard/wattack.wav");
 	precache_sound ("wizard/wdeath.wav");
 	precache_sound ("wizard/widle1.wav");
@@ -435,6 +405,6 @@ void() monster_wizard =
 	self.th_missile = Wiz_Missile;
 	self.th_pain = Wiz_Pain;
 	self.th_die = wiz_die;
-
+		
 	flymonster_start ();
 };

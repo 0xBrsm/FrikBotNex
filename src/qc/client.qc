@@ -1,26 +1,8 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 
 // prototypes
 void () W_WeaponFrame;
 void() W_SetCurrentAmmo;
-void(entity attacker, float damage) player_pain;
+void() player_pain;
 void() player_stand1;
 void (vector org) spawn_tfog;
 void (vector org, entity death_owner) spawn_tdeath;
@@ -42,7 +24,9 @@ float	intermission_exittime;
 This is the camera point for the intermission.
 Use mangle instead of angle, so you can set pitch or roll as well as yaw.  'pitch roll yaw'
 */
-void() info_intermission = {};
+void() info_intermission =
+{
+};
 
 
 
@@ -54,12 +38,11 @@ void() SetChangeParms =
 		return;
 	}
 
-	// remove items
-	self.items = self.items -
-		(self.items & (IT_KEY1 | IT_KEY2 | IT_INVISIBILITY |
-			IT_INVULNERABILITY | IT_SUIT | IT_QUAD) );
-
-	// cap super health
+// remove items
+	self.items = self.items - (self.items & 
+	(IT_KEY1 | IT_KEY2 | IT_INVISIBILITY | IT_INVULNERABILITY | IT_SUIT | IT_QUAD) );
+	
+// cap super health
 	if (self.health > 100)
 		self.health = 100;
 	if (self.health < 50)
@@ -93,12 +76,13 @@ void() SetNewParms =
 
 void() DecodeLevelParms =
 {
-	if (serverflags)
+//	if (serverflags)
+	if (!deathmatch)	
 	{
 		if (world.model == "maps/start.bsp")
 			SetNewParms ();		// take away all stuff on starting new episode
 	}
-
+	
 	self.items = parm1;
 	self.health = parm2;
 	self.armorvalue = parm3;
@@ -119,10 +103,10 @@ Returns the entity to view from
 */
 entity() FindIntermission =
 {
-	local entity spot;
-	local float cyc;
+	local	entity spot;
+	local	float cyc;
 
-	// look for info_intermission first
+// look for info_intermission first
 	spot = find (world, classname, "info_intermission");
 	if (spot)
 	{	// pick a random one
@@ -137,48 +121,70 @@ entity() FindIntermission =
 		return spot;
 	}
 
-	// then look for the start position
+// then look for the start position
 	spot = find (world, classname, "info_player_start");
 	if (spot)
 		return spot;
-
-	// testinfo_player_start is only found in regioned levels
+	
+// testinfo_player_start is only found in regioned levels
 	spot = find (world, classname, "testplayerstart");
 	if (spot)
 		return spot;
-
+	
 	objerror ("FindIntermission: no spot");
-	// avoid compiler warning
+	
 	return world;
 };
 
-
+//~ FrikBot changes
 string nextmap;
-
-void() GotoNextMap =
-{
-	if (cvar("samelevel"))	// if samelevel is set, stay on same level
+float done_changelevel;
+void() GotoNextMap ={
+	local float p;
+	if (done_changelevel) {
+		return;
+	}
+	done_changelevel = TRUE;
+	p = cvar("samelevel");
+	if (p > 1) {
+		localcmd("map");
+		localcmd(ftos(ceil(random() * p)));
+		localcmd("\n");
+	}
+	else if (p < 0) {
+		localcmd("map");
+		localcmd(ftos(floor(serverflags/16)+1));
+		localcmd("\n");
+		serverflags = serverflags+16;
+		if (floor((serverflags/16)+1) > (0 - p)) {
+			serverflags = serverflags & 16;
+		}
+	}
+	else if (p) {
+		// if samelevel is set, stay on same level
 		changelevel (mapname);
-	else
+	}
+	else {
 		changelevel (nextmap);
+	}
 };
 
 
 void() ExitIntermission =
 {
-	// skip any text in deathmatch
+// skip any text in deathmatch
 	if (deathmatch)
 	{
 		GotoNextMap ();
 		return;
 	}
-
+	
 	intermission_exittime = time + 1;
 	intermission_running = intermission_running + 1;
 
-	//
-	// run some text if at the end of an episode
-	//
+//
+// run some text if at the end of an episode
+//
 	if (intermission_running == 2)
 	{
 		if (world.model == "maps/e1m7.bsp")
@@ -231,7 +237,7 @@ void() ExitIntermission =
 
 		GotoNextMap();
 	}
-
+	
 	if (intermission_running == 3)
 	{
 		if (!cvar("registered"))
@@ -239,14 +245,14 @@ void() ExitIntermission =
 			WriteByte (MSG_ALL, SVC_SELLSCREEN);
 			return;
 		}
-
+		
 		if ( (serverflags&15) == 15)
 		{
 			WriteByte (MSG_ALL, SVC_FINALE);
 			WriteString (MSG_ALL, "Now, you have all four Runes. You sense\ntremendous invisible forces moving to\nunseal ancient barriers. Shub-Niggurath\nhad hoped to use the Runes Herself to\nclear off the Earth, but now instead,\nyou will use them to enter her home and\nconfront her as an avatar of avenging\nEarth-life. If you defeat her, you will\nbe remembered forever as the savior of\nthe planet. If she conquers, it will be\nas if you had never been born.");
 			return;
 		}
-
+		
 	}
 
 	GotoNextMap();
@@ -266,7 +272,7 @@ void() IntermissionThink =
 
 	if (!self.button0 && !self.button1 && !self.button2)
 		return;
-
+	
 	ExitIntermission ();
 };
 
@@ -275,8 +281,8 @@ void() execute_changelevel =
 	local entity	pos;
 
 	intermission_running = 1;
-
-	// enforce a wait time before allowing changelevel
+	
+// enforce a wait time before allowing changelevel
 	if (deathmatch)
 		intermission_exittime = time + 5;
 	else
@@ -285,7 +291,7 @@ void() execute_changelevel =
 	WriteByte (MSG_ALL, SVC_CDTRACK);
 	WriteByte (MSG_ALL, 3);
 	WriteByte (MSG_ALL, 3);
-
+	
 	pos = FindIntermission ();
 
 	other = find (world, classname, "player");
@@ -301,7 +307,7 @@ void() execute_changelevel =
 		other.modelindex = 0;
 		setorigin (other, pos.origin);
 		other = find (other, classname, "player");
-	}
+	}	
 
 	WriteByte (MSG_ALL, SVC_INTERMISSION);
 };
@@ -309,6 +315,8 @@ void() execute_changelevel =
 
 void() changelevel_touch =
 {
+	local entity	pos;
+
 	if (other.classname != "player")
 		return;
 
@@ -318,13 +326,12 @@ void() changelevel_touch =
 		return;
 	}
 
-	// don't print the messages in singleplayer
 	if (coop || deathmatch)
 	{
-		bprint(other.netname);
-		bprint(" exited the level\n");
+		bprint (other.netname);
+		bprint (" exited the level\n");
 	}
-
+	
 	nextmap = self.map;
 
 	SUB_UseTargets ();
@@ -334,11 +341,11 @@ void() changelevel_touch =
 		GotoNextMap();
 		return;
 	}
-
+	
 	self.touch = SUB_Null;
 
-	// we can't move people right now, because touch functions are called
-	// in the middle of C movement code, so set a think time to do it
+// we can't move people right now, because touch functions are called
+// in the middle of C movement code, so set a think time to do it
 	self.think = execute_changelevel;
 	self.nextthink = time + 0.1;
 };
@@ -350,7 +357,7 @@ void() trigger_changelevel =
 {
 	if (!self.map)
 		objerror ("changelevel trigger doesn't have map");
-
+	
 	InitTrigger ();
 	self.touch = changelevel_touch;
 };
@@ -375,7 +382,7 @@ void() respawn =
 		CopyToBodyQue (self);
 		// get the spawn parms as they were at level start
 		setspawnparms (self);
-		// respawn
+		// respawn		
 		PutClientInServer ();
 	}
 	else if (deathmatch)
@@ -384,7 +391,7 @@ void() respawn =
 		CopyToBodyQue (self);
 		// set default spawn parms
 		SetNewParms ();
-		// respawn
+		// respawn		
 		PutClientInServer ();
 	}
 	else
@@ -403,6 +410,8 @@ Player entered the suicide command
 */
 void() ClientKill =
 {
+	if ((intermission_running)&&((coop)||(deathmatch)))  // not allowed during intermission
+		return;
 	bprint (self.netname);
 	bprint (" suicides\n");
 	set_suicide_frame ();
@@ -426,15 +435,15 @@ Returns the entity to spawn at
 entity() SelectSpawnPoint =
 {
 	local	entity spot;
-	local entity thing;
-	local float pcount;
-
-	// testinfo_player_start is only found in regioned levels
+	local	entity thing;
+	local	float  pcount;
+	
+// testinfo_player_start is only found in regioned levels
 	spot = find (world, classname, "testplayerstart");
 	if (spot)
 		return spot;
-
-	// choose a info_player_deathmatch point
+		
+// choose a info_player_deathmatch point
 	if (coop)
 	{
 		lastspawn = find(lastspawn, classname, "info_player_coop");
@@ -445,33 +454,150 @@ entity() SelectSpawnPoint =
 	}
 	else if (deathmatch)
 	{
-		spot = lastspawn;
-		// loop until a spawn point is located
-		while(1) {
-			// locate a spawn point
-			spot = find(spot, classname, "info_player_deathmatch");
-			// check that a spot was found
-			if (spot != world) {
-				// check if the spot is the same as the last spawn point checked
-				if (spot == lastspawn) {
-					return lastspawn;
-				}
-				// count the number of players close to the spawn point
+	//~ random respawn start
+				local float	freespots, totalspots;
+		local entity	lastfreespot;
+
+		totalspots = 0;
+
+		// loop through all spots to find widely free spots (radius 84)
+		freespots = 0;
+		lastfreespot = world;
+
+		spot = find(world, classname, "info_player_deathmatch");
+		while (spot)
+		{
+			totalspots = totalspots + 1;
+
+			if (spot != lastspawn)
+			{
 				pcount = 0;
-				thing = findradius(spot.origin, 32);
-				while(thing) {
-					if (thing.classname == "player") {
-						pcount = pcount + 1;
-					}
+				thing = findradius(spot.origin, 84);		// search for players
+				while ( (thing!=world) && (pcount == 0) )
+				{
+					if ((thing.classname == "player") && (thing.health > 0))	// player found
+						pcount = 1;
 					thing = thing.chain;
 				}
-				// use spot if no players at spawn point
-				if (pcount == 0) {
+				if (!pcount)					// this is a free spot
+				{
+					spot.goalentity = lastfreespot;		// create reverse free spot list
+					lastfreespot = spot;			// begin of reverse free spot list
+					freespots = freespots + 1;
+				}
+			}
+
+			// Get the next spot in the chain
+			spot = find(spot, classname, "info_player_deathmatch");
+		}
+
+		if (totalspots)
+		{
+			if (freespots)
+			{
+				// We now have the number of frre spots available on the map
+				// Generate a random number between 0 and (freespots - 1)
+				freespots = freespots - 0.01;	// random() result varies between 0.0 and (n-1).99
+				freespots = floor(random() * freespots);
+
+				spot = lastfreespot;
+				while (freespots)
+				{
+					spot = spot.goalentity;
+					freespots = freespots - 1;
+				}
+
+				lastspawn = spot;
+				return spot;
+			}
+
+			// ack, they are all guarded
+			// loop through all spots to find free spots (radius 32)
+			freespots = 0;
+			lastfreespot = world;
+
+			spot = find(world, classname, "info_player_deathmatch");
+			while (spot)
+			{
+				if (spot != lastspawn)
+				{
+					pcount = 0;
+					thing = findradius(spot.origin, 32);		// search for players
+					while ( (thing!=world) && (pcount == 0) )
+					{
+						if ((thing.classname == "player") && (thing.health > 0))	// player found
+							pcount = 1;
+						thing = thing.chain;
+					}
+					if (!pcount)					// this is a free spot
+					{
+						spot.goalentity = lastfreespot;		// create reverse free spot list
+						lastfreespot = spot;			// begin of reverse free spot list
+						freespots = freespots + 1;
+					}
+				}
+
+				// Get the next spot in the chain
+				spot = find(spot, classname, "info_player_deathmatch");
+			}
+
+			if (freespots)
+			{
+				// We now have the number of free spots available on the map
+				// Generate a random number between 0 and (freespots - 1)
+				freespots = freespots - 0.01;	// random() result varies between 0.0 and (n-1).99
+				freespots = floor(random() * freespots);
+
+				spot = lastfreespot;
+				while (freespots)
+				{
+					spot = spot.goalentity;
+					freespots = freespots - 1;
+				}
+
+				lastspawn = spot;
+				return spot;
+			}
+
+			// ack, they are all full, just pick one at random
+			// Generate a random number between 0 and (totalspots - 1)
+			totalspots = totalspots - 0.01;	// random() result varies between 0.0 and (n-1).99
+			totalspots = floor(random() * totalspots);
+
+			spot = find(world, classname, "info_player_deathmatch");
+			while (totalspots)
+			{
+				totalspots = totalspots - 1;
+				spot = find(spot, classname, "info_player_deathmatch");
+			}
+
+			lastspawn = spot;
+			return spot;
+		}
+/*  		spot = lastspawn;
+		while (1)
+		{
+			spot = find(spot, classname, "info_player_deathmatch");
+			if (spot != world)
+			{
+				if (spot == lastspawn)
+					return lastspawn;
+				pcount = 0;
+				thing = findradius(spot.origin, 32);
+				while(thing)
+				{
+					if (thing.classname == "player")
+						pcount = pcount + 1;
+					thing = thing.chain;
+				}
+				if (pcount == 0)
+				{
 					lastspawn = spot;
 					return spot;
 				}
 			}
 		}
+ */	//~ random respawn end
 	}
 
 	if (serverflags)
@@ -480,11 +606,11 @@ entity() SelectSpawnPoint =
 		if (spot)
 			return spot;
 	}
-
+	
 	spot = find (world, classname, "info_player_start");
 	if (!spot)
 		error ("PutClientInServer: no info_player_start on level");
-
+	
 	return spot;
 };
 
@@ -523,34 +649,39 @@ void() PutClientInServer =
 	self.invincible_time = 0;
 
 	DecodeLevelParms ();
-
+	
 	W_SetCurrentAmmo ();
 
 	self.attack_finished = time;
 	self.th_pain = player_pain;
 	self.th_die = PlayerDie;
-
+	
 	self.deadflag = DEAD_NO;
-	// paustime is set by teleporters to keep the player from moving a while
+// paustime is set by teleporters to keep the player from moving a while
 	self.pausetime = 0;
+	
+//	spot = SelectSpawnPoint ();
 
-	self.origin = spot.origin + '0 0 1';
+//	self.origin = spot.origin + '0 0 1';
+	self.origin = self.oldorigin = spot.origin + '0 0 1';	// 1998-07-21 Respawning where player died fix by Robert Field
 	self.angles = spot.angles;
 	self.fixangle = TRUE;		// turn this way immediately
 
-	// oh, this is a hack!
+// oh, this is a hack!
 	setmodel (self, "progs/eyes.mdl");
 	modelindex_eyes = self.modelindex;
 
 	setmodel (self, "progs/player.mdl");
 	modelindex_player = self.modelindex;
-
+	
 	setsize (self, VEC_HULL_MIN, VEC_HULL_MAX);
-
+	
 	self.view_ofs = '0 0 22';
+	
+	self.velocity = '0 0 0';	// 1998-07-21 Player moves after respawn fix by Xian
 
 	player_stand1 ();
-
+	
 	if (deathmatch || coop)
 	{
 		makevectors(self.angles);
@@ -573,27 +704,39 @@ void() PutClientInServer =
 /*QUAKED info_player_start (1 0 0) (-16 -16 -24) (16 16 24)
 The normal starting point for a level.
 */
-void() info_player_start = {};
+void() info_player_start =
+{
+};
+
 
 /*QUAKED info_player_start2 (1 0 0) (-16 -16 -24) (16 16 24)
 Only used on start map for the return point from an episode.
 */
-void() info_player_start2 = {};
+void() info_player_start2 =
+{
+};
+
 
 /*
 saved out by quaked in region mode
 */
-void() testplayerstart = {};
+void() testplayerstart =
+{
+};
 
 /*QUAKED info_player_deathmatch (1 0 1) (-16 -16 -24) (16 16 24)
 potential spawning position for deathmatch games
 */
-void() info_player_deathmatch = {};
+void() info_player_deathmatch =
+{
+};
 
 /*QUAKED info_player_coop (1 0 1) (-16 -16 -24) (16 16 24)
 potential spawning position for coop games
 */
-void() info_player_coop = {};
+void() info_player_coop =
+{
+};
 
 /*
 ===============================================================================
@@ -605,6 +748,7 @@ RULES
 
 /*
 go to the next level for deathmatch
+only called if a time or frag limit has expired
 */
 void() NextLevel =
 {
@@ -645,7 +789,7 @@ void() NextLevel =
 		// find a trigger changelevel
 		o = find(world, classname, "trigger_changelevel");
 
-		// go back to start if no trigger for the next level
+		// go back to start if no trigger_changelevel
 		if (!o)
 		{
 			mapname = "start";
@@ -656,7 +800,7 @@ void() NextLevel =
 
 	nextmap = o.map;
 	gameover = TRUE;
-
+	
 	if (o.nextthink < time)
 	{
 		o.think = execute_changelevel;
@@ -675,31 +819,34 @@ void() CheckRules =
 {
 	local	float		timelimit;
 	local	float		fraglimit;
-
+	
 	if (gameover)	// someone else quit the game already
 		return;
-
+		
 	timelimit = cvar("timelimit") * 60;
 	fraglimit = cvar("fraglimit");
-
-	if (timelimit && time >= timelimit)
+	
+//	if (timelimit && time >= timelimit)
+	if (deathmatch && timelimit && time >= timelimit)	// 1998-07-27 Timelimit/Fraglimit fix by Maddes
 	{
 		NextLevel ();
 		return;
 	}
-
-	if (fraglimit && self.frags >= fraglimit)
+	
+//	if (fraglimit && self.frags >= fraglimit)
+	if (deathmatch && fraglimit && self.frags >= fraglimit)	// 1998-07-27 Timelimit/Fraglimit fix by Maddes
 	{
 		NextLevel ();
 		return;
-	}
+	}	
 };
 
 //============================================================================
 
 void() PlayerDeathThink =
 {
-	local float forward;
+	local entity	old_self;
+	local float		forward;
 
 	if ((self.flags & FL_ONGROUND))
 	{
@@ -707,11 +854,11 @@ void() PlayerDeathThink =
 		forward = forward - 20;
 		if (forward <= 0)
 			self.velocity = '0 0 0';
-		else
+		else	
 			self.velocity = forward * normalize(self.velocity);
 	}
 
-	// wait for all buttons released
+// wait for all buttons released
 	if (self.deadflag == DEAD_DEAD)
 	{
 		if (self.button2 || self.button1 || self.button0)
@@ -733,9 +880,11 @@ void() PlayerDeathThink =
 
 void() PlayerJump =
 {
+	local vector start, end;
+	
 	if (self.flags & FL_WATERJUMP)
 		return;
-
+	
 	if (self.waterlevel >= 2)
 	{
 		if (self.watertype == CONTENT_WATER)
@@ -745,7 +894,7 @@ void() PlayerJump =
 		else
 			self.velocity_z = 50;
 
-		// play swimming sound
+// play swiming sound
 		if (self.swim_flag < time)
 		{
 			self.swim_flag = time + 1;
@@ -767,9 +916,9 @@ void() PlayerJump =
 	self.flags = self.flags - (self.flags & FL_JUMPRELEASED);
 
 	self.flags = self.flags - FL_ONGROUND;	// don't stairwalk
-
+	
 	self.button2 = 0;
-	// player jumping sound
+// player jumping sound
 	sound (self, CHAN_BODY, "player/plyrjmp8.wav", 1, ATTN_NORM);
 	self.velocity_z = self.velocity_z + 270;
 };
@@ -785,6 +934,7 @@ WaterMove
 
 void() WaterMove =
 {
+//dprint (ftos(self.waterlevel));
 	if (self.movetype == MOVETYPE_NOCLIP)
 		return;
 	if (self.health < 0)
@@ -810,11 +960,11 @@ void() WaterMove =
 			self.pain_finished = time + 1;
 		}
 	}
-
+	
 	if (!self.waterlevel)
 	{
 		if (self.flags & FL_INWATER)
-		{
+		{	
 			// play leave water sound
 			sound (self, CHAN_BODY, "misc/outwater.wav", 1, ATTN_NORM);
 			self.flags = self.flags - FL_INWATER;
@@ -823,8 +973,7 @@ void() WaterMove =
 	}
 
 	if (self.watertype == CONTENT_LAVA)
-	{
-		// do damage
+	{	// do damage
 		if (self.dmgtime < time)
 		{
 			if (self.radsuit_finished > time)
@@ -836,18 +985,19 @@ void() WaterMove =
 		}
 	}
 	else if (self.watertype == CONTENT_SLIME)
-	{
-		// do damage
+	{	// do damage
 		if (self.dmgtime < time && self.radsuit_finished < time)
 		{
 			self.dmgtime = time + 1;
 			T_Damage (self, world, world, 4*self.waterlevel);
 		}
 	}
-
+	
 	if ( !(self.flags & FL_INWATER) )
-	{
-		// player enter water sound
+	{	
+
+// player enter water sound
+
 		if (self.watertype == CONTENT_LAVA)
 			sound (self, CHAN_BODY, "player/inlava.wav", 1, ATTN_NORM);
 		if (self.watertype == CONTENT_WATER)
@@ -858,7 +1008,7 @@ void() WaterMove =
 		self.flags = self.flags + FL_INWATER;
 		self.dmgtime = 0;
 	}
-
+	
 	if (! (self.flags & FL_WATERJUMP) )
 		self.velocity = self.velocity - 0.8*self.waterlevel*frametime*self.velocity;
 };
@@ -867,10 +1017,10 @@ void() CheckWaterJump =
 {
 	local vector start, end;
 
-	// check for a jump-out-of-water
+// check for a jump-out-of-water
 	makevectors (self.angles);
 	start = self.origin;
-	start_z = start_z + 8;
+	start_z = start_z + 8; 
 	v_forward_z = 0;
 	normalize(v_forward);
 	end = start + v_forward*24;
@@ -902,22 +1052,22 @@ Called every frame before physics are run
 */
 void() PlayerPreThink =
 {
-	if (BotPreFrame()) // FrikBot
-		return;
+	if (BotPreFrame())	//~ FrikBot
+	return;
+
+	local	float	mspeed, aspeed;
+	local	float	r;
+
 	if (intermission_running)
 	{
-		// otherwise a button could be missed between
-		// the think tics
-		IntermissionThink ();
-		return;
+		IntermissionThink ();	// otherwise a button could be missed between
+		return;					// the think tics
 	}
 
-	// intermission or finale
 	if (self.view_ofs == '0 0 0')
-		return;
+		return;		// intermission or finale
 
-	// is this still used
-	makevectors (self.v_angle);
+	makevectors (self.v_angle);		// is this still used
 
 	CheckRules ();
 	WaterMove ();
@@ -930,10 +1080,9 @@ void() PlayerPreThink =
 		PlayerDeathThink ();
 		return;
 	}
-
-	// dying, so do nothing
+	
 	if (self.deadflag == DEAD_DYING)
-		return;
+		return;	// dying, so do nothing
 
 	if (self.button2)
 	{
@@ -942,7 +1091,7 @@ void() PlayerPreThink =
 	else
 		self.flags = self.flags | FL_JUMPRELEASED;
 
-	// teleporters can force a non-moving pause time
+// teleporters can force a non-moving pause time	
 	if (time < self.pausetime)
 		self.velocity = '0 0 0';
 
@@ -952,7 +1101,7 @@ void() PlayerPreThink =
 		W_SetCurrentAmmo ();
 	}
 };
-
+	
 /*
 ================
 CheckPowerups
@@ -965,10 +1114,10 @@ void() CheckPowerups =
 	if (self.health <= 0)
 		return;
 
-	// invisibility
+// invisibility
 	if (self.invisible_finished)
 	{
-		// sound and screen flash when items starts to run out
+// sound and screen flash when items starts to run out
 		if (self.invisible_sound < time)
 		{
 			sound (self, CHAN_AUTO, "items/inv3.wav", 0.5, ATTN_IDLE);
@@ -985,7 +1134,7 @@ void() CheckPowerups =
 				sound (self, CHAN_AUTO, "items/inv2.wav", 1, ATTN_NORM);
 				self.invisible_time = time + 1;
 			}
-
+			
 			if (self.invisible_time < time)
 			{
 				self.invisible_time = time + 1;
@@ -994,27 +1143,23 @@ void() CheckPowerups =
 		}
 
 		if (self.invisible_finished < time)
-		{
-		// just stopped
+		{	// just stopped
 			self.items = self.items - IT_INVISIBILITY;
 			self.invisible_finished = 0;
 			self.invisible_time = 0;
 		}
-
-		// use the eyes
+		
+	// use the eyes
 		self.frame = 0;
 		self.modelindex = modelindex_eyes;
 	}
 	else
-	{
-		// don't use eyes
-		self.modelindex = modelindex_player;
-	}
-
-	// invincibility
+		self.modelindex = modelindex_player;	// don't use eyes
+	
+// invincibility
 	if (self.invincible_finished)
 	{
-		// sound and screen flash when items starts to run out
+// sound and screen flash when items starts to run out
 		if (self.invincible_finished < time + 3)
 		{
 			if (self.invincible_time == 1)
@@ -1024,17 +1169,16 @@ void() CheckPowerups =
 				sound (self, CHAN_AUTO, "items/protect2.wav", 1, ATTN_NORM);
 				self.invincible_time = time + 1;
 			}
-
+			
 			if (self.invincible_time < time)
 			{
 				self.invincible_time = time + 1;
 				stuffcmd (self, "bf\n");
 			}
 		}
-
+		
 		if (self.invincible_finished < time)
-		{
-			// just stopped
+		{	// just stopped
 			self.items = self.items - IT_INVULNERABILITY;
 			self.invincible_time = 0;
 			self.invincible_finished = 0;
@@ -1045,11 +1189,12 @@ void() CheckPowerups =
 			self.effects = self.effects - (self.effects & EF_DIMLIGHT);
 	}
 
-	// super damage
+// super damage
 	if (self.super_damage_finished)
 	{
 
-		// sound and screen flash when items starts to run out
+// sound and screen flash when items starts to run out
+
 		if (self.super_damage_finished < time + 3)
 		{
 			if (self.super_time == 1)
@@ -1058,8 +1203,8 @@ void() CheckPowerups =
 				stuffcmd (self, "bf\n");
 				sound (self, CHAN_AUTO, "items/damage2.wav", 1, ATTN_NORM);
 				self.super_time = time + 1;
-			}
-
+			}	  
+			
 			if (self.super_time < time)
 			{
 				self.super_time = time + 1;
@@ -1068,8 +1213,7 @@ void() CheckPowerups =
 		}
 
 		if (self.super_damage_finished < time)
-		{
-			// just stopped
+		{	// just stopped
 			self.items = self.items - IT_QUAD;
 			self.super_damage_finished = 0;
 			self.super_time = 0;
@@ -1078,15 +1222,14 @@ void() CheckPowerups =
 			self.effects = self.effects | EF_DIMLIGHT;
 		else
 			self.effects = self.effects - (self.effects & EF_DIMLIGHT);
-	}
+	}	
 
-	// suit
+// suit	
 	if (self.radsuit_finished)
 	{
-		// don't drown
-		self.air_finished = time + 12;
+		self.air_finished = time + 12;		// don't drown
 
-		// sound and screen flash when items starts to run out
+// sound and screen flash when items starts to run out
 		if (self.radsuit_finished < time + 3)
 		{
 			if (self.rad_time == 1)
@@ -1096,7 +1239,7 @@ void() CheckPowerups =
 				sound (self, CHAN_AUTO, "items/suit2.wav", 1, ATTN_NORM);
 				self.rad_time = time + 1;
 			}
-
+			
 			if (self.rad_time < time)
 			{
 				self.rad_time = time + 1;
@@ -1105,13 +1248,12 @@ void() CheckPowerups =
 		}
 
 		if (self.radsuit_finished < time)
-		{
-			// just stopped
+		{	// just stopped
 			self.items = self.items - IT_SUIT;
 			self.rad_time = 0;
 			self.radsuit_finished = 0;
 		}
-	}
+	}	
 
 };
 
@@ -1125,25 +1267,29 @@ Called every frame after physics are run
 */
 void() PlayerPostThink =
 {
-	if (BotPostFrame()) // FrikBot
-		return;
-	// intermission or finale
+	if (BotPostFrame())	//~ FrikBot
+	return;
+
+	local	float	mspeed, aspeed;
+	local	float	r;
+
 	if (self.view_ofs == '0 0 0')
-		return;
+		return;		// intermission or finale
 	if (self.deadflag)
 		return;
+		
+// do weapon stuff
 
-	// do weapon stuff
 	W_WeaponFrame ();
 
-	// check to see if player landed and play landing sound
+// check to see if player landed and play landing sound	
 	if ((self.jump_flag < -300) && (self.flags & FL_ONGROUND) && (self.health > 0))
 	{
 		if (self.watertype == CONTENT_WATER)
 			sound (self, CHAN_BODY, "player/h2ojump.wav", 1, ATTN_NORM);
 		else if (self.jump_flag < -650)
 		{
-			T_Damage (self, world, world, 5);
+			T_Damage (self, world, world, 5); 
 			sound (self, CHAN_VOICE, "player/land2.wav", 1, ATTN_NORM);
 			self.deathtype = "falling";
 		}
@@ -1169,11 +1315,11 @@ called when a player connects to a server
 */
 void() ClientConnect =
 {
-	ClientInRankings(); // FrikBot
+	ClientInRankings();	//~ FrikBot
 	bprint (self.netname);
 	bprint (" entered the game\n");
-
-	// a client connecting during an intermission can cause problems
+	
+// a client connecting during an intermission can cause problems
 	if (intermission_running)
 		ExitIntermission ();
 };
@@ -1188,7 +1334,7 @@ called when a player disconnects from a server
 */
 void() ClientDisconnect =
 {
-	ClientDisconnected(); // FrikBot
+	ClientDisconnected();	//~ FrikBot
 	if (gameover)
 		return;
 	// if the level end trigger has been activated, just return
@@ -1212,12 +1358,9 @@ called when a player dies
 */
 void(entity targ, entity attacker) ClientObituary =
 {
-	local float rnum;
-	local string deathstring, deathstring2;
-
+	local	float rnum;
+	local	string deathstring, deathstring2;
 	rnum = random();
-	deathstring = string_null;
-	deathstring2 = string_null;
 
 	if (targ.classname == "player")
 	{
@@ -1234,7 +1377,10 @@ void(entity targ, entity attacker) ClientObituary =
 
 		if (attacker.classname == "teledeath2")
 		{
-			bprint ("Satan's power deflects ");
+			//~ exorcise code start
+			//~ bprint ("Satan's power deflects ");
+			bprint ("Solomon's seal deflects ");
+			//~ exorcise code end
 			bprint (targ.netname);
 			bprint ("'s telefrag\n");
 
@@ -1249,8 +1395,8 @@ void(entity targ, entity attacker) ClientObituary =
 				// killed self
 				attacker.frags = attacker.frags - 1;
 				bprint (targ.netname);
-
-				if (targ.weapon == IT_LIGHTNING && targ.waterlevel > 1)
+				
+				if (targ.weapon == 64 && targ.waterlevel > 1)
 				{
 					bprint (" discharges into the water.\n");
 					return;
@@ -1261,7 +1407,7 @@ void(entity targ, entity attacker) ClientObituary =
 					bprint (" becomes bored with life\n");
 				return;
 			}
-			else if ( (teamplay == 2) && (targ.team >0) && (targ.team == attacker.team) )
+			else if ( (teamplay == 2) && (targ.team > 0)&&(targ.team == attacker.team) )
 			{
 				if (rnum < 0.25)
 					deathstring = " mows down a teammate\n";
@@ -1343,10 +1489,10 @@ void(entity targ, entity attacker) ClientObituary =
 		}
 		else
 		{
-			// killed self
 			targ.frags = targ.frags - 1;
 			bprint (targ.netname);
 
+			// killed by a montser?
 			if (attacker.flags & FL_MONSTER)
 			{
 				if (attacker.classname == "monster_army")
@@ -1355,6 +1501,8 @@ void(entity targ, entity attacker) ClientObituary =
 					bprint (" was eviscerated by a Fiend\n");
 				if (attacker.classname == "monster_dog")
 					bprint (" was mauled by a Rottweiler\n");
+				if (attacker.classname == "monster_dragon")
+					bprint (" was fried by a Dragon\n");
 				if (attacker.classname == "monster_enforcer")
 					bprint (" was blasted by an Enforcer\n");
 				if (attacker.classname == "monster_fish")
@@ -1373,6 +1521,8 @@ void(entity targ, entity attacker) ClientObituary =
 					bprint (" was smashed by a Shambler\n");
 				if (attacker.classname == "monster_tarbaby")
 					bprint (" was slimed by a Spawn\n");
+				if (attacker.classname == "monster_vomit")
+					bprint (" was vomited on by a Vomitus\n");
 				if (attacker.classname == "monster_wizard")
 					bprint (" was scragged by a Scrag\n");
 				if (attacker.classname == "monster_zombie")
@@ -1380,13 +1530,15 @@ void(entity targ, entity attacker) ClientObituary =
 
 				return;
 			}
+
+			// tricks and traps
 			if (attacker.classname == "explo_box")
 			{
 				bprint (" blew up\n");
 				return;
 			}
 			if (attacker.solid == SOLID_BSP && attacker != world)
-			{
+			{	
 				bprint (" was squished\n");
 				return;
 			}
@@ -1406,6 +1558,7 @@ void(entity targ, entity attacker) ClientObituary =
 				return;
 			}
 
+			// in-water deaths
 			rnum = targ.watertype;
 			if (rnum == -3)
 			{
@@ -1437,13 +1590,15 @@ void(entity targ, entity attacker) ClientObituary =
 				return;
 			}
 
+			// fell to their death?
 			if (targ.deathtype == "falling")
 			{
-				targ.deathtype = string_null;
+				targ.deathtype = "";
 				bprint (" fell to his death\n");
 				return;
 			}
 
+			// hell if I know; he's just dead!!!
 			bprint (" died\n");
 		}
 	}

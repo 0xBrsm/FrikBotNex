@@ -1,32 +1,14 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 /*
 ==============================================================================
 
-BLOB (Spawn)
+BLOB
 
 ==============================================================================
 */
 
 $cd id1/models/tarbaby
 $origin 0 0 24
-$base base
+$base base		
 
 $skin skin
 
@@ -108,14 +90,14 @@ void()	tbaby_jump1;
 
 void()	Tar_JumpTouch =
 {
-	local float ldmg;
+	local	float	ldmg;
 
 	if (other.takedamage && other.classname != self.classname)
 	{
 		if ( vlen(self.velocity) > 400 )
 		{
 			ldmg = 10 + 10*random();
-			T_Damage (other, self, self, ldmg);
+			T_Damage (other, self, self, ldmg);	
 			sound (self, CHAN_WEAPON, "blob/hit1.wav", 1, ATTN_NORM);
 		}
 	}
@@ -126,12 +108,17 @@ void()	Tar_JumpTouch =
 	if (!checkbottom(self))
 	{
 		if (self.flags & FL_ONGROUND)
-		{
-			// jump randomly to not get hung up
-			self.touch = SUB_Null;
-			self.think = tbaby_run1;
-			self.movetype = MOVETYPE_STEP;
-			self.nextthink = time + 0.1;
+		{	// jump randomly to not get hung up
+//dprint ("popjump\n");
+	self.touch = SUB_Null;
+	self.think = tbaby_run1;
+	self.movetype = MOVETYPE_STEP;
+	self.nextthink = time + 0.1;
+
+//			self.velocity_x = (random() - 0.5) * 600;
+//			self.velocity_y = (random() - 0.5) * 600;
+//			self.velocity_z = 200;
+//			self.flags = self.flags - FL_ONGROUND;
 		}
 		return;	// not on ground yet
 	}
@@ -146,13 +133,13 @@ void()	tbaby_jump5;
 void()	tbaby_fly1		=[	$fly1,	tbaby_fly2	] {};
 void()	tbaby_fly2		=[	$fly2,	tbaby_fly3	] {};
 void()	tbaby_fly3		=[	$fly3,	tbaby_fly4	] {};
-void()	tbaby_fly4		=[	$fly4,	tbaby_fly1	] 
+void()	tbaby_fly4		=[	$fly4,	tbaby_fly1	] {
+self.cnt = self.cnt + 1;
+if (self.cnt == 4)
 {
-	self.cnt = self.cnt + 1;
-	if (self.cnt == 4)
-	{
-		tbaby_jump5 ();
-	}
+//dprint ("spawn hop\n");
+tbaby_jump5 ();
+}
 };
 
 void()	tbaby_jump1		=[	$jump1,	tbaby_jump2		] {ai_face();};
@@ -160,7 +147,7 @@ void()	tbaby_jump2		=[	$jump2,	tbaby_jump3		] {ai_face();};
 void()	tbaby_jump3		=[	$jump3,	tbaby_jump4		] {ai_face();};
 void()	tbaby_jump4		=[	$jump4,	tbaby_jump5		] {ai_face();};
 void()	tbaby_jump5		=[	$jump5,	tbaby_jump6		]
-{
+{	
 	self.movetype = MOVETYPE_BOUNCE;
 	self.touch = Tar_JumpTouch;
 	makevectors (self.angles);
@@ -177,11 +164,10 @@ void()	tbaby_jump6	=[	$jump6,tbaby_fly1	] {};
 
 //=============================================================================
 
-void()	tbaby_die1	=[	$exp,		tbaby_die2	]
-{
-	self.takedamage = DAMAGE_NO;
+void()	tbaby_die1	=[	$exp,		tbaby_die2	] {
+self.takedamage = DAMAGE_NO;
 };
-void()	tbaby_die2	=[	$exp,		tbaby_run1	]
+void()	tbaby_die2	=[	$exp,		tbaby_run1	] 
 {
 	T_RadiusDamage (self, self, 120, world);
 
@@ -193,7 +179,7 @@ void()	tbaby_die2	=[	$exp,		tbaby_run1	]
 	WriteCoord (MSG_BROADCAST, self.origin_x);
 	WriteCoord (MSG_BROADCAST, self.origin_y);
 	WriteCoord (MSG_BROADCAST, self.origin_z);
-
+	
 	BecomeExplosion ();
 };
 
@@ -215,7 +201,7 @@ void() monster_tarbaby =
 	precache_sound2 ("blob/hit1.wav");
 	precache_sound2 ("blob/land1.wav");
 	precache_sound2 ("blob/sight1.wav");
-
+	
 	self.solid = SOLID_SLIDEBOX;
 	self.movetype = MOVETYPE_STEP;
 
@@ -230,6 +216,7 @@ void() monster_tarbaby =
 	self.th_missile = tbaby_jump1;
 	self.th_melee = tbaby_jump1;
 	self.th_die = tbaby_die1;
-
+	
 	walkmonster_start ();
 };
+

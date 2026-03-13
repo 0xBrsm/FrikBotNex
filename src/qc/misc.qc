@@ -1,21 +1,3 @@
-/*  Copyright (C) 1996-1997  Id Software, Inc.
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
-
-    See file, 'COPYING', for details.
-*/
 
 /*QUAKED info_null (0 0.5 0) (-4 -4 -4) (4 4 4)
 Used as a positional target for spotlights, etc.
@@ -28,7 +10,9 @@ void() info_null =
 /*QUAKED info_notnull (0 0.5 0) (-4 -4 -4) (4 4 4)
 Used as a positional target for lightning.
 */
-void() info_notnull = {};
+void() info_notnull =
+{
+};
 
 //============================================================================
 
@@ -57,12 +41,11 @@ If targeted, it will toggle between on or off.
 void() light =
 {
 	if (!self.targetname)
-	{
-		// inert light
+	{	// inert light
 		remove(self);
 		return;
 	}
-
+	
 	if (self.style >= 32)
 	{
 		self.use = light_use;
@@ -90,7 +73,7 @@ void() light_fluoro =
 		else
 			lightstyle(self.style, "m");
 	}
-
+	
 	precache_sound ("ambience/fl_hum1.wav");
 	ambientsound (self.origin, "ambience/fl_hum1.wav", 0.5, ATTN_STATIC);
 };
@@ -125,7 +108,7 @@ void() light_globe =
 void() FireAmbient =
 {
 	precache_sound ("ambience/fire1.wav");
-	// attenuate fast
+// attenuate fast
 	ambientsound (self.origin, "ambience/fire1.wav", 0.5, ATTN_STATIC);
 };
 
@@ -187,7 +170,7 @@ void() fire_fly;
 void() fire_touch;
 void() misc_fireball =
 {
-
+	
 	precache_model ("progs/lavaball.mdl");
 	self.classname = "fireball";
 	self.nextthink = time + (random() * 5);
@@ -198,7 +181,7 @@ void() misc_fireball =
 
 void() fire_fly =
 {
-	local entity fireball;
+local entity	fireball;
 
 	fireball = spawn();
 	fireball.solid = SOLID_TRIGGER;
@@ -214,7 +197,7 @@ void() fire_fly =
 	fireball.nextthink = time + 5;
 	fireball.think = SUB_Remove;
 	fireball.touch = fire_touch;
-
+	
 	self.nextthink = time + (random() * 5) + 3;
 	self.think = fire_fly;
 };
@@ -250,8 +233,8 @@ TESTING THING
 
 void() misc_explobox =
 {
-	local float oldz;
-
+	local float	oldz;
+	
 	self.solid = SOLID_BBOX;
 	self.movetype = MOVETYPE_NONE;
 	precache_model ("maps/b_explob.bsp");
@@ -282,8 +265,8 @@ Smaller exploding box, REGISTERED ONLY
 
 void() misc_explobox2 =
 {
-	local float oldz;
-
+	local float	oldz;
+	
 	self.solid = SOLID_BBOX;
 	self.movetype = MOVETYPE_NONE;
 	precache_model2 ("maps/b_exbox2.bsp");
@@ -349,7 +332,7 @@ void() trap_spikeshooter =
 	if (self.spawnflags & SPAWNFLAG_LASER)
 	{
 		precache_model2 ("progs/laser.mdl");
-
+		
 		precache_sound2 ("enforcer/enfire.wav");
 		precache_sound2 ("enforcer/enfstop.wav");
 	}
@@ -366,7 +349,7 @@ Continuously fires spikes.
 void() trap_shooter =
 {
 	trap_spikeshooter ();
-
+	
 	if (self.wait == 0)
 		self.wait = 1;
 	self.nextthink = self.nextthink + self.wait + self.ltime;
@@ -393,6 +376,7 @@ testing air bubbles
 */
 
 void() air_bubbles =
+
 {
 	if (deathmatch)
 	{
@@ -406,7 +390,7 @@ void() air_bubbles =
 
 void() make_bubbles =
 {
-	local entity bubble;
+local entity	bubble;
 
 	bubble = spawn();
 	setmodel (bubble, "progs/s_bubble.spr");
@@ -427,8 +411,7 @@ void() make_bubbles =
 
 void() bubble_split =
 {
-	local entity bubble;
-
+local entity	bubble;
 	bubble = spawn();
 	setmodel (bubble, "progs/s_bubble.spr");
 	setorigin (bubble, self.origin);
@@ -452,6 +435,7 @@ void() bubble_remove =
 {
 	if (other.classname == self.classname)
 	{
+//		dprint ("bump");
 		return;
 	}
 	remove(self);
@@ -459,7 +443,8 @@ void() bubble_remove =
 
 void() bubble_bob =
 {
-	local float rnd1, rnd2, rnd3;
+local float		rnd1, rnd2, rnd3;
+local vector	vtmp1, modi;
 
 	self.cnt = self.cnt + 1;
 	if (self.cnt == 4)
@@ -475,29 +460,35 @@ void() bubble_bob =
 		rnd1 = 5;
 	if (rnd1 < -10)
 		rnd1 = -5;
-
+		
 	if (rnd2 > 10)
 		rnd2 = 5;
 	if (rnd2 < -10)
 		rnd2 = -5;
-
+		
 	if (rnd3 < 10)
 		rnd3 = 15;
 	if (rnd3 > 30)
 		rnd3 = 25;
-
+	
 	self.velocity_x = rnd1;
 	self.velocity_y = rnd2;
 	self.velocity_z = rnd3;
-
+		
 	self.nextthink = time + 0.5;
 	self.think = bubble_bob;
 };
 
+/*~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>
+~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~<~>~*/
+
 /*QUAKED viewthing (0 .5 .8) (-8 -8 -8) (8 8 8)
+
 Just for the debugging level.  Don't use
 */
+
 void() viewthing =
+
 {
 	self.movetype = MOVETYPE_NONE;
 	self.solid = SOLID_NOT;
@@ -515,8 +506,7 @@ SIMPLE BMODELS
 */
 
 void() func_wall_use =
-{
-	// change to alternate textures
+{	// change to alternate textures
 	self.frame = 1 - self.frame;
 };
 
@@ -537,6 +527,7 @@ void() func_wall =
 A simple entity that looks solid but lets you walk through it.
 */
 void() func_illusionary =
+
 {
 	self.angles = '0 0 0';
 	self.movetype = MOVETYPE_NONE;
@@ -549,10 +540,10 @@ void() func_illusionary =
 This bmodel will appear if the episode has allready been completed, so players can't reenter it.
 */
 void() func_episodegate =
+
 {
 	if (!(serverflags & self.spawnflags))
-		// can still enter episode
-		return;
+		return;			// can still enter episode
 
 	self.angles = '0 0 0';
 	self.movetype = MOVETYPE_PUSH;	// so it doesn't get pushed by anything
@@ -565,10 +556,10 @@ void() func_episodegate =
 This bmodel appears unless players have all of the episode sigils.
 */
 void() func_bossgate =
+
 {
 	if ( (serverflags & 15) == 15)
-		// all episodes completed
-		return;
+		return;		// all episodes completed
 	self.angles = '0 0 0';
 	self.movetype = MOVETYPE_PUSH;	// so it doesn't get pushed by anything
 	self.solid = SOLID_BSP;
@@ -663,6 +654,7 @@ For optimzation testing, starts a lot of sounds.
 */
 
 void() misc_noisemaker =
+
 {
 	precache_sound2 ("enforcer/enfire.wav");
 	precache_sound2 ("enforcer/enfstop.wav");
