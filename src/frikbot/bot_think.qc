@@ -244,12 +244,31 @@ the binary fight-or-retreat check.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+// does the bot have ammo for any ranged weapon it owns?
+float() bot_has_ammo =
+{
+	local float it;
+	it = self.items & 127;
+	if ((it & 32) && self.ammo_rockets >= 1) return TRUE;	// RL
+	if ((it & 64) && self.ammo_cells >= 1) return TRUE;		// LG
+	if ((it & 16) && self.ammo_rockets >= 1) return TRUE;	// GL
+	if ((it & 8) && self.ammo_nails >= 2) return TRUE;		// SNG
+	if ((it & 4) && self.ammo_nails >= 1) return TRUE;		// NG
+	if ((it & 2) && self.ammo_shells >= 2) return TRUE;		// SSG
+	if ((it & 1) && self.ammo_shells >= 1) return TRUE;		// SG
+	return FALSE;
+};
+
 // how good is staying and fighting right now?
 float() bot_util_fight =
 {
 	local float score, mysz, foesz, health_ratio, wep_adv, allies, fdist;
 
 	score = 50;		// baseline: fighting is the default
+
+	// no ranged ammo: strongly discourage fighting (axe only)
+	if (!bot_has_ammo())
+		score = score - 40;
 
 	mysz = bot_size_player(self);
 	foesz = bot_size_player(self.enemy);
@@ -316,6 +335,10 @@ float() bot_util_retreat =
 	local float score, mysz, foesz, health_ratio, allies;
 
 	score = 20;		// baseline: retreating is not default
+
+	// no ranged ammo: strongly encourage retreat
+	if (!bot_has_ammo())
+		score = score + 40;
 
 	mysz = bot_size_player(self);
 	foesz = bot_size_player(self.enemy);

@@ -238,6 +238,8 @@ void(float brange) bot_weapon_switch =
 		{	if (35 > best_score) { best_pulse = 4; best_score = 35; } }
 		if (self.ammo_shells >= 1 && (it & 1))
 		{	if (25 > best_score) { best_pulse = 2; best_score = 25; } }
+		if (!best_pulse)
+			best_pulse = 1; // axe as last resort
 		if (best_pulse)
 			self.impulse = best_pulse;
 		return;
@@ -279,6 +281,9 @@ void(float brange) bot_weapon_switch =
 		score = bot_weapon_score(1, brange);
 		if (score > best_score) { best_score = score; best_pulse = 2; }
 	}
+	// axe: always available, but weapon_range limits it to melee (< 64 units)
+	score = bot_weapon_score(4096, brange);
+	if (score > best_score) { best_score = score; best_pulse = 1; }
 
 	if (best_pulse)
 	{
