@@ -1325,29 +1325,6 @@ void() BotAI =
 	// health < 1 is used because fractional healths show up as 0 on normal player
 	// status bars, and the mod probably already compensated for that
 
-	if (bot_count > 0)
-		dprint("BOTDBG: BotAI hp=");
-	if (bot_count > 0)
-		dprint(ftos(self.health));
-	if (bot_count > 0)
-		dprint(" rt=");
-	if (bot_count > 0)
-		dprint(ftos(route_table == self));
-	if (bot_count > 0)
-		dprint(" t1=");
-	if (bot_count > 0)
-		dprint(self.target1.classname);
-	if (bot_count > 0)
-		dprint(" wm=");
-	if (bot_count > 0)
-		dprint(ftos(waypoint_mode));
-	if (bot_count > 0)
-		dprint(" keys=");
-	if (bot_count > 0)
-		dprint(ftos(self.keys));
-	if (bot_count > 0)
-		dprint("\n");
-
 	if (self.health < 1)
 	{
 		// record death location once per death (skill 1+)

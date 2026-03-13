@@ -520,16 +520,6 @@ void() PostPhysics =
 	local float back, dst,cflags;
 
 	self = self.owner;
-	if (bot_count > 0)
-		dprint("BOTDBG: PostPhysics for ");
-	if (bot_count > 0)
-		dprint(self.netname);
-	if (bot_count > 0)
-		dprint(" target1=");
-	if (bot_count > 0)
-		dprint(self.target1.classname);
-	if (bot_count > 0)
-		dprint("\n");
 
 	self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
 	if (self.phys_obj.dest2 == self.origin)

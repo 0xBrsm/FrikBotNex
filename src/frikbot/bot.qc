@@ -741,7 +741,7 @@ void() ClientDisconnected =
 	if (self._last)
 		self._last._next = self._next;
 
-	active_clients = active_clients - active_clients & ClientBitFlag(self.b_clientno);
+	active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1118,13 +1118,6 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 	active_clients = active_clients | ClientBitFlag(f);
 
-	dprint("BOTDBG: BotConnect slot=");
-	dprint(ftos(f));
-	dprint(" ishuman=");
-	dprint(ftos(self.ishuman));
-	dprint(" ac=");
-	dprint(ftos(active_clients));
-	dprint("\n");
 
 	// this is risky... could corrupt .way files if done wrong
 	// If you're not the gambling type, comment this out
@@ -1328,17 +1321,6 @@ void() BotFrame =
 {
 	local float num;
 
-	if (bot_count > 0)
-	{
-		dprint("BOTDBG: BotFrame mc=");
-		dprint(ftos(max_clients));
-		dprint(" ac=");
-		dprint(ftos(active_clients));
-		dprint(" bc=");
-		dprint(ftos(bot_count));
-		dprint("\n");
-	}
-
 	// for the sake of speed
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
@@ -1355,21 +1337,7 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				if (bot_count > 0)
-					dprint("BOTDBG: BotFrame processing bot slot ");
-				if (bot_count > 0)
-					dprint(ftos(num));
-				if (bot_count > 0)
-					dprint(" keys=");
-				if (bot_count > 0)
-					dprint(ftos(self.keys));
-				if (bot_count > 0)
-					dprint(" mt=");
-				if (bot_count > 0)
-					dprint(ftos(self.movetype));
-				if (bot_count > 0)
-					dprint("\n");
-				frik_obstacles();
+					frik_obstacles();
 				CL_KeyMove();
 				SV_ClientThink();
 				SV_Physics_Client();
