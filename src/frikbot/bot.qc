@@ -120,68 +120,6 @@ void() bot_map_load =
 		map_dm5();
 	else if (mapname == "dm6")
 		map_dm6();
-	else if (mapname == "start")
-		map_start();
-	else if (mapname == "e1m1")
-		map_e1m1();
-	else if (mapname == "e1m2")
-		map_e1m2();
-	else if (mapname == "e1m3")
-		map_e1m3();
-	else if (mapname == "e1m4")
-		map_e1m4();
-	else if (mapname == "e1m5")
-		map_e1m5();
-	else if (mapname == "e1m6")
-		map_e1m6();
-	else if (mapname == "e1m7")
-		map_e1m7();
-	else if (mapname == "e2m1")
-		map_e2m1();
-	else if (mapname == "e2m2")
-		map_e2m2();
-	else if (mapname == "e2m3")
-		map_e2m3();
-	else if (mapname == "e2m4")
-		map_e2m4();
-	else if (mapname == "e2m5")
-		map_e2m5();
-	else if (mapname == "e2m6")
-		map_e2m6();
-	else if (mapname == "e2m7")
-		map_e2m7();
-	else if (mapname == "e3m1")
-		map_e3m1();
-	else if (mapname == "e3m2")
-		map_e3m2();
-	else if (mapname == "e3m3")
-		map_e3m3();
-	else if (mapname == "e3m4")
-		map_e3m4();
-	else if (mapname == "e3m5")
-		map_e3m5();
-	else if (mapname == "e3m6")
-		map_e3m6();
-	else if (mapname == "e3m7")
-		map_e3m7();
-	else if (mapname == "e4m1")
-		map_e4m1();
-	else if (mapname == "e4m2")
-		map_e4m2();
-	else if (mapname == "e4m3")
-		map_e4m3();
-	else if (mapname == "e4m4")
-		map_e4m4();
-	else if (mapname == "e4m5")
-		map_e4m5();
-	else if (mapname == "e4m6")
-		map_e4m6();
-	else if (mapname == "e4m7")
-		map_e4m7();
-	else if (mapname == "e4m8")
-		map_e4m8();
-	else if (mapname == "end")
-		map_end();
 };
 
 /*
@@ -408,9 +346,6 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
-// bot_sense.qc — unified spatial awareness pass
-void() bot_sense;
-
 // bot_think.qc — opponent modeling, team coordination, utility scoring, threat assessment
 void() bot_opp_model_update;
 void() bot_opp_model_reset;
@@ -482,11 +417,12 @@ direct messages to the bots, it crashes quake :-(
 */
 void(entity	client, string s) stuffcmd =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_stuffcmd(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -494,17 +430,20 @@ void(entity	client, string s) stuffcmd =
 				frik_stuffcmd(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
 };
 
 void(entity	e) setspawnparms =
 {
+	local float n;
 	if (e.ishuman == 1)
 		frik_setspawnparms(e);
 	else
 	{
 		b_temp1 = player_head;
-		while(b_temp1)
+		n = 0;
+		while(b_temp1 && n < max_clients)
 		{
 			if (b_temp1.ishuman)
 			{
@@ -512,17 +451,19 @@ void(entity	e) setspawnparms =
 				return;
 			}
 			b_temp1 = b_temp1._next;
+			n = n + 1;
 		}
 		SetNewParms();
 	}
 };
 void(entity	client, string s) sprint =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_sprint(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -530,16 +471,17 @@ void(entity	client, string s) sprint =
 				frik_sprint(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
-
 };
 void(entity	client, string s) centerprint =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_centerprint(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -547,6 +489,7 @@ void(entity	client, string s) centerprint =
 				frik_centerprint(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
 };
 
@@ -736,10 +679,31 @@ void() ClientFixRankings =
 void() ClientInRankings =
 {
 	local float cno;
+	local entity t;
 
    	cno = self.colormap - 1;
 	BotInvalidClientNo (cno);
-	
+
+	// guard against double-insertion — if already in list, remove first
+	t = player_head;
+	while (t)
+	{
+		if (t == self)
+		{
+			// already in list — unlink before re-inserting
+			if (player_head == self)
+				player_head = self._next;
+			if (self._next)
+				self._next._last = self._last;
+			if (self._last)
+				self._last._next = self._next;
+			self._next = world;
+			self._last = world;
+			break;
+		}
+		t = t._next;
+	}
+
 	if (player_head)
 		player_head._last = self;
 

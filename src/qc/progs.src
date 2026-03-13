@@ -9,37 +9,8 @@ defs.qc
 ../waypoints/map_dm5.qc
 ../waypoints/map_dm6.qc
 
-../waypoints/map_start.qc
-../waypoints/map_e1m1.qc
-../waypoints/map_e1m2.qc
-../waypoints/map_e1m3.qc
-../waypoints/map_e1m4.qc
-../waypoints/map_e1m5.qc
-../waypoints/map_e1m6.qc
-../waypoints/map_e1m7.qc
-../waypoints/map_e2m1.qc
-../waypoints/map_e2m2.qc
-../waypoints/map_e2m3.qc
-../waypoints/map_e2m4.qc
-../waypoints/map_e2m5.qc
-../waypoints/map_e2m6.qc
-../waypoints/map_e2m7.qc
-../waypoints/map_e3m1.qc
-../waypoints/map_e3m2.qc
-../waypoints/map_e3m3.qc
-../waypoints/map_e3m4.qc
-../waypoints/map_e3m5.qc
-../waypoints/map_e3m6.qc
-../waypoints/map_e3m7.qc
-../waypoints/map_e4m1.qc
-../waypoints/map_e4m2.qc
-../waypoints/map_e4m3.qc
-../waypoints/map_e4m4.qc
-../waypoints/map_e4m5.qc
-../waypoints/map_e4m6.qc
-../waypoints/map_e4m7.qc
-../waypoints/map_e4m8.qc
-../waypoints/map_end.qc
+// Episode waypoints temporarily disabled - exceed globals limit
+// They will be loaded from .way files at runtime instead faca493 (Fix player_head linked list crash and globals overflow)
 
 ../frikbot/bot.qc
 ../frikbot/bot_sense.qc
