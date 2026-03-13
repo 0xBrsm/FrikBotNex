@@ -1,5 +1,8 @@
 # Compiled QuakeC output
-*.dat
 *.lno
 fteqcc.log
+
+# Test .dat leftovers — keep only src/progs.dat checked in for easy download
+*.dat
+!src/progs.dat
 .claude/
