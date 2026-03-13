@@ -2,7 +2,7 @@
 *.lno
 fteqcc.log
 
-# Test .dat leftovers — keep only src/progs.dat checked in for easy download
+# Ignore stray .dat files, keep only root progs.dat for download
 *.dat
-!src/progs.dat
+!progs.dat
 .claude/
