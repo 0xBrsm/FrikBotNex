@@ -1096,8 +1096,7 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	self.b_skill = whatskill;
 
 	// assign random personality for varied playstyles
-	f = floor(random() * 4);
-	self.b_personality = f;
+	self.b_personality = floor(random() * 4);
 
 	if (teamplay && !coop)
 	{
@@ -1320,15 +1319,6 @@ void() BotFrame =
 {
 	local float num;
 
-	if (bot_count > 0)
-	{
-		bprint("BF ac=");
-		bprint(ftos(active_clients));
-		bprint(" mc=");
-		bprint(ftos(max_clients));
-		bprint("\n");
-	}
-
 	// for the sake of speed
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
@@ -1345,7 +1335,7 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-					frik_obstacles();
+				frik_obstacles();
 				CL_KeyMove();
 				SV_ClientThink();
 				SV_Physics_Client();
