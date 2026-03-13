@@ -520,7 +520,7 @@ void() bot_bhop =
 		// in a chain - keep jumping if speed is above a lower "stop" threshold
 		if (self.b_bhop_land)
 		{
-			if (spd > 80)
+			if (spd > 200)
 			{
 				// human emulation: occasionally fumble a bhop in the chain
 				if (random() < self.b_bhop_fumble)
@@ -540,8 +540,8 @@ void() bot_bhop =
 		}
 
 		// start a bhop chain if moving fast enough
-		// skill 3: initiates more aggressively
-		if (spd > 150 || (self.b_skill >= 3 && spd > 50))
+		// skill 3: initiates aggressively, skill 2: needs near-max run speed
+		if ((self.b_skill >= 3 && spd > 150) || spd > 280)
 		{
 			bot_jump();
 			self.b_bhop_land = 1;
