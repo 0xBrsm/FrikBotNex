@@ -1,5 +1,5 @@
-# Compiled QuakeC output (in src/)
-src/*.dat
-src/*.lno
+# Compiled QuakeC output
+*.dat
+*.lno
 fteqcc.log
 .claude/
