@@ -119,8 +119,8 @@ void() bot_sense_ground =
 
 		if (sped > 0)
 		{
-			start_x = self.origin_x + vel_x / (sped * 16);
-			start_y = self.origin_y + vel_y / (sped * 16);
+			start_x = self.origin_x + vel_x * 16 / sped;
+			start_y = self.origin_y + vel_y * 16 / sped;
 			start_z = self.origin_z + self.mins_z;
 			stop = start;
 			stop_z = start_z - 34;

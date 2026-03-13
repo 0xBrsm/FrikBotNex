@@ -292,6 +292,24 @@ void() frik_obstacles =
 	if (frik_check_hazard())
 		return;
 
+	// edge detection: bot's leading edge is over a dropoff
+	// last-resort brake before falling into lava/slime/void
+	if (self.sense_on_edge)
+	{
+		ang = self.velocity;
+		ang_z = 0;
+		if (vlen(ang) > 0.1)
+		{
+			conts = self.sense_fwd_ground_type;
+			if (conts < -3 || conts == CONTENT_EMPTY)
+			{
+				// lava, slime, or void ahead — hard stop
+				frik_obstructed(normalize(ang), TRUE);
+				return;
+			}
+		}
+	}
+
 	// read pre-computed sense data instead of tracing
 	hgt = self.sense_fwd_height;
 	conts = self.sense_fwd_ground_type;
@@ -444,9 +462,9 @@ void() frik_dodge_obstruction =
 			way_x = self.obs_dir_y;
 			way_y = self.obs_dir_x * -1;
 		}
-		self.keys = self.keys & 960 + frik_KeysForDir(way);
+		self.keys = (self.keys & 960) | frik_KeysForDir(way);
 	}
-	
+
 	// fix the bot
 
 	self.origin = org;
@@ -599,7 +617,7 @@ void() frik_movetogoal =
 	}
 
 	way = normalize(way);
-	self.keys = self.keys & 960 + frik_KeysForDir(way);
+	self.keys = (self.keys & 960) | frik_KeysForDir(way);
 
 	// human emulation: occasional strafe jitter during navigation
 	// humans don't run in perfectly straight lines
@@ -636,7 +654,7 @@ void() frik_movetogoal =
 		makevectors('0 1 0' * self.sense_nav_best_dir);
 		nav_dir = v_forward;
 		nav_dir_z = 0;
-		self.keys = self.keys & 960 + frik_KeysForDir(nav_dir);
+		self.keys = (self.keys & 960) | frik_KeysForDir(nav_dir);
 	}
 
 	if (self.b_aiflags & AI_PRECISION)
@@ -656,7 +674,7 @@ float(vector weird) frik_walkmove =
 {
 	// okay so it's not walkmove
 	// sue me
- 	self.keys = self.keys & 960 + frik_KeysForDir(weird);
+ 	self.keys = (self.keys & 960) | frik_KeysForDir(weird);
 
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
