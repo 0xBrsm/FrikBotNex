@@ -15,7 +15,7 @@ cd src/qc
 fteqcc    # or: gmqcc progs.src  /  qcc
 ```
 
-The compilation manifest is `src/qc/progs.src`. Output goes to `src/progs.dat` (game bytecode) and `src/progs.lno` (debug line numbers). Both are gitignored.
+The compilation manifest is `src/qc/progs.src`. Output goes to `src/progs.dat` (game bytecode) and `src/progs.lno` (debug line numbers). A pre-compiled `progs.dat` is kept at the repo root for easy download; copy `src/progs.dat` there after recompiling.
 
 There are no automated tests — testing requires running in a Quake engine.
 
@@ -27,11 +27,14 @@ There are no automated tests — testing requires running in a Quake engine.
 
 2. **Bot AI system** (`src/frikbot/`) — The core of this project:
    - `bot.qc` — Bot entity lifecycle, main loop, initialization
-   - `bot_ai.qc` — Target selection, threat assessment, goal management
-   - `bot_fight.qc` — Combat: weapon scoring, dodge/strafe, retreat, aim variance
-   - `bot_move.qc` — Movement command generation
+   - `bot_ai.qc` — Target selection, threat assessment, goal management, aim pipeline
+   - `bot_think.qc` — Opponent modeling, team coordination, utility scoring
+   - `bot_shoot.qc` — Weapon scoring, switching, fire control
+   - `bot_fight.qc` — Combat movement state machine (fight/retreat/pressure/flank)
+   - `bot_move.qc` — Movement command generation, bunny hopping
    - `bot_phys.qc` — Physics prediction and movement validation
    - `bot_way.qc` — Waypoint navigation and pathfinding
+   - `bot_sense.qc` — Spatial awareness system (field declarations; disabled)
    - `bot_misc.qc` — Utility functions
    - `bot_ed.qc` — In-game console/editor interface
    - `bot_qw.qc` — QuakeWorld protocol variant (not compiled by default)
