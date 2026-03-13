@@ -13,7 +13,7 @@ defs.qc
 // They will be loaded from .way files at runtime instead faca493 (Fix player_head linked list crash and globals overflow)
 
 ../frikbot/bot.qc
-../frikbot/bot_sense.qc
+// ../frikbot/bot_sense.qc  // DISABLED: extra entity fields break bot movement
 ../frikbot/bot_way.qc
 ../frikbot/bot_think.qc
 ../frikbot/bot_shoot.qc

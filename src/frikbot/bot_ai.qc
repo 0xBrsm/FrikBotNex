@@ -1390,8 +1390,8 @@ void() BotAI =
 	self.button2 = 0;
 	self.button0 = 0;
 
-	// unified spatial awareness pass — compute once, read everywhere
-	bot_sense();
+	// unified spatial awareness pass — DISABLED until entity field limit resolved
+	// bot_sense();
 
 	// target1 is like goalentity in normal Quake monster AI.
 	// it's the bot's most immediate target

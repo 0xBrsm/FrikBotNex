@@ -738,6 +738,22 @@ Check if enemy has a wall close behind them
 
 float() bot_enemy_near_wall =
 {
-	// read from unified sense cache (computed in bot_sense_visibility)
-	return self.sense_enemy_wall;
+	local vector dir, org;
+
+	// return cached result if already computed this frame
+	if (self.b_wall_time == time)
+		return self.b_wall_near;
+
+	org = realorigin(self.enemy);
+	dir = normalize(org - self.origin);
+	traceline(org, org + dir * 100, TRUE, self.enemy);
+
+	self.b_wall_time = time;
+	if (trace_fraction < 1)
+	{
+		self.b_wall_near = TRUE;
+		return TRUE;
+	}
+	self.b_wall_near = FALSE;
+	return FALSE;
 };

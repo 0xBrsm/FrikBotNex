@@ -79,32 +79,21 @@ float(entity e) bot_can_rj =
 
 float(float flag) frik_recognize_plat =
 {
-	local entity plat_ent;
-
 	if ((self.classname != "waypoint") && !(self.flags & FL_ONGROUND))
 		return FALSE;
-
-	// use sense cache for bot entities; waypoints still trace directly
-	if (self.classname == "waypoint")
+	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+	if (trace_ent != world)
 	{
-		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-		plat_ent = trace_ent;
-	}
-	else
-		plat_ent = self.sense_ground_ent;
-
-	if (plat_ent != world)
-	{
-		if (flag) // affect bot movement too
+		if (flag) // afect bot movement too
 		{
 			if (self.keys & KEY_MOVEUP)
 			{
-				if (plat_ent.velocity_z > 0)
+				if (trace_ent.velocity_z > 0)
 					self.keys = self.keys & 960; // 960 is all view keys
 			}
 			else if (self.keys & KEY_MOVEDOWN)
 			{
-				if (plat_ent.velocity_z < 0)
+				if (trace_ent.velocity_z < 0)
 					self.keys = self.keys & 960;
 			}
 		}
@@ -239,7 +228,8 @@ a hazard is detected.
 
 float() frik_check_hazard =
 {
-	local vector ang, side;
+	local vector ang, check, side;
+	local float conts;
 
 	if (!(self.flags & FL_ONGROUND))
 		return FALSE;
@@ -250,29 +240,48 @@ float() frik_check_hazard =
 		return FALSE;
 	ang = normalize(ang);
 
-	// read from sense cache instead of tracing
-	// center-ahead hazard
-	if (self.sense_fwd_ground_type < -3)
+	// check ground 48 units ahead
+	check = self.origin + ang * 48;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
 	{
-		frik_obstructed(ang, TRUE);
-		return TRUE;
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang, TRUE);
+			return TRUE;
+		}
 	}
 
+	// check to the left and right (24 units out, 48 ahead)
 	side_x = ang_y * -1;
 	side_y = ang_x;
 
-	// left-ahead hazard
-	if (self.sense_hazard_left)
+	check = self.origin + ang * 48 + side * 24;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
 	{
-		frik_obstructed(ang + side, TRUE);
-		return TRUE;
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang + side, TRUE);
+			return TRUE;
+		}
 	}
 
-	// right-ahead hazard
-	if (self.sense_hazard_right)
+	check = self.origin + ang * 48 - side * 24;
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
 	{
-		frik_obstructed(ang - side, TRUE);
-		return TRUE;
+		conts = pointcontents(trace_endpos + '0 0 4');
+		if (conts < -3)
+		{
+			frik_obstructed(ang - side, TRUE);
+			return TRUE;
+		}
 	}
 
 	return FALSE;
@@ -280,8 +289,8 @@ float() frik_check_hazard =
 
 void() frik_obstacles =
 {
-	local vector ang, stop;
-	local float hgt, conts, gap, dist;
+	local vector start, stop, ang;
+	local float test, conts, dist, hgt;
 
 	if (!(self.flags & FL_ONGROUND))
 		return;
@@ -292,10 +301,16 @@ void() frik_obstacles =
 	if (frik_check_hazard())
 		return;
 
-	// read pre-computed sense data instead of tracing
-	hgt = self.sense_fwd_height;
-	conts = self.sense_fwd_ground_type;
-	gap = self.sense_fwd_gap_width;
+	ang = normalize(self.velocity);
+	ang_z = 0;
+	start = self.origin + ang * 32; // ahem
+	start_z = self.origin_z + self.maxs_z;
+	stop = start;
+	stop_z = self.origin_z + self.mins_z;
+	traceline(start, stop - '0 0 256', TRUE, self);
+	if (trace_allsolid || trace_startsolid)
+		return;
+	hgt = trace_endpos_z - stop_z;
 
 	if (hgt > 18)
 	{
@@ -305,18 +320,27 @@ void() frik_obstacles =
 	if (hgt >= 0)
 		return;
 
-	// gap detection: use sense cache
-	if (gap <= 0)
-		return; // no gap or walkable gap
-
+	conts = pointcontents(trace_endpos + '0 0 4');
+	start = stop - '0 0 8';
+	stop = start + ang *  256;
+	traceline(start, stop, TRUE, self);
+	test = vlen(trace_endpos - start);
+	if (test <= 20)
+		return; // it's a walkable gap, do nothing
+	ang_x = self.velocity_y * -1;
+	ang_y = self.velocity_x;
+	ang = normalize(ang);
+	traceline(start - (ang * 10), start + (ang * 10), TRUE, self);
+	if ((trace_fraction != 1) || trace_startsolid)
+		return; // gap is only 20 wide, walkable	
 	ang = self.velocity;
 	ang_z = 0;
-
-	if (!self.sense_fwd_jumpable) // I can't make it
+	dist = ((540 / sv_gravity) * vlen(ang))/* + 32*/;
+	if (test > dist) // I can't make it
 	{
-		if (conts < -3) // bad stuff down there
+		if (conts < -3) // bad stuff down dare
 		{
-			frik_obstructed(normalize(ang), TRUE);
+			frik_obstructed(ang, TRUE);
 			return;
 		}
 		else
@@ -327,19 +351,18 @@ void() frik_obstacles =
 				if ((stop_z - self.origin_z) < -32)
 					return; // safe to fall
 			}
-			frik_obstructed(normalize(ang), FALSE);
+			frik_obstructed(ang, FALSE);
 			return;
 		}
 	}
 	else
 	{
-		// I can make it -- check for a ledge blocking path
-		dist = gap;
 		ang = normalize(ang);
-		traceline(self.origin, self.origin + (ang * (dist + 20)), TRUE, self);
+		//look for a ledge
+		traceline(self.origin, self.origin + (ang * (test + 20)), TRUE, self); 
 		if (trace_fraction != 1)
 		{
-			if (conts < -3)
+			if (conts < -3) // bad stuff down dare
 			{
 				frik_obstructed(ang, TRUE);
 				return;
@@ -359,11 +382,11 @@ void() frik_obstacles =
 
 		if (self.target1)
 		{
-			// getting further away from my target?
-			dist = vlen(self.target1.origin - (ang + self.origin));
-			if (dist > vlen(self.target1.origin - self.origin))
+			// getting furter away from my target?
+			test = vlen(self.target1.origin - (ang + self.origin));
+			if (test > vlen(self.target1.origin - self.origin))
 			{
-				if (conts < -3)
+				if (conts < -3) // bad stuff down dare
 				{
 					frik_obstructed(ang, TRUE);
 					return;
@@ -378,16 +401,19 @@ void() frik_obstacles =
 	}
 	if (hgt < -18)
 	{
-		if (conts < -3)
+		if (conts < -3) // bad stuff down dare
 		{
-			frik_obstructed(normalize(self.velocity), TRUE);
+			frik_obstructed(ang, TRUE);
 			return;
 		}
 		if (self.target1)
 		{
 			stop = realorigin(self.target1);
 			if ((stop_z - self.origin_z) < -32)
+			{
+
 				return; // safe to fall
+			}
 		}
 		bot_jump();
 	}
@@ -627,17 +653,6 @@ void() frik_movetogoal =
 
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
-
-	// local navigation: when obstructed and sense nav has a viable direction,
-	// override movement keys to route around the obstacle spatially
-	if (self.b_aiflags & AI_OBSTRUCTED && self.sense_nav_best_dir >= 0)
-	{
-		local vector nav_dir;
-		makevectors('0 1 0' * self.sense_nav_best_dir);
-		nav_dir = v_forward;
-		nav_dir_z = 0;
-		self.keys = self.keys & 960 + frik_KeysForDir(nav_dir);
-	}
 
 	if (self.b_aiflags & AI_PRECISION)
 	{

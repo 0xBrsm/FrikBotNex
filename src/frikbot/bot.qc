@@ -725,14 +725,6 @@ void() ClientInRankings =
 		return;
 	}
 	active_clients = active_clients | ClientBitFlag(cno);
-	dprint("BOTDBG: ClientInRankings set ac=");
-	dprint(ftos(active_clients));
-	dprint(" for cno=");
-	dprint(ftos(cno));
-	dprint(" name=");
-	dprint(self.netname);
-	dprint("\n");
-
 	self.b_clientno = cno;
 	self.ishuman = TRUE;
 	self.switch_wallhug = time + 1;
@@ -741,14 +733,6 @@ void() ClientInRankings =
 
 void() ClientDisconnected =
 {
-	dprint("BOTDBG: ClientDisconnected called for ");
-	dprint(self.netname);
-	dprint(" cno=");
-	dprint(ftos(self.b_clientno));
-	dprint(" ac_before=");
-	dprint(ftos(active_clients));
-	dprint("\n");
-
 	if (player_head == self)
 		player_head = self._next;
 	if (self._next)
@@ -757,10 +741,6 @@ void() ClientDisconnected =
 		self._last._next = self._next;
 
 	active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
-
-	dprint("BOTDBG: ac_after=");
-	dprint(ftos(active_clients));
-	dprint("\n");
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
