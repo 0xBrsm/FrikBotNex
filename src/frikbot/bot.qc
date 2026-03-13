@@ -1118,6 +1118,14 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 	active_clients = active_clients | ClientBitFlag(f);
 
+	dprint("BOTDBG: BotConnect slot=");
+	dprint(ftos(f));
+	dprint(" ishuman=");
+	dprint(ftos(self.ishuman));
+	dprint(" ac=");
+	dprint(ftos(active_clients));
+	dprint("\n");
+
 	// this is risky... could corrupt .way files if done wrong
 	// If you're not the gambling type, comment this out
 
@@ -1319,6 +1327,17 @@ void() WaypointWatch =
 void() BotFrame =
 {
 	local float num;
+
+	if (framecount < 3)
+	{
+		dprint("BOTDBG: BotFrame called mc=");
+		dprint(ftos(max_clients));
+		dprint(" ac=");
+		dprint(ftos(active_clients));
+		dprint(" bc=");
+		dprint(ftos(bot_count));
+		dprint("\n");
+	}
 
 	// for the sake of speed
 	sv_maxspeed = cvar("sv_maxspeed");
