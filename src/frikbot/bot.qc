@@ -1336,6 +1336,20 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
+				if (framecount < 8)
+					dprint("BOTDBG: BotFrame processing bot slot ");
+				if (framecount < 8)
+					dprint(ftos(num));
+				if (framecount < 8)
+					dprint(" keys=");
+				if (framecount < 8)
+					dprint(ftos(self.keys));
+				if (framecount < 8)
+					dprint(" mt=");
+				if (framecount < 8)
+					dprint(ftos(self.movetype));
+				if (framecount < 8)
+					dprint("\n");
 				frik_obstacles();
 				CL_KeyMove();
 				SV_ClientThink();
