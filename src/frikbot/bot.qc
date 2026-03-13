@@ -1340,6 +1340,15 @@ void() BotFrame =
 {
 	local float num;
 
+	if (bot_count > 0)
+	{
+		bprint("BF ac=");
+		bprint(ftos(active_clients));
+		bprint(" mc=");
+		bprint(ftos(max_clients));
+		bprint("\n");
+	}
+
 	// for the sake of speed
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
