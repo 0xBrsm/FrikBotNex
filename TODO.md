@@ -41,9 +41,10 @@
 - [ ] Dynamic personality drift: tilt on kill/death streaks
 - [ ] Sound bait: skill 3 campers fire bait shots to draw enemies
 
-## Spatial Awareness System (planned, disabled)
-- [x] Design document and field declarations (bot_sense.qc)
-- [ ] Wire bot_sense() into AI loop (disabled pending entity field limit testing)
-- [ ] Replace scattered tracelines with cached sense reads
-- [ ] 8-direction nav fan for intra-region navigation
+## Spatial Awareness System
+- [x] Unified per-tick sense pass (bot_sense.qc, 628 lines)
+- [x] Wire bot_sense() into AI loop (BotAI in bot_ai.qc)
+- [x] Replace scattered tracelines with cached sense reads (Phase 1-2 complete)
+- [x] 8-direction nav fan with best-dir scoring and openness metric
+- [x] Local nav override in frik_movetogoal() when obstructed
 - [ ] Waypoint thinning using local spatial navigation

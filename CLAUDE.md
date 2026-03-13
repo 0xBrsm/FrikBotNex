@@ -34,7 +34,7 @@ There are no automated tests — testing requires running in a Quake engine.
    - `bot_move.qc` — Movement command generation, bunny hopping
    - `bot_phys.qc` — Physics prediction and movement validation
    - `bot_way.qc` — Waypoint navigation and pathfinding
-   - `bot_sense.qc` — Spatial awareness system (field declarations; disabled)
+   - `bot_sense.qc` — Unified spatial awareness pass (compute once, read everywhere)
    - `bot_misc.qc` — Utility functions
    - `bot_ed.qc` — In-game console/editor interface
    - `bot_qw.qc` — QuakeWorld protocol variant (not compiled by default)
