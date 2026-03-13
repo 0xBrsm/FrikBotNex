@@ -627,7 +627,8 @@ void() bot_dodge_stuff =
 		}
 
 		// human emulation: reaction delay before engaging new enemies
-		// first detection starts a timer; enemy isn't fought until it expires
+		// first detection starts a one-shot timer; enemy isn't fought until it expires
+		// b_react_time stays at expired value while fighting to prevent re-triggering
 		if (self.enemy && self.b_skill < 3)
 		{
 			if (self.b_react_time == 0)
@@ -645,15 +646,11 @@ void() bot_dodge_stuff =
 				// still reacting — suppress engagement
 				self.enemy = world;
 			}
-			else
-			{
-				// reaction complete — engage and reset for next time
-				self.b_react_time = 0;
-			}
+			// else: reaction expired, keep fighting (don't reset to 0)
 		}
 		else if (!self.enemy)
 		{
-			// lost sight during reaction — reset timer
+			// enemy lost — reset timer for next encounter
 			self.b_react_time = 0;
 		}
 	}
