@@ -1328,9 +1328,9 @@ void() BotFrame =
 {
 	local float num;
 
-	if (framecount < 3)
+	if (bot_count > 0)
 	{
-		dprint("BOTDBG: BotFrame called mc=");
+		dprint("BOTDBG: BotFrame mc=");
 		dprint(ftos(max_clients));
 		dprint(" ac=");
 		dprint(ftos(active_clients));
@@ -1355,19 +1355,19 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint("BOTDBG: BotFrame processing bot slot ");
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint(ftos(num));
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint(" keys=");
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint(ftos(self.keys));
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint(" mt=");
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint(ftos(self.movetype));
-				if (framecount < 8)
+				if (bot_count > 0)
 					dprint("\n");
 				frik_obstacles();
 				CL_KeyMove();

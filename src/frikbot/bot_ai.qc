@@ -1325,27 +1325,27 @@ void() BotAI =
 	// health < 1 is used because fractional healths show up as 0 on normal player
 	// status bars, and the mod probably already compensated for that
 
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint("BOTDBG: BotAI hp=");
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(ftos(self.health));
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(" rt=");
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(ftos(route_table == self));
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(" t1=");
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(self.target1.classname);
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(" wm=");
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(ftos(waypoint_mode));
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(" keys=");
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint(ftos(self.keys));
-	if (framecount < 8)
+	if (bot_count > 0)
 		dprint("\n");
 
 	if (self.health < 1)
