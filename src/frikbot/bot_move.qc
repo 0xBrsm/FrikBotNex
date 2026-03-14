@@ -48,6 +48,50 @@ void() bot_jump =
 	self.button2 = TRUE;
 };
 
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_wants_to_drop
+
+Unified check: is the bot intentionally navigating
+to a target below? Returns TRUE if the bot should
+be allowed to step off the current edge/ledge.
+
+Used by edge detection, hazard scanning, and gap
+detection so navigation intent is evaluated in
+one place with one set of rules.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_wants_to_drop =
+{
+	local vector stop, dir, vel;
+
+	if (!self.target1)
+		return FALSE;
+
+	stop = realorigin(self.target1);
+
+	// target must be significantly below us
+	if ((stop_z - self.origin_z) >= -32)
+		return FALSE;
+
+	// target must be roughly in our movement direction
+	// (don't walk off the wrong edge)
+	dir = stop - self.origin;
+	dir_z = 0;
+	vel = self.velocity;
+	vel_z = 0;
+	if (vlen(vel) > 0.1 && vlen(dir) > 0.1)
+	{
+		if (dir * normalize(vel) < 0)
+			return FALSE;  // target is behind us
+	}
+
+	return TRUE;
+};
+
 float(entity e) bot_can_rj =
 {
 	// this returns true of the bot can rocket/superjump/hook
@@ -266,11 +310,14 @@ float() frik_check_hazard =
 	ang = normalize(ang);
 
 	// read from sense cache instead of tracing
-	// center-ahead hazard
+	// center-ahead hazard (but defer to navigation intent for drops)
 	if (self.sense_fwd_ground_type < -3)
 	{
-		frik_obstructed(ang, TRUE);
-		return TRUE;
+		if (!bot_wants_to_drop())
+		{
+			frik_obstructed(ang, TRUE);
+			return TRUE;
+		}
 	}
 
 	side_x = ang_y * -1;
@@ -295,7 +342,7 @@ float() frik_check_hazard =
 
 void() frik_obstacles =
 {
-	local vector ang, stop;
+	local vector ang;
 	local float hgt, conts, gap, dist;
 
 	if (!(self.flags & FL_ONGROUND))
@@ -326,6 +373,10 @@ void() frik_obstacles =
 			conts = self.sense_fwd_ground_type;
 			if (conts < -3 || conts == CONTENT_EMPTY)
 			{
+				// navigating to a target below? trust pathfinding
+				if (bot_wants_to_drop())
+					return;
+
 				// lava, slime, or void ahead — hard stop
 				frik_obstructed(normalize(ang), TRUE);
 				return;
@@ -357,17 +408,15 @@ void() frik_obstacles =
 	{
 		if (conts < -3) // bad stuff down there
 		{
+			if (bot_wants_to_drop())
+				return; // navigation says drop — trust it
 			frik_obstructed(normalize(ang), TRUE);
 			return;
 		}
 		else
 		{
-			if (self.target1)
-			{
-				stop = realorigin(self.target1);
-				if ((stop_z - self.origin_z) < -32)
-					return; // safe to fall
-			}
+			if (bot_wants_to_drop())
+				return; // safe to fall toward target
 			frik_obstructed(normalize(ang), FALSE);
 			return;
 		}
@@ -382,17 +431,15 @@ void() frik_obstacles =
 		{
 			if (conts < -3)
 			{
+				if (bot_wants_to_drop())
+					return;
 				frik_obstructed(ang, TRUE);
 				return;
 			}
 			else
 			{
-				if (self.target1)
-				{
-					stop = realorigin(self.target1);
-					if ((stop_z - self.origin_z) < -32)
-						return; // safe to fall
-				}
+				if (bot_wants_to_drop())
+					return; // safe to fall toward target
 				frik_obstructed(ang, FALSE);
 				return;
 			}
@@ -421,15 +468,13 @@ void() frik_obstacles =
 	{
 		if (conts < -3)
 		{
+			if (bot_wants_to_drop())
+				return;
 			frik_obstructed(normalize(self.velocity), TRUE);
 			return;
 		}
-		if (self.target1)
-		{
-			stop = realorigin(self.target1);
-			if ((stop_z - self.origin_z) < -32)
-				return; // safe to fall
-		}
+		if (bot_wants_to_drop())
+			return; // safe to fall toward target
 		bot_jump();
 	}
 	// go for it
