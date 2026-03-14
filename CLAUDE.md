@@ -15,7 +15,7 @@ cd src/qc
 fteqcc    # or: gmqcc progs.src  /  qcc
 ```
 
-The compilation manifest is `src/qc/progs.src`. Output goes to `src/progs.dat` (game bytecode) and `src/progs.lno` (debug line numbers). A pre-compiled `progs.dat` is kept at the repo root for easy download; copy `src/progs.dat` there after recompiling.
+The compilation manifest is `src/qc/progs.src`. Output goes directly to the repo root: `progs.dat` (game bytecode) and `progs.lno` (debug line numbers).
 
 There are no automated tests — testing requires running in a Quake engine.
 
