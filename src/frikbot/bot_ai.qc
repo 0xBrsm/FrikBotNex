@@ -166,7 +166,7 @@ void(entity targ, float success) bot_lost =
         else
         {
 		if (targ.classname == "item_artifact_invisibility")
-			if (self.items & 524288)
+			if (self.items & IT_INVISIBILITY)
 				bot_start_topic(3);
                 
                 if (targ.flags & FL_ITEM)
@@ -651,19 +651,21 @@ float(entity thing) priority_for_thing =
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
 
-	// skill 2+: anticipate item respawns by positioning near items about to reappear
+	// skill 1+: anticipate item respawns by positioning near items about to reappear
 	// human emulation: imprecise timing — skill 3 arrives ~3s early,
-	// skill 2 has wider window but sometimes arrives too early or late
-	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 2)
+	// lower skills have wider windows but arrive too early or late
+	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 1)
 	{
 		time_left = thing.nextthink - time;
 		if (thing.nextthink > 0 && time_left > 0)
 		{
-			// skill 3: ~3s window, skill 2: ~8s window (arrives too early sometimes)
+			// skill 3: ~3s window, skill 2: ~8s, skill 1: ~12s (vague awareness)
 			if (self.b_skill >= 3)
 				awareness = 3;
-			else
+			else if (self.b_skill >= 2)
 				awareness = 8;
+			else
+				awareness = 12;
 
 			if (time_left < awareness)
 			{
@@ -706,7 +708,7 @@ float(entity thing) priority_for_thing =
 		{
 			if (thing.spawnflags & 2)
 				thisp = 10*(random()) + 50;
-			if (self.health <= 50)
+			else if (self.health <= 50)
 				thisp = 70;
 		}
 		else if (thing.classname == "weapon_rocketlauncher")
@@ -822,8 +824,8 @@ float(entity thing) priority_for_thing =
 				else
 			{
 				thisp = 30;
-				// skill 2+ opponent model: de-prioritize enemies we're losing to
-				if (self.b_skill >= 2 && self.b_opp_ent == thing)
+				// skill 1+ opponent model: de-prioritize enemies we're losing to
+				if (self.b_skill >= 1 && self.b_opp_ent == thing)
 				{
 					if (self.b_opp_aggro > 0.7 && self.health < 50)
 						thisp = thisp * 0.6;	// scary enemy, avoid
@@ -849,8 +851,8 @@ float(entity thing) priority_for_thing =
 		else if (thing.b_aiflags & AI_AMBUSH)
 			thisp = 30;
 
-		// skill 2+: map control - prefer high ground and power positions when well-armed
-		if (self.b_skill >= 2 && thisp > 0)
+		// skill 1+: map control - prefer high ground and power positions when well-armed
+		if (self.b_skill >= 1 && thisp > 0)
 		{
 			if ((self.items & 32) && self.ammo_rockets >= 3) // have RL + ammo
 			{
@@ -1002,7 +1004,7 @@ void() bot_angle_set =
 
 	if (self.enemy)
 	{
-		if (self.enemy.items & 524288)
+		if (self.enemy.items & IT_INVISIBILITY)
 			if (random() > 0.01)
 				return;
 		if (self.missile_speed == 0)
@@ -1269,11 +1271,17 @@ void() bot_angle_set =
 	if (self.b_skill >= 2)
 	{
 		self.keys = self.keys & 63;
-		self.v_angle = self.b_angle;
-		while (self.v_angle_x < -180)
-			self.v_angle_x = self.v_angle_x + 360;
-		while (self.v_angle_x > 180)
-			self.v_angle_x = self.v_angle_x - 360;
+		if (self.b_skill >= 3)
+		{
+			// skill 3: direct angle set (instant snap)
+			self.v_angle = self.b_angle;
+			while (self.v_angle_x < -180)
+				self.v_angle_x = self.v_angle_x + 360;
+			while (self.v_angle_x > 180)
+				self.v_angle_x = self.v_angle_x - 360;
+		}
+		// skill 2: b_angle is set, mouse emulation in bot_phys.qc
+		// handles smooth interpolation — don't override v_angle here
 	}
 	else if ((self.enemy == world || self.enemy.movetype == MOVETYPE_PUSH) && self.target1.classname != "player")
 	{
@@ -1288,17 +1296,20 @@ void() bot_angle_set =
 	else
 	{
 		// skill 0-1 in combat: keyboard turning (sluggish tracking)
+		local float dy, dx;
 		if (self.b_angle_x > 180)
 			self.b_angle_x = self.b_angle_x - 360;
 		self.keys = self.keys & 63;
 
-		if (angcomp(self.b_angle_y, self.v_angle_y) > 10)
+		dy = angcomp(self.b_angle_y, self.v_angle_y);
+		dx = angcomp(self.b_angle_x, self.v_angle_x);
+		if (dy > 10)
 			self.keys = self.keys | KEY_LOOKLEFT;
-		else if (angcomp(self.b_angle_y, self.v_angle_y) < -10)
+		else if (dy < -10)
 			self.keys = self.keys | KEY_LOOKRIGHT;
-		if (angcomp(self.b_angle_x, self.v_angle_x) < -10)
+		if (dx < -10)
 			self.keys = self.keys | KEY_LOOKUP;
-		else if (angcomp(self.b_angle_x, self.v_angle_x) > 10)
+		else if (dx > 10)
 			self.keys = self.keys | KEY_LOOKDOWN;
 	}
 };
@@ -1389,7 +1400,9 @@ void() BotAI =
 
 	self.button2 = 0;
 	self.button0 = 0;
-	
+
+	// unified spatial awareness pass — compute once, read everywhere
+	bot_sense();
 
 	// target1 is like goalentity in normal Quake monster AI.
 	// it's the bot's most immediate target

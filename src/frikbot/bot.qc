@@ -143,11 +143,13 @@ for all variables in the bot...
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
 .float b_strafe_time, b_strafe_dir;
+.float b_bhop_strafe;
 .float b_aim_delay, b_aim_offset;
 .float b_retreat;
 .float b_ambush_time;
 .float b_bhop_land;
 .float b_wall_near, b_wall_time;
+.float obs_time;		// when AI_OBSTRUCTED was first set (corner commitment)
 .float b_wepswitch_time;
 .float b_combo_time;		// RL->LG combo: when to switch to LG (0 = inactive)
 .vector b_death1, b_death2, b_death3;
@@ -417,11 +419,12 @@ direct messages to the bots, it crashes quake :-(
 */
 void(entity	client, string s) stuffcmd =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_stuffcmd(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -429,17 +432,20 @@ void(entity	client, string s) stuffcmd =
 				frik_stuffcmd(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
 };
 
 void(entity	e) setspawnparms =
 {
+	local float n;
 	if (e.ishuman == 1)
 		frik_setspawnparms(e);
 	else
 	{
 		b_temp1 = player_head;
-		while(b_temp1)
+		n = 0;
+		while(b_temp1 && n < max_clients)
 		{
 			if (b_temp1.ishuman)
 			{
@@ -447,17 +453,19 @@ void(entity	e) setspawnparms =
 				return;
 			}
 			b_temp1 = b_temp1._next;
+			n = n + 1;
 		}
 		SetNewParms();
 	}
 };
 void(entity	client, string s) sprint =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_sprint(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -465,16 +473,17 @@ void(entity	client, string s) sprint =
 				frik_sprint(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
-
 };
 void(entity	client, string s) centerprint =
 {
+	local float n;
 	if (client.ishuman == 1)
 		frik_centerprint(client, s);
 	b_temp1 = player_head;
-
-	while(b_temp1)
+	n = 0;
+	while(b_temp1 && n < max_clients)
 	{
 		if (b_temp1.classname == "botcam")
 		{
@@ -482,6 +491,7 @@ void(entity	client, string s) centerprint =
 				frik_centerprint(b_temp1, s);
 		}
 		b_temp1 = b_temp1._next;
+		n = n + 1;
 	}
 };
 
@@ -604,14 +614,22 @@ void() botcam_u =
 	else
 	{
 		do
+		{
 			self.enemy = self.enemy._next;
-		while (self.enemy.classname == "botcam");
+			if (!self.enemy)
+				self.enemy = player_head;
+		}
+		while (self.enemy.classname == "botcam" && self.enemy != self);
 	}
 	if (self.enemy == self)
 	{
 		do
+		{
 			self.enemy = self.enemy._next;
-		while (self.enemy.classname == "botcam");
+			if (!self.enemy)
+				self.enemy = player_head;
+		}
+		while (self.enemy.classname == "botcam" && self.enemy != self);
 	}
 	self.classname = "botcam";
 	self.solid = SOLID_NOT;
@@ -671,10 +689,31 @@ void() ClientFixRankings =
 void() ClientInRankings =
 {
 	local float cno;
+	local entity t;
 
    	cno = self.colormap - 1;
 	BotInvalidClientNo (cno);
-	
+
+	// guard against double-insertion — if already in list, remove first
+	t = player_head;
+	while (t)
+	{
+		if (t == self)
+		{
+			// already in list — unlink before re-inserting
+			if (player_head == self)
+				player_head = self._next;
+			if (self._next)
+				self._next._last = self._last;
+			if (self._last)
+				self._last._next = self._next;
+			self._next = world;
+			self._last = world;
+			break;
+		}
+		t = t._next;
+	}
+
 	if (player_head)
 		player_head._last = self;
 
@@ -696,7 +735,6 @@ void() ClientInRankings =
 		return;
 	}
 	active_clients = active_clients | ClientBitFlag(cno);
-	
 	self.b_clientno = cno;
 	self.ishuman = TRUE;
 	self.switch_wallhug = time + 1;
@@ -712,7 +750,7 @@ void() ClientDisconnected =
 	if (self._last)
 		self._last._next = self._next;
 
-	active_clients = active_clients - active_clients & ClientBitFlag(self.b_clientno);
+	active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -1068,8 +1106,7 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	self.b_skill = whatskill;
 
 	// assign random personality for varied playstyles
-	f = floor(random() * 4);
-	self.b_personality = f;
+	self.b_personality = floor(random() * 4);
 
 	if (teamplay && !coop)
 	{
@@ -1088,6 +1125,7 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	PutClientInServer();
 
 	active_clients = active_clients | ClientBitFlag(f);
+
 
 	// this is risky... could corrupt .way files if done wrong
 	// If you're not the gambling type, comment this out
@@ -1163,7 +1201,7 @@ void(float clientno) BotInvalidClientNo =
 	local entity bot;
 
 	bot = GetClientEntity(clientno);
-	if(bot.b_clientno > 0)
+	if(bot.b_clientno >= 0)
 	{
 		if (active_clients & ClientBitFlag(self.b_clientno))
 		{

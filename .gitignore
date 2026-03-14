@@ -1,5 +1,8 @@
-# Compiled QuakeC output (in src/)
-src/*.dat
-src/*.lno
+# Compiled QuakeC output
+*.lno
 fteqcc.log
+
+# Ignore stray .dat files, keep only root progs.dat for download
+*.dat
+!/progs.dat
 .claude/

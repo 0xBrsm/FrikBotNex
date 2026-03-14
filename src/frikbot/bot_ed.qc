@@ -45,6 +45,14 @@ this notice in its entirety.
 float saved1, saved2, saved3, scratch1, scratch2, scratch3, scratch4;
 float bytecounter, filecount;
 
+void(entity way, float flag) bot_toggle_aiflag =
+{
+	if (way.b_aiflags & flag)
+		way.b_aiflags = way.b_aiflags - flag;
+	else
+		way.b_aiflags = way.b_aiflags | flag;
+};
+
 float MENU_MAIN 		= 1;
 float MENU_WAYPOINTS 	= 2;
 float MENU_LINKS 		= 3;
@@ -416,62 +424,19 @@ void() bot_menu_display =
 			if (self.current_way)
 			{
 				if (self.impulse == 1)
-				{
-					if (self.current_way.b_aiflags & AI_DOORFLAG)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_DOORFLAG);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_DOORFLAG;
-	
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_DOORFLAG); self.b_menu_time = time; }
 				else if (self.impulse == 2)
-				{
-					if (self.current_way.b_aiflags & AI_PRECISION)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_PRECISION);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_PRECISION;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_PRECISION); self.b_menu_time = time; }
 				else if (self.impulse == 3)
-				{
-					if (self.current_way.b_aiflags & AI_SURFACE)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_SURFACE);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_SURFACE;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_SURFACE); self.b_menu_time = time; }
 				else if (self.impulse == 4)
-				{
-					if (self.current_way.b_aiflags & AI_BLIND)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_BLIND);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_BLIND;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_BLIND); self.b_menu_time = time; }
 				else if (self.impulse == 5)
-				{
-					if (self.current_way.b_aiflags & AI_JUMP)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_JUMP);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_JUMP;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_JUMP); self.b_menu_time = time; }
 				else if (self.impulse == 6)
-				{
-					if (self.current_way.b_aiflags & AI_DIRECTIONAL)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_DIRECTIONAL);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_DIRECTIONAL;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_DIRECTIONAL); self.b_menu_time = time; }
 				else if (self.impulse == 7)
-				{
-					if (self.current_way.b_aiflags & AI_SUPER_JUMP)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_SUPER_JUMP);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_SUPER_JUMP;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_SUPER_JUMP); self.b_menu_time = time; }
 			}
 			if (self.impulse == 9)
 			{
@@ -490,60 +455,19 @@ void() bot_menu_display =
 			if (self.current_way)
 			{
 				if (self.impulse == 1)
-				{
-					if (self.current_way.b_aiflags & AI_DIFFICULT)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_DIFFICULT);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_DIFFICULT;								self.b_menu_time = time;	
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_DIFFICULT); self.b_menu_time = time; }
 				else if (self.impulse == 2)
-				{
-					if (self.current_way.b_aiflags & AI_PLAT_BOTTOM)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_PLAT_BOTTOM);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_PLAT_BOTTOM;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_PLAT_BOTTOM); self.b_menu_time = time; }
 				else if (self.impulse == 3)
-				{
-					if (self.current_way.b_aiflags & AI_RIDE_TRAIN)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_RIDE_TRAIN);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_RIDE_TRAIN;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_RIDE_TRAIN); self.b_menu_time = time; }
 				else if (self.impulse == 4)
-				{
-					if (self.current_way.b_aiflags & AI_DOOR_NO_OPEN)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_DOOR_NO_OPEN);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_DOOR_NO_OPEN;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_DOOR_NO_OPEN); self.b_menu_time = time; }
 				else if (self.impulse == 5)
-				{
-					if (self.current_way.b_aiflags & AI_AMBUSH)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_AMBUSH);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_AMBUSH;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_AMBUSH); self.b_menu_time = time; }
 				else if (self.impulse == 6)
-				{
-					if (self.current_way.b_aiflags & AI_SNIPER)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_SNIPER);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_SNIPER;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_SNIPER); self.b_menu_time = time; }
 				else if (self.impulse == 7)
-				{
-					if (self.current_way.b_aiflags & AI_TRACE_TEST)
-						self.current_way.b_aiflags = self.current_way.b_aiflags - (self.current_way.b_aiflags & AI_TRACE_TEST);
-					else
-						self.current_way.b_aiflags = self.current_way.b_aiflags | AI_TRACE_TEST;
-					self.b_menu_time = time;
-				}
+				{	bot_toggle_aiflag(self.current_way, AI_TRACE_TEST); self.b_menu_time = time; }
 
 			}
 			if (self.impulse == 9)

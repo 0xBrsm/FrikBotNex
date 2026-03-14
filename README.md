@@ -25,7 +25,7 @@ cd src/qc
 fteqcc
 ```
 
-Or use `gmqcc progs.src` or `qcc`. Output is `src/progs.dat`.
+Or use `gmqcc progs.src` or `qcc`. Output is `src/progs.dat`. A pre-compiled `progs.dat` is checked into the repo root for convenience.
 
 There are no automated tests -- testing requires running in a Quake engine (Quakespasm, vkQuake, FTE, etc.).
 
@@ -48,6 +48,7 @@ src/
     bot_misc.qc   Utility functions
     bot_phys.qc   Physics prediction and movement validation
     bot_move.qc   Movement command generation, bunny hopping
+    bot_sense.qc  Unified spatial awareness pass (per-tick sensing)
     bot_ed.qc     In-game console/editor interface
 
   waypoints/    Per-map navigation graphs
@@ -80,4 +81,4 @@ Base game code: GPL v2 (id Software). See `src/qc/LICENSE.txt`.
 FrikBot code: Public domain (Ryan "FrikaC" Smith).
 FrikBotNex additions: Public domain.
 
-See [ATTRIBUTIONS](ATTRIBUTIONS) for full credits.
+See [ATTRIBUTIONS](ATTRIBUTIONS.md) for full credits.

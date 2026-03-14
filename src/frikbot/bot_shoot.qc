@@ -59,27 +59,28 @@ float(float wep, float brange) bot_weapon_score =
 	local vector v, wr;
 
 	// base tier scores
-	if (wep == 32)
-		score = 70; // RL
-	else if (wep == 64)
-		score = 65; // LG
-	else if (wep == 8)
-		score = 55; // SNG
-	else if (wep == 16)
-		score = 50; // GL
-	else if (wep == 2)
-		score = 45; // SSG
-	else if (wep == 4)
-		score = 35; // NG
-	else if (wep == 1)
-		score = 25; // SG
-	else if (wep == 4096)
-		score = 15; // AXE
+	if (wep == IT_ROCKET_LAUNCHER)
+		score = 70;
+	else if (wep == IT_LIGHTNING)
+		score = 65;
+	else if (wep == IT_SUPER_NAILGUN)
+		score = 55;
+	else if (wep == IT_GRENADE_LAUNCHER)
+		score = 50;
+	else if (wep == IT_SUPER_SHOTGUN)
+		score = 45;
+	else if (wep == IT_NAILGUN)
+		score = 35;
+	else if (wep == IT_SHOTGUN)
+		score = 25;
+	else if (wep == IT_AXE)
+		score = 15;
 	else
 		return 0;
 
 	// LG in water = self-discharge, never use it
-	if (wep == 64 && self.waterlevel > 0)
+	// Quake discharge triggers at waterlevel > 1 (waist deep or more)
+	if (wep == IT_LIGHTNING && self.waterlevel > 1)
 		return 0;
 
 	// range fitness - unusable weapons score 0
@@ -88,7 +89,7 @@ float(float wep, float brange) bot_weapon_score =
 		return 0;
 
 	// self-splash danger for RL and GL
-	if (wep == 32 || wep == 16)
+	if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER)
 	{
 		if (brange < 120)
 			score = score - 60;
@@ -96,11 +97,11 @@ float(float wep, float brange) bot_weapon_score =
 			score = score - 20;
 	}
 
-	// skill 2+ considerations
-	if (self.b_skill >= 2)
+	// skill 1+ considerations: environment-aware weapon scoring
+	if (self.b_skill >= 1)
 	{
 		// wall proximity bonus for splash weapons
-		if (wep == 32 || wep == 16)
+		if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER)
 		{
 			if (self.enemy != world)
 			{
@@ -110,7 +111,7 @@ float(float wep, float brange) bot_weapon_score =
 		}
 
 		// water bonus for RL (splash amplified)
-		if (wep == 32)
+		if (wep == IT_ROCKET_LAUNCHER)
 		{
 			if (self.waterlevel >= 1)
 				score = score + 10;
@@ -125,19 +126,19 @@ float(float wep, float brange) bot_weapon_score =
 			// finish weak enemies with cheap weapons
 			if (self.enemy.health <= 40)
 			{
-				if (wep == 1 || wep == 2 || wep == 4096)
+				if (wep == IT_SHOTGUN || wep == IT_SUPER_SHOTGUN || wep == IT_AXE)
 					score = score + 20;
-				else if (wep == 32 || wep == 16)
+				else if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER)
 					score = score - 15;
 			}
 
 			// ammo conservation - save rockets for important fights
-			if (wep == 32 && self.ammo_rockets <= 2)
+			if (wep == IT_ROCKET_LAUNCHER && self.ammo_rockets <= 2)
 			{
 				if (self.enemy.health > 60)
 				{
 					// still use them against quad/pent enemies
-					if (!(self.enemy.items & 4194304) && !(self.enemy.items & 1048576))
+					if (!(self.enemy.items & IT_QUAD) && !(self.enemy.items & IT_INVULNERABILITY))
 						score = score - 25;
 				}
 			}
@@ -145,17 +146,17 @@ float(float wep, float brange) bot_weapon_score =
 	}
 
 	// opponent model weapon adjustments (skill 2+)
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		// counter-pick: if enemy has RL/LG and is aggressive, prefer LG for hitscan
-		if ((self.b_opp_weapon == 32) && self.b_opp_aggro > 0.6)
+		if ((self.b_opp_weapon == IT_ROCKET_LAUNCHER) && self.b_opp_aggro > 0.6)
 		{
-			if (wep == 64) score = score + 12;	// LG to punish their rush
+			if (wep == IT_LIGHTNING) score = score + 12;
 		}
 		// enemy is passive/retreating: splash weapons to flush them out
 		if (self.b_opp_aggro < 0.3)
 		{
-			if (wep == 32 || wep == 16) score = score + 8;
+			if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER) score = score + 8;
 		}
 		// enemy at predictable distance: boost weapons that match their range
 		if (brange > 0)
@@ -171,17 +172,17 @@ float(float wep, float brange) bot_weapon_score =
 	if (self.b_personality == PERSONALITY_AGGRESSIVE)
 	{
 		// aggressive: loves close-range power weapons
-		if (wep == 32) score = score + 10; // RL
-		else if (wep == 64) score = score + 8; // LG
-		else if (wep == 4096) score = score + 5; // AXE (fearless)
-		else if (wep == 1 || wep == 4) score = score - 5; // weak weapons
+		if (wep == IT_ROCKET_LAUNCHER) score = score + 10; // RL
+		else if (wep == IT_LIGHTNING) score = score + 8;
+		else if (wep == IT_AXE) score = score + 5;
+		else if (wep == IT_SHOTGUN || wep == IT_NAILGUN) score = score - 5;
 	}
 	else if (self.b_personality == PERSONALITY_DEFENSIVE)
 	{
 		// defensive: prefers range and safety
-		if (wep == 8) score = score + 8; // SNG (safe DPS)
-		else if (wep == 64) score = score + 5; // LG
-		else if (wep == 32 || wep == 16)
+		if (wep == IT_SUPER_NAILGUN) score = score + 8;
+		else if (wep == IT_LIGHTNING) score = score + 5;
+		else if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER)
 		{
 			if (brange < 250) // splash risk at close range
 				score = score - 10;
@@ -190,9 +191,9 @@ float(float wep, float brange) bot_weapon_score =
 	else if (self.b_personality == PERSONALITY_CAMPER)
 	{
 		// camper: prefers long-range precision weapons
-		if (wep == 32) score = score + 5; // RL
-		if (wep == 8) score = score + 5; // SNG
-		if (wep == 4096) score = score - 10; // hates melee
+		if (wep == IT_ROCKET_LAUNCHER) score = score + 5; // RL
+		if (wep == IT_SUPER_NAILGUN) score = score + 5;
+		if (wep == IT_AXE) score = score - 10;
 	}
 
 	if (score < 1)
@@ -224,61 +225,66 @@ void(float brange) bot_weapon_switch =
 	if (brange == -1)
 	{
 		// simplified: use base tier ordering with ammo check
-		if ((self.ammo_rockets >= 1) && (it & 32))
+		if ((self.ammo_rockets >= 1) && (it & IT_ROCKET_LAUNCHER))
 		{	best_pulse = 7; best_score = 70; }
-		if (self.waterlevel < 1 && self.ammo_cells >= 1 && (it & 64))
+		if (self.waterlevel <= 1 && self.ammo_cells >= 1 && (it & IT_LIGHTNING))
 		{	if (65 > best_score) { best_pulse = 8; best_score = 65; } }
-		if (self.ammo_nails >= 2 && (it & 8))
+		if (self.ammo_nails >= 2 && (it & IT_SUPER_NAILGUN))
 		{	if (55 > best_score) { best_pulse = 5; best_score = 55; } }
-		if ((self.ammo_rockets >= 1) && (it & 16))
+		if ((self.ammo_rockets >= 1) && (it & IT_GRENADE_LAUNCHER))
 		{	if (50 > best_score) { best_pulse = 6; best_score = 50; } }
-		if (self.ammo_shells >= 2 && (it & 2))
+		if (self.ammo_shells >= 2 && (it & IT_SUPER_SHOTGUN))
 		{	if (45 > best_score) { best_pulse = 3; best_score = 45; } }
-		if (self.ammo_nails >= 1 && (it & 4))
+		if (self.ammo_nails >= 1 && (it & IT_NAILGUN))
 		{	if (35 > best_score) { best_pulse = 4; best_score = 35; } }
-		if (self.ammo_shells >= 1 && (it & 1))
+		if (self.ammo_shells >= 1 && (it & IT_SHOTGUN))
 		{	if (25 > best_score) { best_pulse = 2; best_score = 25; } }
+		if (!best_pulse)
+			best_pulse = 1; // axe as last resort
 		if (best_pulse)
 			self.impulse = best_pulse;
 		return;
 	}
 
 	// score each weapon situationally
-	if ((self.ammo_rockets >= 1) && (it & 32))
+	if ((self.ammo_rockets >= 1) && (it & IT_ROCKET_LAUNCHER))
 	{
-		score = bot_weapon_score(32, brange);
+		score = bot_weapon_score(IT_ROCKET_LAUNCHER, brange);
 		if (score > best_score) { best_score = score; best_pulse = 7; }
 	}
-	if (self.waterlevel <= 1 && self.ammo_cells >= 1 && (it & 64))
+	if (self.waterlevel <= 1 && self.ammo_cells >= 1 && (it & IT_LIGHTNING))
 	{
-		score = bot_weapon_score(64, brange);
+		score = bot_weapon_score(IT_LIGHTNING, brange);
 		if (score > best_score) { best_score = score; best_pulse = 8; }
 	}
-	if (self.ammo_nails >= 2 && (it & 8))
+	if (self.ammo_nails >= 2 && (it & IT_SUPER_NAILGUN))
 	{
-		score = bot_weapon_score(8, brange);
+		score = bot_weapon_score(IT_SUPER_NAILGUN, brange);
 		if (score > best_score) { best_score = score; best_pulse = 5; }
 	}
-	if ((self.ammo_rockets >= 1) && (it & 16))
+	if ((self.ammo_rockets >= 1) && (it & IT_GRENADE_LAUNCHER))
 	{
-		score = bot_weapon_score(16, brange);
+		score = bot_weapon_score(IT_GRENADE_LAUNCHER, brange);
 		if (score > best_score) { best_score = score; best_pulse = 6; }
 	}
-	if (self.ammo_shells >= 2 && (it & 2))
+	if (self.ammo_shells >= 2 && (it & IT_SUPER_SHOTGUN))
 	{
-		score = bot_weapon_score(2, brange);
+		score = bot_weapon_score(IT_SUPER_SHOTGUN, brange);
 		if (score > best_score) { best_score = score; best_pulse = 3; }
 	}
-	if (self.ammo_nails >= 1 && (it & 4))
+	if (self.ammo_nails >= 1 && (it & IT_NAILGUN))
 	{
-		score = bot_weapon_score(4, brange);
+		score = bot_weapon_score(IT_NAILGUN, brange);
 		if (score > best_score) { best_score = score; best_pulse = 4; }
 	}
-	if (self.ammo_shells >= 1 && (it & 1))
+	if (self.ammo_shells >= 1 && (it & IT_SHOTGUN))
 	{
-		score = bot_weapon_score(1, brange);
+		score = bot_weapon_score(IT_SHOTGUN, brange);
 		if (score > best_score) { best_score = score; best_pulse = 2; }
 	}
+	// axe: always available, but weapon_range limits it to melee (< 64 units)
+	score = bot_weapon_score(IT_AXE, brange);
+	if (score > best_score) { best_score = score; best_pulse = 1; }
 
 	if (best_pulse)
 	{

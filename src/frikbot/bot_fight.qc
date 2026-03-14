@@ -42,6 +42,13 @@ this notice in its entirety.
 
 */
 
+// check if distance is within current weapon's effective range
+// v must be set to weapon_range(self.weapon) before calling
+float(float dist, vector wr) bot_in_weapon_range =
+{
+	return (dist > wr_y && dist < wr_z);
+};
+
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
@@ -59,7 +66,7 @@ void() bot_combat_strafe =
 	local float foedist, strafe_interval;
 
 	org = realorigin(self.enemy);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -108,8 +115,9 @@ void() bot_combat_strafe =
 				self.b_strafe_dir = self.b_strafe_dir * -1;
 			self.b_strafe_time = time + strafe_interval;
 		}
-		// skill 2+: occasional quick fake (short strafe then switch)
-		else if (self.b_skill >= 2 && random() < 0.2)
+		// skill 1+: occasional quick fake (short strafe then switch)
+		// skill 1: 10% chance, skill 2+: 20% chance
+		else if (self.b_skill >= 1 && random() < (0.1 + 0.1 * (self.b_skill >= 2)))
 		{
 			self.b_strafe_dir = self.b_strafe_dir * -1;
 			self.b_strafe_time = time + 0.15 + random() * 0.15;
@@ -257,7 +265,7 @@ void() bot_pressure_move =
 
 	org = realorigin(self.enemy);
 	toward = normalize(org - self.origin);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -311,7 +319,7 @@ void() bot_flank_move =
 	local float foedist;
 
 	org = realorigin(self.enemy);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -364,6 +372,14 @@ State transitions are smoothed to avoid jitter.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+void() bot_drop_enemy =
+{
+	self.enemy = world;
+	self.b_strafe_dir = 0;
+	self.b_combat_state = CSTATE_NONE;
+	self.b_combo_time = 0;
+};
+
 void() bot_fight_style =
 {
 	local vector v, v1, v2, org;
@@ -374,21 +390,15 @@ void() bot_fight_style =
 	// --- enemy validity ---
 	if (self.enemy.health <= 0)
 	{
-		self.enemy = world;
-		self.b_strafe_dir = 0;
-		self.b_combat_state = CSTATE_NONE;
-		self.b_combo_time = 0;
+		bot_drop_enemy();
 		return;
 	}
 	else if (!self.enemy.takedamage)
 	{
-		self.enemy = world;
-		self.b_strafe_dir = 0;
-		self.b_combat_state = CSTATE_NONE;
-		self.b_combo_time = 0;
+		bot_drop_enemy();
 		return;
 	}
-	else if (!fisible(self.enemy))
+	else if (!self.sense_enemy_vis)
 	{
 		// skill 1+: grace period before dropping enemy on LOS loss
 		// prevents combat state thrashing when enemy ducks behind corners
@@ -399,10 +409,7 @@ void() bot_fight_style =
 		}
 		else
 		{
-			self.enemy = world;
-			self.b_strafe_dir = 0;
-			self.b_combat_state = CSTATE_NONE;
-			self.b_combo_time = 0;
+			bot_drop_enemy();
 			return;
 		}
 	}
@@ -419,7 +426,7 @@ void() bot_fight_style =
 	makevectors(self.v_angle);
 
 	// --- shooting decision (universal, all states) ---
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	v = weapon_range(self.weapon);
 
 	// --- RL->LG combo: execute phase (skill 3, PRESSURE state) ---
@@ -431,7 +438,7 @@ void() bot_fight_style =
 			// combo expired or enemy dead — resume normal weapon logic
 			self.b_combo_time = 0;
 		}
-		else if (self.weapon != 64)
+		else if (self.weapon != IT_LIGHTNING)
 		{
 			// haven't switched yet — force LG
 			self.impulse = 8;
@@ -443,38 +450,31 @@ void() bot_fight_style =
 		}
 	}
 
-	if (foedist > v_y && foedist < v_z)
+	if (bot_in_weapon_range(foedist, v))
 	{
-		traceline(self.origin + self.view_ofs, self.origin + self.view_ofs + v_forward * v_z, FALSE, self);
-		if (vlen(trace_endpos - (self.origin + self.view_ofs)) >= v_y)
-		{
-			// skip shot if teammate is in the way, but don't freeze movement
-			if (trace_ent.classname == "player")
-			{
-				if (!((trace_ent.team == self.team && teamplay) || (coop)))
-					bot_shoot();
-			}
-			else
-				bot_shoot();
+		// skip shot if teammate is in the way (from sense cache)
+		// also check for obstacles between us and enemy — don't shoot into walls
+		// (splash weapons cause self-damage, hitscan is wasted)
+		if (!self.sense_friendly_block && self.sense_fwd_wall_dist >= foedist)
+			bot_shoot();
 
-			// --- RL->LG combo: initiate phase ---
-			// skill 3 in PRESSURE: after firing RL at mid range, start combo
-			// human emulation: only attempt 40% of the time (humans don't
-			// always think to combo, and sometimes fumble the switch)
-			if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
-				&& self.b_combo_time == 0
-				&& self.weapon == 32	// IT_ROCKET_LAUNCHER
-				&& (self.items & 64)	// have LG
-				&& self.ammo_cells >= 1
-				&& self.waterlevel <= 1	// LG doesn't work underwater
-				&& foedist > 200 && foedist < 600
-				&& random() < 0.4)
-			{
-				// rocket is in flight — switch to LG after brief delay
-				// (human reaction to own rocket fire)
-				self.b_combo_time = time + 0.05 + random() * 0.1;
-				self.b_wepswitch_time = time + 1.5; // suppress normal switching
-			}
+		// --- RL->LG combo: initiate phase ---
+		// skill 3 in PRESSURE: after firing RL at mid range, start combo
+		// human emulation: only attempt 40% of the time (humans don't
+		// always think to combo, and sometimes fumble the switch)
+		if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
+			&& self.b_combo_time == 0
+			&& self.weapon == IT_ROCKET_LAUNCHER
+			&& (self.items & IT_LIGHTNING)	// have LG
+			&& self.ammo_cells >= 1
+			&& self.waterlevel <= 1	// LG doesn't work underwater
+			&& foedist > 200 && foedist < 600
+			&& random() < 0.4)
+		{
+			// rocket is in flight — switch to LG after brief delay
+			// (human reaction to own rocket fire)
+			self.b_combo_time = time + 0.05 + random() * 0.1;
+			self.b_wepswitch_time = time + 1.5; // suppress normal switching
 		}
 		if (self.b_skill >= 1 && time > self.b_wepswitch_time && self.b_combo_time == 0)
 		{
@@ -487,17 +487,30 @@ void() bot_fight_style =
 
 	self.b_retreat = 0;
 
+	// --- axe-only at range: disengage and look for weapons/ammo ---
+	// if we have axe and no switch pending (or switching to axe),
+	// and the enemy is beyond melee range, drop combat
+	if (self.weapon == IT_AXE && foedist > 64)
+	{
+		if (self.impulse == 0 || self.impulse == 1)
+		{
+			bot_drop_enemy();
+			return;
+		}
+	}
+
 	// --- movement constrained by AI flags ---
 	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
 	{
 		// constrained: simplified fight-or-retreat only
-		if (bot_size_player(self.enemy) > bot_size_player(self) + 5)
+		if (self.sense_enemy_size > self.sense_my_size + 5)
 		{
 			bot_retreat();
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				bot_shoot();
+				if (bot_in_weapon_range(foedist, v))
+					bot_shoot();
 			}
 			return;
 		}
@@ -524,11 +537,11 @@ void() bot_fight_style =
 		return;
 	}
 
-	// --- skill 0-1: classic binary fight/retreat ---
-	if (self.b_skill < 2)
+	// --- skill 0: classic binary fight/retreat ---
+	if (self.b_skill < 1)
 	{
-		foesz = bot_size_player(self.enemy);
-		mysz = bot_size_player(self) + 5;
+		foesz = self.sense_enemy_size;
+		mysz = self.sense_my_size + 5;
 
 		if (self.b_personality == PERSONALITY_AGGRESSIVE)
 			mysz = mysz + 40;
@@ -547,19 +560,18 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				bot_shoot();
+				if (bot_in_weapon_range(foedist, v))
+					bot_shoot();
 			}
 			return;
 		}
-		if (mysz < 140)
-			return;
 		self.b_combat_state = CSTATE_FIGHT;
 		if (!(self.enemy.flags & FL_MONSTER))
 			bot_combat_strafe();
 		return;
 	}
 
-	// --- skill 2+: utility-scored state machine ---
+	// --- skill 1+: utility-scored state machine ---
 
 	u_fight = bot_util_fight();
 	u_retreat = bot_util_retreat();
@@ -587,15 +599,18 @@ void() bot_fight_style =
 	}
 
 	// hysteresis: require margin to switch states (prevents jitter)
-	// human emulation: higher margin for skill 2 = more commitment to decisions
+	// human emulation: higher margin = more commitment to decisions
 	// skill 3: 10-point margin, 0.5s commitment (crisp reactions)
 	// skill 2: 15-point margin, 0.8s commitment (slight tunnel vision)
+	// skill 1: 20-point margin, 1.2s commitment (commits hard to decisions)
 	if (new_state != self.b_combat_state)
 	{
 		if (self.b_skill >= 3)
 		{	hyst_margin = 10; hyst_time = 0.5; }
-		else
+		else if (self.b_skill >= 2)
 		{	hyst_margin = 15; hyst_time = 0.8; }
+		else
+		{	hyst_margin = 20; hyst_time = 1.2; }
 
 		if (self.b_combat_state == CSTATE_FIGHT)
 			cur_score = u_fight;

@@ -48,6 +48,50 @@ void() bot_jump =
 	self.button2 = TRUE;
 };
 
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_wants_to_drop
+
+Unified check: is the bot intentionally navigating
+to a target below? Returns TRUE if the bot should
+be allowed to step off the current edge/ledge.
+
+Used by edge detection, hazard scanning, and gap
+detection so navigation intent is evaluated in
+one place with one set of rules.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_wants_to_drop =
+{
+	local vector stop, dir, vel;
+
+	if (!self.target1)
+		return FALSE;
+
+	stop = realorigin(self.target1);
+
+	// target must be significantly below us
+	if ((stop_z - self.origin_z) >= -32)
+		return FALSE;
+
+	// target must be roughly in our movement direction
+	// (don't walk off the wrong edge)
+	dir = stop - self.origin;
+	dir_z = 0;
+	vel = self.velocity;
+	vel_z = 0;
+	if (vlen(vel) > 0.1 && vlen(dir) > 0.1)
+	{
+		if (dir * normalize(vel) < 0)
+			return FALSE;  // target is behind us
+	}
+
+	return TRUE;
+};
+
 float(entity e) bot_can_rj =
 {
 	// this returns true of the bot can rocket/superjump/hook
@@ -60,15 +104,15 @@ float(entity e) bot_can_rj =
 		return FALSE;
 
 	// quad = bad
-	if (e.items & 4194304)
+	if (e.items & IT_QUAD)
 		return FALSE;
 
 	// do I have rockets & RL?
-	if (!((e.items & 32) && (e.ammo_rockets > 0)))
+	if (!((e.items & IT_ROCKET_LAUNCHER) && (e.ammo_rockets > 0)))
 		return FALSE;
 
 	// do I have pent?
-	if (e.items & 1048576)
+	if (e.items & IT_INVULNERABILITY)
 		return TRUE;
 
 	if (e.health > 50)
@@ -79,21 +123,32 @@ float(entity e) bot_can_rj =
 
 float(float flag) frik_recognize_plat =
 {
+	local entity plat_ent;
+
 	if ((self.classname != "waypoint") && !(self.flags & FL_ONGROUND))
 		return FALSE;
-	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-	if (trace_ent != world)
+
+	// use sense cache for bot entities; waypoints still trace directly
+	if (self.classname == "waypoint")
 	{
-		if (flag) // afect bot movement too
+		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+		plat_ent = trace_ent;
+	}
+	else
+		plat_ent = self.sense_ground_ent;
+
+	if (plat_ent != world)
+	{
+		if (flag) // affect bot movement too
 		{
 			if (self.keys & KEY_MOVEUP)
 			{
-				if (trace_ent.velocity_z > 0)
+				if (plat_ent.velocity_z > 0)
 					self.keys = self.keys & 960; // 960 is all view keys
 			}
 			else if (self.keys & KEY_MOVEDOWN)
 			{
-				if (trace_ent.velocity_z < 0)
+				if (plat_ent.velocity_z < 0)
 					self.keys = self.keys & 960;
 			}
 		}
@@ -148,12 +203,11 @@ manuever around.
 
 void(vector whichway, float danger) frik_obstructed =
 {
-	local float dist;
+	local float dist, stuck_time;
 	local vector disway, org;
-// TODO: something
+
 	if (self.b_aiflags & AI_BLIND)
 		return;
-	org = realorigin(self.target1);
 
 	if (danger)
 	{
@@ -163,28 +217,45 @@ void(vector whichway, float danger) frik_obstructed =
 	if (self.b_aiflags & AI_PRECISION)
 		return;
 
+	if (self.b_aiflags & AI_OBSTRUCTED)
+	{
+		stuck_time = time - self.obs_time;
+
+		// commitment window: don't reset dodge direction too quickly
+		// this prevents corner oscillation where hitting alternating
+		// walls causes the bot to flip direction every frame
+		if (stuck_time < 0.4)
+		{
+			// within commitment — only upgrade to danger, keep direction
+			if (danger && !(self.b_aiflags & AI_DANGER))
+				self.b_aiflags = self.b_aiflags | AI_DANGER;
+			return;
+		}
+
+		// stuck too long (>0.8s) — try the other side
+		if (stuck_time > 0.8)
+		{
+			self.wallhug = !self.wallhug;
+			self.obs_time = time;
+			return;
+		}
+
+		// between 0.4-0.8s: allow fresh direction calculation below
+	}
+
+	// compute dodge direction (left or right of obstacle)
+	self.obs_dir = whichway;
+	self.obs_time = time;
 
 	if (self.target1)
 	{
-		if (self.b_aiflags & AI_OBSTRUCTED)
-		{
-			if (!(self.b_aiflags & AI_DANGER))
-			{
-				self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
-				return;
-			}
-			else if (!danger)
-				return;
-		}
-		self.obs_dir = whichway;
+		org = realorigin(self.target1);
 		disway_x = whichway_y * -1;
 		disway_y = whichway_x;
 		dist = vlen(org - (self.origin + disway));
 		disway_x = whichway_y;
 		disway_y = whichway_x * -1;
 		self.wallhug = vlen(org - (self.origin + disway)) > dist;
-		self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
-		
 	}
 	else
 	{
@@ -194,10 +265,9 @@ void(vector whichway, float danger) frik_obstructed =
 		disway_x = whichway_y;
 		disway_y = whichway_x * -1;
 		self.wallhug = vlen(disway - self.obs_dir) < dist;
-		self.obs_dir = whichway;
-
-		self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
 	}
+
+	self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
 };
 
 /*
@@ -226,10 +296,11 @@ a hazard is detected.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+float drop_ok;  // cached result of bot_wants_to_drop() for current frame
+
 float() frik_check_hazard =
 {
-	local vector ang, check, side;
-	local float conts;
+	local vector ang, side;
 
 	if (!(self.flags & FL_ONGROUND))
 		return FALSE;
@@ -240,48 +311,32 @@ float() frik_check_hazard =
 		return FALSE;
 	ang = normalize(ang);
 
-	// check ground 48 units ahead
-	check = self.origin + ang * 48;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
+	// read from sense cache instead of tracing
+	// center-ahead hazard (but defer to navigation intent for drops)
+	if (self.sense_fwd_ground_type < -3)
 	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
+		if (!drop_ok)
 		{
 			frik_obstructed(ang, TRUE);
 			return TRUE;
 		}
 	}
 
-	// check to the left and right (24 units out, 48 ahead)
 	side_x = ang_y * -1;
 	side_y = ang_x;
 
-	check = self.origin + ang * 48 + side * 24;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
+	// left-ahead hazard
+	if (self.sense_hazard_left)
 	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
-		{
-			frik_obstructed(ang + side, TRUE);
-			return TRUE;
-		}
+		frik_obstructed(ang + side, TRUE);
+		return TRUE;
 	}
 
-	check = self.origin + ang * 48 - side * 24;
-	check_z = self.origin_z + self.mins_z;
-	traceline(check, check - '0 0 64', TRUE, self);
-	if (trace_fraction < 1)
+	// right-ahead hazard
+	if (self.sense_hazard_right)
 	{
-		conts = pointcontents(trace_endpos + '0 0 4');
-		if (conts < -3)
-		{
-			frik_obstructed(ang - side, TRUE);
-			return TRUE;
-		}
+		frik_obstructed(ang - side, TRUE);
+		return TRUE;
 	}
 
 	return FALSE;
@@ -289,28 +344,55 @@ float() frik_check_hazard =
 
 void() frik_obstacles =
 {
-	local vector start, stop, ang;
-	local float test, conts, dist, hgt;
+	local vector ang;
+	local float hgt, conts, gap, dist;
 
 	if (!(self.flags & FL_ONGROUND))
 		return;
 	if (self.b_aiflags & AI_BLIND)
 		return;
 
+	// cache bot_wants_to_drop for this frame (called up to 8x otherwise)
+	drop_ok = bot_wants_to_drop();
+
+	// refresh safety-critical sense data every physics frame
+	// (bot_sense() runs inside BotAI which is AFTER frik_obstacles
+	// in the frame, and for skill 0-1 is throttled by ai_time,
+	// so the cache can be multiple frames stale — too late for
+	// hazard avoidance at full run speed)
+	bot_sense_ground();
+	bot_sense_forward();
+
 	// proactive hazard scan (lava/slime ahead and to sides)
 	if (frik_check_hazard())
 		return;
 
-	ang = normalize(self.velocity);
-	ang_z = 0;
-	start = self.origin + ang * 32; // ahem
-	start_z = self.origin_z + self.maxs_z;
-	stop = start;
-	stop_z = self.origin_z + self.mins_z;
-	traceline(start, stop - '0 0 256', TRUE, self);
-	if (trace_allsolid || trace_startsolid)
-		return;
-	hgt = trace_endpos_z - stop_z;
+	// edge detection: bot's leading edge is over a dropoff
+	// last-resort brake before falling into lava/slime/void
+	if (self.sense_on_edge)
+	{
+		ang = self.velocity;
+		ang_z = 0;
+		if (vlen(ang) > 0.1)
+		{
+			conts = self.sense_fwd_ground_type;
+			if (conts < -3 || conts == CONTENT_EMPTY)
+			{
+				// navigating to a target below? trust pathfinding
+				if (drop_ok)
+					return;
+
+				// lava, slime, or void ahead — hard stop
+				frik_obstructed(normalize(ang), TRUE);
+				return;
+			}
+		}
+	}
+
+	// read pre-computed sense data instead of tracing
+	hgt = self.sense_fwd_height;
+	conts = self.sense_fwd_ground_type;
+	gap = self.sense_fwd_gap_width;
 
 	if (hgt > 18)
 	{
@@ -320,61 +402,49 @@ void() frik_obstacles =
 	if (hgt >= 0)
 		return;
 
-	conts = pointcontents(trace_endpos + '0 0 4');
-	start = stop - '0 0 8';
-	stop = start + ang *  256;
-	traceline(start, stop, TRUE, self);
-	test = vlen(trace_endpos - start);
-	if (test <= 20)
-		return; // it's a walkable gap, do nothing
-	ang_x = self.velocity_y * -1;
-	ang_y = self.velocity_x;
-	ang = normalize(ang);
-	traceline(start - (ang * 10), start + (ang * 10), TRUE, self);
-	if ((trace_fraction != 1) || trace_startsolid)
-		return; // gap is only 20 wide, walkable	
+	// gap detection: use sense cache
+	if (gap <= 0)
+		return; // no gap or walkable gap
+
 	ang = self.velocity;
 	ang_z = 0;
-	dist = ((540 / sv_gravity) * vlen(ang))/* + 32*/;
-	if (test > dist) // I can't make it
+
+	if (!self.sense_fwd_jumpable) // I can't make it
 	{
-		if (conts < -3) // bad stuff down dare
+		if (conts < -3) // bad stuff down there
 		{
-			frik_obstructed(ang, TRUE);
+			if (drop_ok)
+				return; // navigation says drop — trust it
+			frik_obstructed(normalize(ang), TRUE);
 			return;
 		}
 		else
 		{
-			if (self.target1)
-			{
-				stop = realorigin(self.target1);
-				if ((stop_z - self.origin_z) < -32)
-					return; // safe to fall
-			}
-			frik_obstructed(ang, FALSE);
+			if (drop_ok)
+				return; // safe to fall toward target
+			frik_obstructed(normalize(ang), FALSE);
 			return;
 		}
 	}
 	else
 	{
+		// I can make it -- check for a ledge blocking path
+		dist = gap;
 		ang = normalize(ang);
-		//look for a ledge
-		traceline(self.origin, self.origin + (ang * (test + 20)), TRUE, self); 
+		traceline(self.origin, self.origin + (ang * (dist + 20)), TRUE, self);
 		if (trace_fraction != 1)
 		{
-			if (conts < -3) // bad stuff down dare
+			if (conts < -3)
 			{
+				if (drop_ok)
+					return;
 				frik_obstructed(ang, TRUE);
 				return;
 			}
 			else
 			{
-				if (self.target1)
-				{
-					stop = realorigin(self.target1);
-					if ((stop_z - self.origin_z) < -32)
-						return; // safe to fall
-				}
+				if (drop_ok)
+					return; // safe to fall toward target
 				frik_obstructed(ang, FALSE);
 				return;
 			}
@@ -382,11 +452,11 @@ void() frik_obstacles =
 
 		if (self.target1)
 		{
-			// getting furter away from my target?
-			test = vlen(self.target1.origin - (ang + self.origin));
-			if (test > vlen(self.target1.origin - self.origin))
+			// getting further away from my target?
+			dist = vlen(self.target1.origin - (ang + self.origin));
+			if (dist > vlen(self.target1.origin - self.origin))
 			{
-				if (conts < -3) // bad stuff down dare
+				if (conts < -3)
 				{
 					frik_obstructed(ang, TRUE);
 					return;
@@ -401,20 +471,15 @@ void() frik_obstacles =
 	}
 	if (hgt < -18)
 	{
-		if (conts < -3) // bad stuff down dare
+		if (conts < -3)
 		{
-			frik_obstructed(ang, TRUE);
+			if (drop_ok)
+				return;
+			frik_obstructed(normalize(self.velocity), TRUE);
 			return;
 		}
-		if (self.target1)
-		{
-			stop = realorigin(self.target1);
-			if ((stop_z - self.origin_z) < -32)
-			{
-
-				return; // safe to fall
-			}
-		}
+		if (drop_ok)
+			return; // safe to fall toward target
 		bot_jump();
 	}
 	// go for it
@@ -440,20 +505,18 @@ void() frik_dodge_obstruction =
 		return;
 	if ((self.b_aiflags & (AI_BLIND | AI_PRECISION)) || !(self.flags & FL_ONGROUND))
 	{
-		self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
+		self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
 		return;
 	}
 
 	// perform a walkmove check to see if the obs_dir is still obstructed
-	// walkmove is less forgiving than frik_obstacles, so I dunno 
-	// how well this will work
 
 	oflags = self.flags;
 	org = self.origin;
 
 	yaw = vectoyaw(self.obs_dir);
 	if (walkmove(yaw, 32))
-		self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
+		self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
 	else
 	{
 		if (self.b_aiflags & AI_DANGER)
@@ -470,9 +533,9 @@ void() frik_dodge_obstruction =
 			way_x = self.obs_dir_y;
 			way_y = self.obs_dir_x * -1;
 		}
-		self.keys = self.keys & 960 + frik_KeysForDir(way);
+		self.keys = (self.keys & 960) | frik_KeysForDir(way);
 	}
-	
+
 	// fix the bot
 
 	self.origin = org;
@@ -503,7 +566,7 @@ to gain speed via SV_AirAccelerate.
 
 void() bot_bhop =
 {
-	local float spd, yaw_nudge;
+	local float spd, yaw_nudge, tdist;
 	local vector vel;
 
 	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
@@ -520,7 +583,7 @@ void() bot_bhop =
 	}
 	else
 	{
-		if (self.b_skill < 2)
+		if (self.b_skill < 1)
 			return;
 	}
 
@@ -530,12 +593,41 @@ void() bot_bhop =
 	if (self.waterlevel > 1)
 		return;
 
-	// don't bhop when target is very close (prevents overshooting)
+	// don't bhop during active combat — need precise movement control
+	if (self.enemy && self.enemy != world && self.enemy.health > 0)
+		return;
+
+	// don't bhop when target is close (prevents overshooting)
+	// require longer distance for bhop to be worthwhile
 	if (self.target1)
 	{
-		if (vlen(realorigin(self.target1) - self.origin) < 128)
+		tdist = vlen(realorigin(self.target1) - self.origin);
+		if (tdist < 300)
 			return;
 	}
+	else
+		return;  // no target = no reason to bhop
+
+	// --- environmental safety checks (use sense cache) ---
+
+	// don't bhop in tight spaces — corridors, doorways, narrow passages
+	// openness 0.0 = walled in, 1.0 = open room; require open-ish area
+	if (self.sense_nav_openness < 0.35)
+		return;
+
+	// don't bhop when hazards (lava/slime) are nearby
+	if (self.sense_hazard_left || self.sense_hazard_right)
+		return;
+	if (self.sense_fwd_ground_type < -3)  // lava or slime ahead
+		return;
+
+	// don't bhop near edges/dropoffs
+	if (self.sense_on_edge)
+		return;
+
+	// don't bhop when a wall is close ahead (would just slam into it)
+	if (self.sense_fwd_wall_dist < 200)
+		return;
 
 	vel = self.velocity;
 	vel_z = 0;
@@ -546,7 +638,28 @@ void() bot_bhop =
 		// in a chain - keep jumping if speed is above a lower "stop" threshold
 		if (self.b_bhop_land)
 		{
-			if (spd > 80)
+			// abort chain if environment became unsafe
+			if (self.sense_hazard_left || self.sense_hazard_right
+				|| self.sense_on_edge || self.sense_fwd_ground_type < -3
+				|| self.sense_nav_openness < 0.25)
+			{
+				self.b_bhop_land = 0;
+				self.b_bhop_strafe = 0;
+				return;
+			}
+
+			// abort if we're now close to target (prevents overshooting)
+			if (self.target1)
+			{
+				if (vlen(realorigin(self.target1) - self.origin) < 200)
+				{
+					self.b_bhop_land = 0;
+					self.b_bhop_strafe = 0;
+					return;
+				}
+			}
+
+			if (spd > 200)
 			{
 				// human emulation: occasionally fumble a bhop in the chain
 				if (random() < self.b_bhop_fumble)
@@ -561,22 +674,25 @@ void() bot_bhop =
 			{
 				// speed dropped too low, break the chain
 				self.b_bhop_land = 0;
+				self.b_bhop_strafe = 0;
 				return;
 			}
 		}
 
 		// start a bhop chain if moving fast enough
-		// skill 3: initiates more aggressively
-		if (spd > 150 || (self.b_skill >= 3 && spd > 50))
+		// skill 3: initiates aggressively, skill 1-2: needs near-max run speed
+		if ((self.b_skill >= 3 && spd > 150) || spd > 280)
 		{
 			bot_jump();
 			self.b_bhop_land = 1;
 			// set fumble rate for this chain based on skill
-			// skill 2: 15% miss chance, skill 3: 5%
+			// skill 1: 25%, skill 2: 15%, skill 3: 5%
 			if (self.b_skill >= 3)
 				self.b_bhop_fumble = 0.05;
-			else
+			else if (self.b_skill >= 2)
 				self.b_bhop_fumble = 0.15;
+			else
+				self.b_bhop_fumble = 0.25;
 		}
 	}
 	else if (self.b_bhop_land)
@@ -584,14 +700,14 @@ void() bot_bhop =
 		// in air during bhop - strafe + yaw turn for air acceleration
 		// SV_AirAccelerate requires wish direction offset from velocity,
 		// achieved by holding strafe and turning into the strafe direction
-		if (self.b_strafe_dir == 0)
+		if (self.b_bhop_strafe == 0)
 		{
 			if (random() < 0.5)
-				self.b_strafe_dir = 1;
+				self.b_bhop_strafe = 1;
 			else
-				self.b_strafe_dir = -1;
+				self.b_bhop_strafe = -1;
 		}
-		if (self.b_strafe_dir > 0)
+		if (self.b_bhop_strafe > 0)
 			self.keys = self.keys | KEY_MOVERIGHT;
 		else
 			self.keys = self.keys | KEY_MOVELEFT;
@@ -602,7 +718,7 @@ void() bot_bhop =
 			yaw_nudge = 5 + random() * 3;
 		else
 			yaw_nudge = 3 + random() * 2;
-		self.b_angle_y = self.b_angle_y + self.b_strafe_dir * yaw_nudge;
+		self.b_angle_y = self.b_angle_y + self.b_bhop_strafe * yaw_nudge;
 	}
 };
 
@@ -625,7 +741,7 @@ void() frik_movetogoal =
 	}
 
 	way = normalize(way);
-	self.keys = self.keys & 960 + frik_KeysForDir(way);
+	self.keys = (self.keys & 960) | frik_KeysForDir(way);
 
 	// human emulation: occasional strafe jitter during navigation
 	// humans don't run in perfectly straight lines
@@ -654,6 +770,41 @@ void() frik_movetogoal =
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
 
+	// local navigation: when obstructed and sense nav has a viable direction,
+	// override movement keys to route around the obstacle spatially
+	if (self.b_aiflags & AI_OBSTRUCTED)
+	{
+		local vector nav_dir;
+		local float nav_yaw, stuck_dur;
+		local float best_clear, clear;
+
+		stuck_dur = time - self.obs_time;
+		nav_yaw = -1;
+
+		if (stuck_dur > 1.0)
+		{
+			// stuck too long — ignore goal, pick most open direction
+			best_clear = self.sense_nav_n; nav_yaw = 90;
+			clear = self.sense_nav_ne; if (clear > best_clear) { best_clear = clear; nav_yaw = 45; }
+			clear = self.sense_nav_e; if (clear > best_clear) { best_clear = clear; nav_yaw = 0; }
+			clear = self.sense_nav_se; if (clear > best_clear) { best_clear = clear; nav_yaw = 315; }
+			clear = self.sense_nav_s; if (clear > best_clear) { best_clear = clear; nav_yaw = 270; }
+			clear = self.sense_nav_sw; if (clear > best_clear) { best_clear = clear; nav_yaw = 225; }
+			clear = self.sense_nav_w; if (clear > best_clear) { best_clear = clear; nav_yaw = 180; }
+			clear = self.sense_nav_nw; if (clear > best_clear) { best_clear = clear; nav_yaw = 135; }
+		}
+		else if (self.sense_nav_best_dir >= 0)
+			nav_yaw = self.sense_nav_best_dir;
+
+		if (nav_yaw >= 0)
+		{
+			makevectors('0 1 0' * nav_yaw);
+			nav_dir = v_forward;
+			nav_dir_z = 0;
+			self.keys = (self.keys & 960) | frik_KeysForDir(nav_dir);
+		}
+	}
+
 	if (self.b_aiflags & AI_PRECISION)
 	{
 		g = angcomp(self.v_angle_x, self.b_angle_x);
@@ -671,7 +822,7 @@ float(vector weird) frik_walkmove =
 {
 	// okay so it's not walkmove
 	// sue me
- 	self.keys = self.keys & 960 + frik_KeysForDir(weird);
+ 	self.keys = (self.keys & 960) | frik_KeysForDir(weird);
 
 	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);

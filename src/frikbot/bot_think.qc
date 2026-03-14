@@ -73,7 +73,7 @@ void() bot_opp_model_update =
 	local float dist, blend, delta_hp;
 	local vector v;
 
-	if (self.b_skill < 2)
+	if (self.b_skill < 1)
 		return;
 	if (!self.enemy)
 		return;
@@ -92,11 +92,13 @@ void() bot_opp_model_update =
 		return;
 
 	// exponential moving average blend factor
-	// quick adaptation for skill 3, slower for skill 2
+	// quick adaptation for skill 3, slower for lower skills
 	if (self.b_skill >= 3)
 		blend = 0.3;
-	else
+	else if (self.b_skill >= 2)
 		blend = 0.15;
+	else
+		blend = 0.08;
 
 	// track weapon changes
 	self.b_opp_weapon = self.enemy.weapon;
@@ -244,6 +246,21 @@ the binary fight-or-retreat check.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+// does the bot have ammo for any ranged weapon it owns?
+float() bot_has_ammo =
+{
+	local float it;
+	it = self.items & 127;
+	if ((it & IT_ROCKET_LAUNCHER) && self.ammo_rockets >= 1) return TRUE;
+	if ((it & IT_LIGHTNING) && self.ammo_cells >= 1) return TRUE;
+	if ((it & IT_GRENADE_LAUNCHER) && self.ammo_rockets >= 1) return TRUE;
+	if ((it & IT_SUPER_NAILGUN) && self.ammo_nails >= 2) return TRUE;
+	if ((it & IT_NAILGUN) && self.ammo_nails >= 1) return TRUE;
+	if ((it & IT_SUPER_SHOTGUN) && self.ammo_shells >= 2) return TRUE;
+	if ((it & IT_SHOTGUN) && self.ammo_shells >= 1) return TRUE;
+	return FALSE;
+};
+
 // how good is staying and fighting right now?
 float() bot_util_fight =
 {
@@ -251,8 +268,12 @@ float() bot_util_fight =
 
 	score = 50;		// baseline: fighting is the default
 
-	mysz = bot_size_player(self);
-	foesz = bot_size_player(self.enemy);
+	// no ranged ammo: strongly discourage fighting (axe only)
+	if (!bot_has_ammo())
+		score = score - 40;
+
+	mysz = self.sense_my_size;
+	foesz = self.sense_enemy_size;
 
 	// health+armor ratio
 	health_ratio = mysz / foesz;
@@ -266,7 +287,7 @@ float() bot_util_fight =
 		score = score - 10;
 
 	// weapon advantage
-	wep_adv = bot_weapon_score(self.weapon, vlen(self.enemy.origin - self.origin));
+	wep_adv = bot_weapon_score(self.weapon, self.sense_enemy_dist);
 	wep_adv = wep_adv - 40;	// center around 0
 	score = score + wep_adv * 0.3;
 
@@ -281,7 +302,7 @@ float() bot_util_fight =
 		score = score - 8;
 
 	// opponent model: passive enemy is easier to fight
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro < 0.3)
 			score = score + 8;	// they're running, press advantage
@@ -298,9 +319,9 @@ float() bot_util_fight =
 	}
 
 	// splash weapons at mid-range with no wall angle: flanking would be better
-	if (self.b_skill >= 2 && (self.weapon == 32 || self.weapon == 16))
+	if (self.b_skill >= 1 && (self.weapon == IT_ROCKET_LAUNCHER || self.weapon == IT_GRENADE_LAUNCHER))
 	{
-		fdist = vlen(self.enemy.origin - self.origin);
+		fdist = self.sense_enemy_dist;
 		if (fdist > 200 && fdist < 600 && !bot_enemy_near_wall())
 			score = score - 12;
 	}
@@ -317,8 +338,12 @@ float() bot_util_retreat =
 
 	score = 20;		// baseline: retreating is not default
 
-	mysz = bot_size_player(self);
-	foesz = bot_size_player(self.enemy);
+	// no ranged ammo: strongly encourage retreat
+	if (!bot_has_ammo())
+		score = score + 40;
+
+	mysz = self.sense_my_size;
+	foesz = self.sense_enemy_size;
 
 	health_ratio = mysz / foesz;
 	if (health_ratio < 0.4)
@@ -337,9 +362,9 @@ float() bot_util_retreat =
 		score = score + 10;
 
 	// enemy has powerup
-	if (self.enemy.items & 4194304)	// quad
+	if (self.enemy.items & IT_QUAD)
 		score = score + 30;
-	if (self.enemy.items & 1048576)	// invuln
+	if (self.enemy.items & IT_INVULNERABILITY)
 		score = score + 40;
 
 	// personality
@@ -349,12 +374,12 @@ float() bot_util_retreat =
 		score = score - 20;
 
 	// opponent model: aggressive enemy is scarier
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro > 0.7)
 			score = score + 10;
 		// enemy has RL/LG and is closing
-		if ((self.b_opp_weapon == 32 || self.b_opp_weapon == 64) && self.b_opp_aggro > 0.6)
+		if ((self.b_opp_weapon == IT_ROCKET_LAUNCHER || self.b_opp_weapon == IT_LIGHTNING) && self.b_opp_aggro > 0.6)
 			score = score + 10;
 	}
 
@@ -389,9 +414,9 @@ float() bot_util_pressure =
 		score = score + 8;
 
 	// we have a strong weapon
-	if (self.weapon == 32 || self.weapon == 64)
+	if (self.weapon == IT_ROCKET_LAUNCHER || self.weapon == IT_LIGHTNING)
 		score = score + 15;
-	else if (self.weapon == 8)
+	else if (self.weapon == IT_SUPER_NAILGUN)
 		score = score + 8;
 
 	// we're healthy
@@ -399,7 +424,7 @@ float() bot_util_pressure =
 		score = score + 10;
 
 	// we have powerup
-	if (self.items & 4194304)	// quad
+	if (self.items & IT_QUAD)
 		score = score + 30;
 
 	// personality
@@ -411,7 +436,7 @@ float() bot_util_pressure =
 		score = score - 15;
 
 	// opponent model: passive enemy is easier to pressure
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro < 0.3)
 			score = score + 12;
@@ -437,10 +462,10 @@ float() bot_util_flank =
 	score = 20;		// baseline: flanking is a valid tactic with splash weapons
 
 	// only useful with splash weapons
-	if (self.weapon != 32 && self.weapon != 16)
+	if (self.weapon != IT_ROCKET_LAUNCHER && self.weapon != IT_GRENADE_LAUNCHER)
 		return 0;
 
-	foedist = vlen(self.enemy.origin - self.origin);
+	foedist = self.sense_enemy_dist;
 
 	// mid-range is ideal for flanking
 	if (foedist > 200 && foedist < 600)
@@ -455,7 +480,7 @@ float() bot_util_flank =
 		score = score - 10;	// already have the angle, just fight
 
 	// we have rockets
-	if (self.weapon == 32 && self.ammo_rockets >= 3)
+	if (self.weapon == IT_ROCKET_LAUNCHER && self.ammo_rockets >= 3)
 		score = score + 10;
 
 	// personality
@@ -472,27 +497,27 @@ float(entity e) bot_size_player =
 	local float sz;
 
 	sz = e.health + e.armorvalue * e.armortype;
-	if (e.weapon == 32)
+	if (e.weapon == IT_ROCKET_LAUNCHER)
 		sz = sz + 60;
-	else if (e.weapon == 64)
+	else if (e.weapon == IT_LIGHTNING)
 		sz = sz + 60;
-	else if (e.weapon == 16)
+	else if (e.weapon == IT_GRENADE_LAUNCHER)
 		sz = sz + 50;
-	else if (e.weapon == 8)
+	else if (e.weapon == IT_SUPER_NAILGUN)
 		sz = sz + 50;
-	else if (e.weapon == 4)
+	else if (e.weapon == IT_NAILGUN)
 		sz = sz + 40;
-	else if (e.weapon == 2)
+	else if (e.weapon == IT_SUPER_SHOTGUN)
 		sz = sz + 40;
-	else if (e.weapon == 1)
+	else if (e.weapon == IT_SHOTGUN)
 		sz = sz + 10;
-	else if (e.weapon == 4096)
+	else if (e.weapon == IT_AXE)
 		sz = sz - 50;
-	if (e.items & 4194304) // Quad
+	if (e.items & IT_QUAD)
 		sz = sz + 200;
-	if (e.items & 1048576) // Invul
+	if (e.items & IT_INVULNERABILITY)
 		sz = sz + 300;
-	if (e.items & 524288) // Invis
+	if (e.items & IT_INVISIBILITY)
 		sz = sz + 250;
 	if (sz < 1)
 		sz = 1;
@@ -515,7 +540,7 @@ void() bot_dodge_stuff =
 	{
 		v = self.origin - realorigin(self.enemy);
 
-		foesz = bot_size_player(self.enemy);
+		foesz = self.sense_enemy_size;
 		foesz = foesz + vlen(v) * 0.5;
 	}
 	else
@@ -627,7 +652,8 @@ void() bot_dodge_stuff =
 		}
 
 		// human emulation: reaction delay before engaging new enemies
-		// first detection starts a timer; enemy isn't fought until it expires
+		// first detection starts a one-shot timer; enemy isn't fought until it expires
+		// b_react_time stays at expired value while fighting to prevent re-triggering
 		if (self.enemy && self.b_skill < 3)
 		{
 			if (self.b_react_time == 0)
@@ -645,15 +671,11 @@ void() bot_dodge_stuff =
 				// still reacting — suppress engagement
 				self.enemy = world;
 			}
-			else
-			{
-				// reaction complete — engage and reset for next time
-				self.b_react_time = 0;
-			}
+			// else: reaction expired, keep fighting (don't reset to 0)
 		}
 		else if (!self.enemy)
 		{
-			// lost sight during reaction — reset timer
+			// enemy lost — reset timer for next encounter
 			self.b_react_time = 0;
 		}
 	}
@@ -700,27 +722,27 @@ _z maximum range bot can be to be effective (lg/axe) (move in)
 
 vector(float wep) weapon_range =
 {
-	if (wep == 4096) // IT_AXE
+	if (wep == IT_AXE)
 		return '48 0 64';
-	else if (wep == 1) // IT_SHOTGUN
+	else if (wep == IT_SHOTGUN)
 		//~ ai fix start
 		//~ return '128 0 99999';
 		return '128 8 3000';
 		//~ ai fix end
-	else if (wep == 2) // IT_SUPER_SHOTGUN
+	else if (wep == IT_SUPER_SHOTGUN)
 		//~ ai fix start
 		//~ return '128 0 99999';
 		return '128 0 3000';
 		//~ ai fix end
-	else if (wep == 4) // IT_NAILGUN
+	else if (wep == IT_NAILGUN)
 		return '180 0 3000';
-	else if (wep == 8) // IT_SUPER_NAILGUN
+	else if (wep == IT_SUPER_NAILGUN)
 		return '180 0 3000';
-	else if (wep == 16) // IT_GRENADE_LAUNCHER
+	else if (wep == IT_GRENADE_LAUNCHER)
 		return '180 48 3000';
-	else if (wep == 32) // IT_ROCKET_LAUNCHER
+	else if (wep == IT_ROCKET_LAUNCHER)
 		return '180 48 3000';
-	else if (wep == 64) // IT_LIGHTNING
+	else if (wep == IT_LIGHTNING)
 		return '350 0 512';
 	else
 		return '128 0 3000';
@@ -738,22 +760,6 @@ Check if enemy has a wall close behind them
 
 float() bot_enemy_near_wall =
 {
-	local vector dir, org;
-
-	// return cached result if already computed this frame
-	if (self.b_wall_time == time)
-		return self.b_wall_near;
-
-	org = realorigin(self.enemy);
-	dir = normalize(org - self.origin);
-	traceline(org, org + dir * 100, TRUE, self.enemy);
-
-	self.b_wall_time = time;
-	if (trace_fraction < 1)
-	{
-		self.b_wall_near = TRUE;
-		return TRUE;
-	}
-	self.b_wall_near = FALSE;
-	return FALSE;
+	// read from unified sense cache (computed in bot_sense_visibility)
+	return self.sense_enemy_wall;
 };
