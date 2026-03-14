@@ -1269,11 +1269,17 @@ void() bot_angle_set =
 	if (self.b_skill >= 2)
 	{
 		self.keys = self.keys & 63;
-		self.v_angle = self.b_angle;
-		while (self.v_angle_x < -180)
-			self.v_angle_x = self.v_angle_x + 360;
-		while (self.v_angle_x > 180)
-			self.v_angle_x = self.v_angle_x - 360;
+		if (self.b_skill >= 3)
+		{
+			// skill 3: direct angle set (instant snap)
+			self.v_angle = self.b_angle;
+			while (self.v_angle_x < -180)
+				self.v_angle_x = self.v_angle_x + 360;
+			while (self.v_angle_x > 180)
+				self.v_angle_x = self.v_angle_x - 360;
+		}
+		// skill 2: b_angle is set, mouse emulation in bot_phys.qc
+		// handles smooth interpolation — don't override v_angle here
 	}
 	else if ((self.enemy == world || self.enemy.movetype == MOVETYPE_PUSH) && self.target1.classname != "player")
 	{

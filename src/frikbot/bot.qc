@@ -1192,7 +1192,7 @@ void(float clientno) BotInvalidClientNo =
 	local entity bot;
 
 	bot = GetClientEntity(clientno);
-	if(bot.b_clientno > 0)
+	if(bot.b_clientno >= 0)
 	{
 		if (active_clients & ClientBitFlag(self.b_clientno))
 		{

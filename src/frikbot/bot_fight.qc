@@ -445,30 +445,27 @@ void() bot_fight_style =
 
 	if (foedist > v_y && foedist < v_z)
 	{
-		if (foedist >= v_y)
-		{
-			// skip shot if teammate is in the way (from sense cache)
-			if (!self.sense_friendly_block)
-				bot_shoot();
+		// skip shot if teammate is in the way (from sense cache)
+		if (!self.sense_friendly_block)
+			bot_shoot();
 
-			// --- RL->LG combo: initiate phase ---
-			// skill 3 in PRESSURE: after firing RL at mid range, start combo
-			// human emulation: only attempt 40% of the time (humans don't
-			// always think to combo, and sometimes fumble the switch)
-			if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
-				&& self.b_combo_time == 0
-				&& self.weapon == 32	// IT_ROCKET_LAUNCHER
-				&& (self.items & 64)	// have LG
-				&& self.ammo_cells >= 1
-				&& self.waterlevel <= 1	// LG doesn't work underwater
-				&& foedist > 200 && foedist < 600
-				&& random() < 0.4)
-			{
-				// rocket is in flight — switch to LG after brief delay
-				// (human reaction to own rocket fire)
-				self.b_combo_time = time + 0.05 + random() * 0.1;
-				self.b_wepswitch_time = time + 1.5; // suppress normal switching
-			}
+		// --- RL->LG combo: initiate phase ---
+		// skill 3 in PRESSURE: after firing RL at mid range, start combo
+		// human emulation: only attempt 40% of the time (humans don't
+		// always think to combo, and sometimes fumble the switch)
+		if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
+			&& self.b_combo_time == 0
+			&& self.weapon == 32	// IT_ROCKET_LAUNCHER
+			&& (self.items & 64)	// have LG
+			&& self.ammo_cells >= 1
+			&& self.waterlevel <= 1	// LG doesn't work underwater
+			&& foedist > 200 && foedist < 600
+			&& random() < 0.4)
+		{
+			// rocket is in flight — switch to LG after brief delay
+			// (human reaction to own rocket fire)
+			self.b_combo_time = time + 0.05 + random() * 0.1;
+			self.b_wepswitch_time = time + 1.5; // suppress normal switching
 		}
 		if (self.b_skill >= 1 && time > self.b_wepswitch_time && self.b_combo_time == 0)
 		{
@@ -481,6 +478,20 @@ void() bot_fight_style =
 
 	self.b_retreat = 0;
 
+	// --- axe-only at range: disengage and look for weapons/ammo ---
+	// if we have axe and no switch pending (or switching to axe),
+	// and the enemy is beyond melee range, drop combat
+	if (self.weapon == 4096 && foedist > 64)
+	{
+		if (self.impulse == 0 || self.impulse == 1)
+		{
+			self.enemy = world;
+			self.b_strafe_dir = 0;
+			self.b_combat_state = CSTATE_NONE;
+			return;
+		}
+	}
+
 	// --- movement constrained by AI flags ---
 	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
 	{
@@ -491,7 +502,8 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				bot_shoot();
+				if (foedist > v_y && foedist < v_z)
+					bot_shoot();
 			}
 			return;
 		}
@@ -541,12 +553,11 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				bot_shoot();
+				if (foedist > v_y && foedist < v_z)
+					bot_shoot();
 			}
 			return;
 		}
-		if (mysz < 140)
-			return;
 		self.b_combat_state = CSTATE_FIGHT;
 		if (!(self.enemy.flags & FL_MONSTER))
 			bot_combat_strafe();
