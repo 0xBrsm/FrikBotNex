@@ -66,7 +66,7 @@ void() bot_combat_strafe =
 	local float foedist, strafe_interval;
 
 	org = realorigin(self.enemy);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -265,7 +265,7 @@ void() bot_pressure_move =
 
 	org = realorigin(self.enemy);
 	toward = normalize(org - self.origin);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -319,7 +319,7 @@ void() bot_flank_move =
 	local float foedist;
 
 	org = realorigin(self.enemy);
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	makevectors(self.v_angle);
 	right = v_right;
 
@@ -426,7 +426,7 @@ void() bot_fight_style =
 	makevectors(self.v_angle);
 
 	// --- shooting decision (universal, all states) ---
-	foedist = vlen(org - self.origin);
+	foedist = self.sense_enemy_dist;
 	v = weapon_range(self.weapon);
 
 	// --- RL->LG combo: execute phase (skill 3, PRESSURE state) ---
@@ -501,7 +501,7 @@ void() bot_fight_style =
 	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
 	{
 		// constrained: simplified fight-or-retreat only
-		if (bot_size_player(self.enemy) > bot_size_player(self) + 5)
+		if (self.sense_enemy_size > self.sense_my_size + 5)
 		{
 			bot_retreat();
 			if (self.b_skill >= 1)
@@ -538,8 +538,8 @@ void() bot_fight_style =
 	// --- skill 0: classic binary fight/retreat ---
 	if (self.b_skill < 1)
 	{
-		foesz = bot_size_player(self.enemy);
-		mysz = bot_size_player(self) + 5;
+		foesz = self.sense_enemy_size;
+		mysz = self.sense_my_size + 5;
 
 		if (self.b_personality == PERSONALITY_AGGRESSIVE)
 			mysz = mysz + 40;

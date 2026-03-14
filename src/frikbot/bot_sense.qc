@@ -17,7 +17,8 @@ See AWARENESS.md for the full design document.
 
 // --- Sense system metadata ---
 .float sense_time;              // last full update time (avoid redundant runs)
-.float sense_ground_time;       // last ground probe time
+.float sense_ground_time;       // last ground probe time (used as frame guard)
+.float sense_fwd_time;          // last forward probe time (used as frame guard)
 .float sense_lateral_time;      // last lateral probe time
 .float sense_nav_time;          // last local nav probe time
 
@@ -57,6 +58,8 @@ See AWARENESS.md for the full design document.
 .float sense_enemy_vis;         // TRUE if enemy is visible
 .float sense_enemy_dist;        // distance to enemy
 .float sense_enemy_wall;        // TRUE if enemy has wall behind them (splash potential)
+.float sense_my_size;           // cached bot_size_player(self) for this frame
+.float sense_enemy_size;        // cached bot_size_player(enemy) for this frame
 .float sense_friendly_block;    // TRUE if teammate in line of fire
 
 // --- Local navigation fan (NEW -- enables waypoint-free intra-region movement) ---
@@ -91,6 +94,10 @@ void() bot_sense_ground =
 {
 	local vector start, stop;
 	local float conts;
+
+	if (self.sense_ground_time == time)
+		return;     // already ran this frame
+	self.sense_ground_time = time;
 
 	// Trace 1: straight down from origin to detect floor
 	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
@@ -153,6 +160,10 @@ void() bot_sense_forward =
 {
 	local vector ang, start, stop, check, side;
 	local float conts, hgt, test;
+
+	if (self.sense_fwd_time == time)
+		return;     // already ran this frame
+	self.sense_fwd_time = time;
 
 	ang = self.velocity;
 	ang_z = 0;
@@ -608,6 +619,13 @@ void() bot_sense =
 	if (self.sense_time == time)
 		return;     // already ran this frame
 	self.sense_time = time;
+
+	// cache per-frame size calculations (called 4-6x otherwise)
+	self.sense_my_size = bot_size_player(self);
+	if (self.enemy && self.enemy != world)
+		self.sense_enemy_size = bot_size_player(self.enemy);
+	else
+		self.sense_enemy_size = 0;
 
 	bot_sense_ground();                      // every frame
 	bot_sense_forward();                     // every frame

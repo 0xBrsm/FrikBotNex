@@ -272,8 +272,8 @@ float() bot_util_fight =
 	if (!bot_has_ammo())
 		score = score - 40;
 
-	mysz = bot_size_player(self);
-	foesz = bot_size_player(self.enemy);
+	mysz = self.sense_my_size;
+	foesz = self.sense_enemy_size;
 
 	// health+armor ratio
 	health_ratio = mysz / foesz;
@@ -287,7 +287,7 @@ float() bot_util_fight =
 		score = score - 10;
 
 	// weapon advantage
-	wep_adv = bot_weapon_score(self.weapon, vlen(self.enemy.origin - self.origin));
+	wep_adv = bot_weapon_score(self.weapon, self.sense_enemy_dist);
 	wep_adv = wep_adv - 40;	// center around 0
 	score = score + wep_adv * 0.3;
 
@@ -321,7 +321,7 @@ float() bot_util_fight =
 	// splash weapons at mid-range with no wall angle: flanking would be better
 	if (self.b_skill >= 1 && (self.weapon == 32 || self.weapon == 16))
 	{
-		fdist = vlen(self.enemy.origin - self.origin);
+		fdist = self.sense_enemy_dist;
 		if (fdist > 200 && fdist < 600 && !bot_enemy_near_wall())
 			score = score - 12;
 	}
@@ -342,8 +342,8 @@ float() bot_util_retreat =
 	if (!bot_has_ammo())
 		score = score + 40;
 
-	mysz = bot_size_player(self);
-	foesz = bot_size_player(self.enemy);
+	mysz = self.sense_my_size;
+	foesz = self.sense_enemy_size;
 
 	health_ratio = mysz / foesz;
 	if (health_ratio < 0.4)
@@ -465,7 +465,7 @@ float() bot_util_flank =
 	if (self.weapon != 32 && self.weapon != 16)
 		return 0;
 
-	foedist = vlen(self.enemy.origin - self.origin);
+	foedist = self.sense_enemy_dist;
 
 	// mid-range is ideal for flanking
 	if (foedist > 200 && foedist < 600)
@@ -540,7 +540,7 @@ void() bot_dodge_stuff =
 	{
 		v = self.origin - realorigin(self.enemy);
 
-		foesz = bot_size_player(self.enemy);
+		foesz = self.sense_enemy_size;
 		foesz = foesz + vlen(v) * 0.5;
 	}
 	else

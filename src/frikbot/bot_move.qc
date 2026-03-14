@@ -296,6 +296,8 @@ a hazard is detected.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+float drop_ok;  // cached result of bot_wants_to_drop() for current frame
+
 float() frik_check_hazard =
 {
 	local vector ang, side;
@@ -313,7 +315,7 @@ float() frik_check_hazard =
 	// center-ahead hazard (but defer to navigation intent for drops)
 	if (self.sense_fwd_ground_type < -3)
 	{
-		if (!bot_wants_to_drop())
+		if (!drop_ok)
 		{
 			frik_obstructed(ang, TRUE);
 			return TRUE;
@@ -350,6 +352,9 @@ void() frik_obstacles =
 	if (self.b_aiflags & AI_BLIND)
 		return;
 
+	// cache bot_wants_to_drop for this frame (called up to 8x otherwise)
+	drop_ok = bot_wants_to_drop();
+
 	// refresh safety-critical sense data every physics frame
 	// (bot_sense() runs inside BotAI which is AFTER frik_obstacles
 	// in the frame, and for skill 0-1 is throttled by ai_time,
@@ -374,7 +379,7 @@ void() frik_obstacles =
 			if (conts < -3 || conts == CONTENT_EMPTY)
 			{
 				// navigating to a target below? trust pathfinding
-				if (bot_wants_to_drop())
+				if (drop_ok)
 					return;
 
 				// lava, slime, or void ahead — hard stop
@@ -408,14 +413,14 @@ void() frik_obstacles =
 	{
 		if (conts < -3) // bad stuff down there
 		{
-			if (bot_wants_to_drop())
+			if (drop_ok)
 				return; // navigation says drop — trust it
 			frik_obstructed(normalize(ang), TRUE);
 			return;
 		}
 		else
 		{
-			if (bot_wants_to_drop())
+			if (drop_ok)
 				return; // safe to fall toward target
 			frik_obstructed(normalize(ang), FALSE);
 			return;
@@ -431,14 +436,14 @@ void() frik_obstacles =
 		{
 			if (conts < -3)
 			{
-				if (bot_wants_to_drop())
+				if (drop_ok)
 					return;
 				frik_obstructed(ang, TRUE);
 				return;
 			}
 			else
 			{
-				if (bot_wants_to_drop())
+				if (drop_ok)
 					return; // safe to fall toward target
 				frik_obstructed(ang, FALSE);
 				return;
@@ -468,12 +473,12 @@ void() frik_obstacles =
 	{
 		if (conts < -3)
 		{
-			if (bot_wants_to_drop())
+			if (drop_ok)
 				return;
 			frik_obstructed(normalize(self.velocity), TRUE);
 			return;
 		}
-		if (bot_wants_to_drop())
+		if (drop_ok)
 			return; // safe to fall toward target
 		bot_jump();
 	}
