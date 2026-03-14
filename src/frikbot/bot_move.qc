@@ -303,6 +303,14 @@ void() frik_obstacles =
 	if (self.b_aiflags & AI_BLIND)
 		return;
 
+	// refresh safety-critical sense data every physics frame
+	// (bot_sense() runs inside BotAI which is AFTER frik_obstacles
+	// in the frame, and for skill 0-1 is throttled by ai_time,
+	// so the cache can be multiple frames stale — too late for
+	// hazard avoidance at full run speed)
+	bot_sense_ground();
+	bot_sense_forward();
+
 	// proactive hazard scan (lava/slime ahead and to sides)
 	if (frik_check_hazard())
 		return;
