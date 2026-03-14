@@ -566,7 +566,7 @@ to gain speed via SV_AirAccelerate.
 
 void() bot_bhop =
 {
-	local float spd, yaw_nudge;
+	local float spd, yaw_nudge, tdist;
 	local vector vel;
 
 	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
@@ -593,12 +593,41 @@ void() bot_bhop =
 	if (self.waterlevel > 1)
 		return;
 
-	// don't bhop when target is very close (prevents overshooting)
+	// don't bhop during active combat — need precise movement control
+	if (self.enemy && self.enemy != world && self.enemy.health > 0)
+		return;
+
+	// don't bhop when target is close (prevents overshooting)
+	// require longer distance for bhop to be worthwhile
 	if (self.target1)
 	{
-		if (vlen(realorigin(self.target1) - self.origin) < 128)
+		tdist = vlen(realorigin(self.target1) - self.origin);
+		if (tdist < 300)
 			return;
 	}
+	else
+		return;  // no target = no reason to bhop
+
+	// --- environmental safety checks (use sense cache) ---
+
+	// don't bhop in tight spaces — corridors, doorways, narrow passages
+	// openness 0.0 = walled in, 1.0 = open room; require open-ish area
+	if (self.sense_nav_openness < 0.35)
+		return;
+
+	// don't bhop when hazards (lava/slime) are nearby
+	if (self.sense_hazard_left || self.sense_hazard_right)
+		return;
+	if (self.sense_fwd_ground_type < -3)  // lava or slime ahead
+		return;
+
+	// don't bhop near edges/dropoffs
+	if (self.sense_on_edge)
+		return;
+
+	// don't bhop when a wall is close ahead (would just slam into it)
+	if (self.sense_fwd_wall_dist < 200)
+		return;
 
 	vel = self.velocity;
 	vel_z = 0;
@@ -609,6 +638,27 @@ void() bot_bhop =
 		// in a chain - keep jumping if speed is above a lower "stop" threshold
 		if (self.b_bhop_land)
 		{
+			// abort chain if environment became unsafe
+			if (self.sense_hazard_left || self.sense_hazard_right
+				|| self.sense_on_edge || self.sense_fwd_ground_type < -3
+				|| self.sense_nav_openness < 0.25)
+			{
+				self.b_bhop_land = 0;
+				self.b_bhop_strafe = 0;
+				return;
+			}
+
+			// abort if we're now close to target (prevents overshooting)
+			if (self.target1)
+			{
+				if (vlen(realorigin(self.target1) - self.origin) < 200)
+				{
+					self.b_bhop_land = 0;
+					self.b_bhop_strafe = 0;
+					return;
+				}
+			}
+
 			if (spd > 200)
 			{
 				// human emulation: occasionally fumble a bhop in the chain
