@@ -42,6 +42,13 @@ this notice in its entirety.
 
 */
 
+// check if distance is within current weapon's effective range
+// v must be set to weapon_range(self.weapon) before calling
+float(float dist, vector wr) bot_in_weapon_range =
+{
+	return (dist > wr_y && dist < wr_z);
+};
+
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
@@ -364,6 +371,14 @@ State transitions are smoothed to avoid jitter.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+void() bot_drop_enemy =
+{
+	self.enemy = world;
+	self.b_strafe_dir = 0;
+	self.b_combat_state = CSTATE_NONE;
+	self.b_combo_time = 0;
+};
+
 void() bot_fight_style =
 {
 	local vector v, v1, v2, org;
@@ -374,18 +389,12 @@ void() bot_fight_style =
 	// --- enemy validity ---
 	if (self.enemy.health <= 0)
 	{
-		self.enemy = world;
-		self.b_strafe_dir = 0;
-		self.b_combat_state = CSTATE_NONE;
-		self.b_combo_time = 0;
+		bot_drop_enemy();
 		return;
 	}
 	else if (!self.enemy.takedamage)
 	{
-		self.enemy = world;
-		self.b_strafe_dir = 0;
-		self.b_combat_state = CSTATE_NONE;
-		self.b_combo_time = 0;
+		bot_drop_enemy();
 		return;
 	}
 	else if (!self.sense_enemy_vis)
@@ -399,10 +408,7 @@ void() bot_fight_style =
 		}
 		else
 		{
-			self.enemy = world;
-			self.b_strafe_dir = 0;
-			self.b_combat_state = CSTATE_NONE;
-			self.b_combo_time = 0;
+			bot_drop_enemy();
 			return;
 		}
 	}
@@ -443,7 +449,7 @@ void() bot_fight_style =
 		}
 	}
 
-	if (foedist > v_y && foedist < v_z)
+	if (bot_in_weapon_range(foedist, v))
 	{
 		// skip shot if teammate is in the way (from sense cache)
 		if (!self.sense_friendly_block)
@@ -485,9 +491,7 @@ void() bot_fight_style =
 	{
 		if (self.impulse == 0 || self.impulse == 1)
 		{
-			self.enemy = world;
-			self.b_strafe_dir = 0;
-			self.b_combat_state = CSTATE_NONE;
+			bot_drop_enemy();
 			return;
 		}
 	}
@@ -502,7 +506,7 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				if (foedist > v_y && foedist < v_z)
+				if (bot_in_weapon_range(foedist, v))
 					bot_shoot();
 			}
 			return;
@@ -553,7 +557,7 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				if (foedist > v_y && foedist < v_z)
+				if (bot_in_weapon_range(foedist, v))
 					bot_shoot();
 			}
 			return;

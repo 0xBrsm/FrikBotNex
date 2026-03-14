@@ -1294,17 +1294,20 @@ void() bot_angle_set =
 	else
 	{
 		// skill 0-1 in combat: keyboard turning (sluggish tracking)
+		local float dy, dx;
 		if (self.b_angle_x > 180)
 			self.b_angle_x = self.b_angle_x - 360;
 		self.keys = self.keys & 63;
 
-		if (angcomp(self.b_angle_y, self.v_angle_y) > 10)
+		dy = angcomp(self.b_angle_y, self.v_angle_y);
+		dx = angcomp(self.b_angle_x, self.v_angle_x);
+		if (dy > 10)
 			self.keys = self.keys | KEY_LOOKLEFT;
-		else if (angcomp(self.b_angle_y, self.v_angle_y) < -10)
+		else if (dy < -10)
 			self.keys = self.keys | KEY_LOOKRIGHT;
-		if (angcomp(self.b_angle_x, self.v_angle_x) < -10)
+		if (dx < -10)
 			self.keys = self.keys | KEY_LOOKUP;
-		else if (angcomp(self.b_angle_x, self.v_angle_x) > 10)
+		else if (dx > 10)
 			self.keys = self.keys | KEY_LOOKDOWN;
 	}
 };
