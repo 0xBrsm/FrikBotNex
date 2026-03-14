@@ -104,15 +104,15 @@ float(entity e) bot_can_rj =
 		return FALSE;
 
 	// quad = bad
-	if (e.items & 4194304)
+	if (e.items & IT_QUAD)
 		return FALSE;
 
 	// do I have rockets & RL?
-	if (!((e.items & 32) && (e.ammo_rockets > 0)))
+	if (!((e.items & IT_ROCKET_LAUNCHER) && (e.ammo_rockets > 0)))
 		return FALSE;
 
 	// do I have pent?
-	if (e.items & 1048576)
+	if (e.items & IT_INVULNERABILITY)
 		return TRUE;
 
 	if (e.health > 50)
@@ -624,6 +624,7 @@ void() bot_bhop =
 			{
 				// speed dropped too low, break the chain
 				self.b_bhop_land = 0;
+				self.b_bhop_strafe = 0;
 				return;
 			}
 		}
@@ -649,14 +650,14 @@ void() bot_bhop =
 		// in air during bhop - strafe + yaw turn for air acceleration
 		// SV_AirAccelerate requires wish direction offset from velocity,
 		// achieved by holding strafe and turning into the strafe direction
-		if (self.b_strafe_dir == 0)
+		if (self.b_bhop_strafe == 0)
 		{
 			if (random() < 0.5)
-				self.b_strafe_dir = 1;
+				self.b_bhop_strafe = 1;
 			else
-				self.b_strafe_dir = -1;
+				self.b_bhop_strafe = -1;
 		}
-		if (self.b_strafe_dir > 0)
+		if (self.b_bhop_strafe > 0)
 			self.keys = self.keys | KEY_MOVERIGHT;
 		else
 			self.keys = self.keys | KEY_MOVELEFT;
@@ -667,7 +668,7 @@ void() bot_bhop =
 			yaw_nudge = 5 + random() * 3;
 		else
 			yaw_nudge = 3 + random() * 2;
-		self.b_angle_y = self.b_angle_y + self.b_strafe_dir * yaw_nudge;
+		self.b_angle_y = self.b_angle_y + self.b_bhop_strafe * yaw_nudge;
 	}
 };
 

@@ -438,7 +438,7 @@ void() bot_fight_style =
 			// combo expired or enemy dead — resume normal weapon logic
 			self.b_combo_time = 0;
 		}
-		else if (self.weapon != 64)
+		else if (self.weapon != IT_LIGHTNING)
 		{
 			// haven't switched yet — force LG
 			self.impulse = 8;
@@ -462,8 +462,8 @@ void() bot_fight_style =
 		// always think to combo, and sometimes fumble the switch)
 		if (self.b_skill >= 3 && self.b_combat_state == CSTATE_PRESSURE
 			&& self.b_combo_time == 0
-			&& self.weapon == 32	// IT_ROCKET_LAUNCHER
-			&& (self.items & 64)	// have LG
+			&& self.weapon == IT_ROCKET_LAUNCHER
+			&& (self.items & IT_LIGHTNING)	// have LG
 			&& self.ammo_cells >= 1
 			&& self.waterlevel <= 1	// LG doesn't work underwater
 			&& foedist > 200 && foedist < 600
@@ -488,7 +488,7 @@ void() bot_fight_style =
 	// --- axe-only at range: disengage and look for weapons/ammo ---
 	// if we have axe and no switch pending (or switching to axe),
 	// and the enemy is beyond melee range, drop combat
-	if (self.weapon == 4096 && foedist > 64)
+	if (self.weapon == IT_AXE && foedist > 64)
 	{
 		if (self.impulse == 0 || self.impulse == 1)
 		{

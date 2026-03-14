@@ -166,7 +166,7 @@ void(entity targ, float success) bot_lost =
         else
         {
 		if (targ.classname == "item_artifact_invisibility")
-			if (self.items & 524288)
+			if (self.items & IT_INVISIBILITY)
 				bot_start_topic(3);
                 
                 if (targ.flags & FL_ITEM)
@@ -1004,7 +1004,7 @@ void() bot_angle_set =
 
 	if (self.enemy)
 	{
-		if (self.enemy.items & 524288)
+		if (self.enemy.items & IT_INVISIBILITY)
 			if (random() > 0.01)
 				return;
 		if (self.missile_speed == 0)

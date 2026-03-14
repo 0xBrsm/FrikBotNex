@@ -143,6 +143,7 @@ for all variables in the bot...
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
 .float b_strafe_time, b_strafe_dir;
+.float b_bhop_strafe;
 .float b_aim_delay, b_aim_offset;
 .float b_retreat;
 .float b_ambush_time;
