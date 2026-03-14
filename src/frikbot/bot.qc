@@ -613,14 +613,22 @@ void() botcam_u =
 	else
 	{
 		do
+		{
 			self.enemy = self.enemy._next;
-		while (self.enemy.classname == "botcam");
+			if (!self.enemy)
+				self.enemy = player_head;
+		}
+		while (self.enemy.classname == "botcam" && self.enemy != self);
 	}
 	if (self.enemy == self)
 	{
 		do
+		{
 			self.enemy = self.enemy._next;
-		while (self.enemy.classname == "botcam");
+			if (!self.enemy)
+				self.enemy = player_head;
+		}
+		while (self.enemy.classname == "botcam" && self.enemy != self);
 	}
 	self.classname = "botcam";
 	self.solid = SOLID_NOT;

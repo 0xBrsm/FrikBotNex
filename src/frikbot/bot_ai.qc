@@ -651,19 +651,21 @@ float(entity thing) priority_for_thing =
 	thisp = 0;
 	// This is the most executed function in the bot. Careful what you do here.
 
-	// skill 2+: anticipate item respawns by positioning near items about to reappear
+	// skill 1+: anticipate item respawns by positioning near items about to reappear
 	// human emulation: imprecise timing — skill 3 arrives ~3s early,
-	// skill 2 has wider window but sometimes arrives too early or late
-	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 2)
+	// lower skills have wider windows but arrive too early or late
+	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 1)
 	{
 		time_left = thing.nextthink - time;
 		if (thing.nextthink > 0 && time_left > 0)
 		{
-			// skill 3: ~3s window, skill 2: ~8s window (arrives too early sometimes)
+			// skill 3: ~3s window, skill 2: ~8s, skill 1: ~12s (vague awareness)
 			if (self.b_skill >= 3)
 				awareness = 3;
-			else
+			else if (self.b_skill >= 2)
 				awareness = 8;
+			else
+				awareness = 12;
 
 			if (time_left < awareness)
 			{
@@ -706,7 +708,7 @@ float(entity thing) priority_for_thing =
 		{
 			if (thing.spawnflags & 2)
 				thisp = 10*(random()) + 50;
-			if (self.health <= 50)
+			else if (self.health <= 50)
 				thisp = 70;
 		}
 		else if (thing.classname == "weapon_rocketlauncher")
@@ -822,8 +824,8 @@ float(entity thing) priority_for_thing =
 				else
 			{
 				thisp = 30;
-				// skill 2+ opponent model: de-prioritize enemies we're losing to
-				if (self.b_skill >= 2 && self.b_opp_ent == thing)
+				// skill 1+ opponent model: de-prioritize enemies we're losing to
+				if (self.b_skill >= 1 && self.b_opp_ent == thing)
 				{
 					if (self.b_opp_aggro > 0.7 && self.health < 50)
 						thisp = thisp * 0.6;	// scary enemy, avoid
@@ -849,8 +851,8 @@ float(entity thing) priority_for_thing =
 		else if (thing.b_aiflags & AI_AMBUSH)
 			thisp = 30;
 
-		// skill 2+: map control - prefer high ground and power positions when well-armed
-		if (self.b_skill >= 2 && thisp > 0)
+		// skill 1+: map control - prefer high ground and power positions when well-armed
+		if (self.b_skill >= 1 && thisp > 0)
 		{
 			if ((self.items & 32) && self.ammo_rockets >= 3) // have RL + ammo
 			{

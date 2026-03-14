@@ -115,8 +115,9 @@ void() bot_combat_strafe =
 				self.b_strafe_dir = self.b_strafe_dir * -1;
 			self.b_strafe_time = time + strafe_interval;
 		}
-		// skill 2+: occasional quick fake (short strafe then switch)
-		else if (self.b_skill >= 2 && random() < 0.2)
+		// skill 1+: occasional quick fake (short strafe then switch)
+		// skill 1: 10% chance, skill 2+: 20% chance
+		else if (self.b_skill >= 1 && random() < (0.1 + 0.1 * (self.b_skill >= 2)))
 		{
 			self.b_strafe_dir = self.b_strafe_dir * -1;
 			self.b_strafe_time = time + 0.15 + random() * 0.15;
@@ -534,8 +535,8 @@ void() bot_fight_style =
 		return;
 	}
 
-	// --- skill 0-1: classic binary fight/retreat ---
-	if (self.b_skill < 2)
+	// --- skill 0: classic binary fight/retreat ---
+	if (self.b_skill < 1)
 	{
 		foesz = bot_size_player(self.enemy);
 		mysz = bot_size_player(self) + 5;
@@ -568,7 +569,7 @@ void() bot_fight_style =
 		return;
 	}
 
-	// --- skill 2+: utility-scored state machine ---
+	// --- skill 1+: utility-scored state machine ---
 
 	u_fight = bot_util_fight();
 	u_retreat = bot_util_retreat();
@@ -596,15 +597,18 @@ void() bot_fight_style =
 	}
 
 	// hysteresis: require margin to switch states (prevents jitter)
-	// human emulation: higher margin for skill 2 = more commitment to decisions
+	// human emulation: higher margin = more commitment to decisions
 	// skill 3: 10-point margin, 0.5s commitment (crisp reactions)
 	// skill 2: 15-point margin, 0.8s commitment (slight tunnel vision)
+	// skill 1: 20-point margin, 1.2s commitment (commits hard to decisions)
 	if (new_state != self.b_combat_state)
 	{
 		if (self.b_skill >= 3)
 		{	hyst_margin = 10; hyst_time = 0.5; }
-		else
+		else if (self.b_skill >= 2)
 		{	hyst_margin = 15; hyst_time = 0.8; }
+		else
+		{	hyst_margin = 20; hyst_time = 1.2; }
 
 		if (self.b_combat_state == CSTATE_FIGHT)
 			cur_score = u_fight;

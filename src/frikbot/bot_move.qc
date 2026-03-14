@@ -578,7 +578,7 @@ void() bot_bhop =
 	}
 	else
 	{
-		if (self.b_skill < 2)
+		if (self.b_skill < 1)
 			return;
 	}
 
@@ -624,17 +624,19 @@ void() bot_bhop =
 		}
 
 		// start a bhop chain if moving fast enough
-		// skill 3: initiates aggressively, skill 2: needs near-max run speed
+		// skill 3: initiates aggressively, skill 1-2: needs near-max run speed
 		if ((self.b_skill >= 3 && spd > 150) || spd > 280)
 		{
 			bot_jump();
 			self.b_bhop_land = 1;
 			// set fumble rate for this chain based on skill
-			// skill 2: 15% miss chance, skill 3: 5%
+			// skill 1: 25%, skill 2: 15%, skill 3: 5%
 			if (self.b_skill >= 3)
 				self.b_bhop_fumble = 0.05;
-			else
+			else if (self.b_skill >= 2)
 				self.b_bhop_fumble = 0.15;
+			else
+				self.b_bhop_fumble = 0.25;
 		}
 	}
 	else if (self.b_bhop_land)

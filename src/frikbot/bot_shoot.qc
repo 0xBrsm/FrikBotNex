@@ -97,8 +97,8 @@ float(float wep, float brange) bot_weapon_score =
 			score = score - 20;
 	}
 
-	// skill 2+ considerations
-	if (self.b_skill >= 2)
+	// skill 1+ considerations: environment-aware weapon scoring
+	if (self.b_skill >= 1)
 	{
 		// wall proximity bonus for splash weapons
 		if (wep == 32 || wep == 16)
@@ -146,7 +146,7 @@ float(float wep, float brange) bot_weapon_score =
 	}
 
 	// opponent model weapon adjustments (skill 2+)
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		// counter-pick: if enemy has RL/LG and is aggressive, prefer LG for hitscan
 		if ((self.b_opp_weapon == 32) && self.b_opp_aggro > 0.6)

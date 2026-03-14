@@ -73,7 +73,7 @@ void() bot_opp_model_update =
 	local float dist, blend, delta_hp;
 	local vector v;
 
-	if (self.b_skill < 2)
+	if (self.b_skill < 1)
 		return;
 	if (!self.enemy)
 		return;
@@ -92,11 +92,13 @@ void() bot_opp_model_update =
 		return;
 
 	// exponential moving average blend factor
-	// quick adaptation for skill 3, slower for skill 2
+	// quick adaptation for skill 3, slower for lower skills
 	if (self.b_skill >= 3)
 		blend = 0.3;
-	else
+	else if (self.b_skill >= 2)
 		blend = 0.15;
+	else
+		blend = 0.08;
 
 	// track weapon changes
 	self.b_opp_weapon = self.enemy.weapon;
@@ -300,7 +302,7 @@ float() bot_util_fight =
 		score = score - 8;
 
 	// opponent model: passive enemy is easier to fight
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro < 0.3)
 			score = score + 8;	// they're running, press advantage
@@ -317,7 +319,7 @@ float() bot_util_fight =
 	}
 
 	// splash weapons at mid-range with no wall angle: flanking would be better
-	if (self.b_skill >= 2 && (self.weapon == 32 || self.weapon == 16))
+	if (self.b_skill >= 1 && (self.weapon == 32 || self.weapon == 16))
 	{
 		fdist = vlen(self.enemy.origin - self.origin);
 		if (fdist > 200 && fdist < 600 && !bot_enemy_near_wall())
@@ -372,7 +374,7 @@ float() bot_util_retreat =
 		score = score - 20;
 
 	// opponent model: aggressive enemy is scarier
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro > 0.7)
 			score = score + 10;
@@ -434,7 +436,7 @@ float() bot_util_pressure =
 		score = score - 15;
 
 	// opponent model: passive enemy is easier to pressure
-	if (self.b_skill >= 2 && self.b_opp_ent == self.enemy)
+	if (self.b_skill >= 1 && self.b_opp_ent == self.enemy)
 	{
 		if (self.b_opp_aggro < 0.3)
 			score = score + 12;
