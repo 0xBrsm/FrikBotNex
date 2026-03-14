@@ -431,7 +431,13 @@ void() bot_sense_visibility =
 			if (trace_ent.classname == "player")
 			{
 				if ((trace_ent.team == self.team && teamplay) || coop)
-					self.sense_friendly_block = TRUE;
+				{
+					// only block if teammate is between us and enemy
+					if (vlen(trace_endpos - spot1) < self.sense_enemy_dist)
+						self.sense_friendly_block = TRUE;
+					else
+						self.sense_friendly_block = FALSE;
+				}
 				else
 					self.sense_friendly_block = FALSE;
 			}
@@ -466,11 +472,19 @@ Traces: 8 (new capability)
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
+float(float dir_yaw, float dist, float goal_yaw) score_nav_dir =
+{
+	local float ang_diff, score;
+	ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
+	score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
+	return score;
+};
+
 void() bot_sense_local_nav =
 {
 	local vector start, dir;
-	local float total_dist, best_score, goal_yaw, dir_yaw;
-	local float score, dist, ang_diff;
+	local float total_dist, best_score, goal_yaw;
+	local float score, dist;
 	local vector goal_dir;
 
 	start = self.origin;
@@ -537,61 +551,37 @@ void() bot_sense_local_nav =
 			// score each of the 8 directions:
 			// weighted combination of (a) alignment with goal and (b) clearance
 
-			// N = yaw 90
-			dir_yaw = 90;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_n;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(90, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 90; }
 
-			// NE = yaw 45
-			dir_yaw = 45;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_ne;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(45, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 45; }
 
-			// E = yaw 0
-			dir_yaw = 0;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_e;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(0, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 0; }
 
-			// SE = yaw 315
-			dir_yaw = 315;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_se;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(315, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 315; }
 
-			// S = yaw 270
-			dir_yaw = 270;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_s;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(270, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 270; }
 
-			// SW = yaw 225
-			dir_yaw = 225;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_sw;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(225, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 225; }
 
-			// W = yaw 180
-			dir_yaw = 180;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_w;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(180, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 180; }
 
-			// NW = yaw 135
-			dir_yaw = 135;
-			ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
 			dist = self.sense_nav_nw;
-			score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = dir_yaw; }
+			score = score_nav_dir(135, dist, goal_yaw);
+			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 135; }
 		}
 	}
 };

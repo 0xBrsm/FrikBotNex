@@ -87,7 +87,7 @@ def parse_way_file(filepath):
     files_to_process = [filepath]
     while files_to_process:
         current = files_to_process.pop(0)
-        with open(current, 'r', errors='replace') as f:
+        with open(current, 'r', encoding='utf-8', errors='replace') as f:
             lines = f.readlines()
         exec_refs = parse_way_lines(lines, waypoints, state)
 
@@ -159,7 +159,7 @@ def convert_file(way_path, output_dir):
     qc_source = waypoints_to_qc(waypoints, mapname)
     output_path = os.path.join(output_dir, qc_filename)
 
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         f.write(qc_source)
 
     print(f"  {os.path.basename(way_path)} -> {qc_filename} ({len(waypoints)} waypoints)")

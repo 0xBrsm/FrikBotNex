@@ -48,7 +48,7 @@ float bytecounter, filecount;
 void(entity way, float flag) bot_toggle_aiflag =
 {
 	if (way.b_aiflags & flag)
-		way.b_aiflags = way.b_aiflags - (way.b_aiflags & flag);
+		way.b_aiflags = way.b_aiflags - flag;
 	else
 		way.b_aiflags = way.b_aiflags | flag;
 };

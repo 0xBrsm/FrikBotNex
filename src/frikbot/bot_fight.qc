@@ -453,7 +453,9 @@ void() bot_fight_style =
 	if (bot_in_weapon_range(foedist, v))
 	{
 		// skip shot if teammate is in the way (from sense cache)
-		if (!self.sense_friendly_block)
+		// also check for obstacles between us and enemy — don't shoot into walls
+		// (splash weapons cause self-damage, hitscan is wasted)
+		if (!self.sense_friendly_block && self.sense_fwd_wall_dist >= foedist)
 			bot_shoot();
 
 		// --- RL->LG combo: initiate phase ---
