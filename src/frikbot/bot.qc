@@ -148,6 +148,7 @@ for all variables in the bot...
 .float b_ambush_time;
 .float b_bhop_land;
 .float b_wall_near, b_wall_time;
+.float obs_time;		// when AI_OBSTRUCTED was first set (corner commitment)
 .float b_wepswitch_time;
 .float b_combo_time;		// RL->LG combo: when to switch to LG (0 = inactive)
 .vector b_death1, b_death2, b_death3;

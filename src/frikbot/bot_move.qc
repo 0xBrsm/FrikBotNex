@@ -159,12 +159,11 @@ manuever around.
 
 void(vector whichway, float danger) frik_obstructed =
 {
-	local float dist;
+	local float dist, stuck_time;
 	local vector disway, org;
-// TODO: something
+
 	if (self.b_aiflags & AI_BLIND)
 		return;
-	org = realorigin(self.target1);
 
 	if (danger)
 	{
@@ -174,28 +173,45 @@ void(vector whichway, float danger) frik_obstructed =
 	if (self.b_aiflags & AI_PRECISION)
 		return;
 
+	if (self.b_aiflags & AI_OBSTRUCTED)
+	{
+		stuck_time = time - self.obs_time;
+
+		// commitment window: don't reset dodge direction too quickly
+		// this prevents corner oscillation where hitting alternating
+		// walls causes the bot to flip direction every frame
+		if (stuck_time < 0.4)
+		{
+			// within commitment — only upgrade to danger, keep direction
+			if (danger && !(self.b_aiflags & AI_DANGER))
+				self.b_aiflags = self.b_aiflags | AI_DANGER;
+			return;
+		}
+
+		// stuck too long (>0.8s) — try the other side
+		if (stuck_time > 0.8)
+		{
+			self.wallhug = !self.wallhug;
+			self.obs_time = time;
+			return;
+		}
+
+		// between 0.4-0.8s: allow fresh direction calculation below
+	}
+
+	// compute dodge direction (left or right of obstacle)
+	self.obs_dir = whichway;
+	self.obs_time = time;
 
 	if (self.target1)
 	{
-		if (self.b_aiflags & AI_OBSTRUCTED)
-		{
-			if (!(self.b_aiflags & AI_DANGER))
-			{
-				self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
-				return;
-			}
-			else if (!danger)
-				return;
-		}
-		self.obs_dir = whichway;
+		org = realorigin(self.target1);
 		disway_x = whichway_y * -1;
 		disway_y = whichway_x;
 		dist = vlen(org - (self.origin + disway));
 		disway_x = whichway_y;
 		disway_y = whichway_x * -1;
 		self.wallhug = vlen(org - (self.origin + disway)) > dist;
-		self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
-		
 	}
 	else
 	{
@@ -205,10 +221,9 @@ void(vector whichway, float danger) frik_obstructed =
 		disway_x = whichway_y;
 		disway_y = whichway_x * -1;
 		self.wallhug = vlen(disway - self.obs_dir) < dist;
-		self.obs_dir = whichway;
-
-		self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
 	}
+
+	self.b_aiflags = self.b_aiflags | AI_OBSTRUCTED;
 };
 
 /*
@@ -432,20 +447,18 @@ void() frik_dodge_obstruction =
 		return;
 	if ((self.b_aiflags & (AI_BLIND | AI_PRECISION)) || !(self.flags & FL_ONGROUND))
 	{
-		self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
+		self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
 		return;
 	}
 
 	// perform a walkmove check to see if the obs_dir is still obstructed
-	// walkmove is less forgiving than frik_obstacles, so I dunno 
-	// how well this will work
 
 	oflags = self.flags;
 	org = self.origin;
 
 	yaw = vectoyaw(self.obs_dir);
 	if (walkmove(yaw, 32))
-		self.b_aiflags = self.b_aiflags - AI_OBSTRUCTED;
+		self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
 	else
 	{
 		if (self.b_aiflags & AI_DANGER)
@@ -648,13 +661,37 @@ void() frik_movetogoal =
 
 	// local navigation: when obstructed and sense nav has a viable direction,
 	// override movement keys to route around the obstacle spatially
-	if (self.b_aiflags & AI_OBSTRUCTED && self.sense_nav_best_dir >= 0)
+	if (self.b_aiflags & AI_OBSTRUCTED)
 	{
 		local vector nav_dir;
-		makevectors('0 1 0' * self.sense_nav_best_dir);
-		nav_dir = v_forward;
-		nav_dir_z = 0;
-		self.keys = (self.keys & 960) | frik_KeysForDir(nav_dir);
+		local float nav_yaw, stuck_dur;
+		local float best_clear, clear;
+
+		stuck_dur = time - self.obs_time;
+		nav_yaw = -1;
+
+		if (stuck_dur > 1.0)
+		{
+			// stuck too long — ignore goal, pick most open direction
+			best_clear = self.sense_nav_n; nav_yaw = 90;
+			clear = self.sense_nav_ne; if (clear > best_clear) { best_clear = clear; nav_yaw = 45; }
+			clear = self.sense_nav_e; if (clear > best_clear) { best_clear = clear; nav_yaw = 0; }
+			clear = self.sense_nav_se; if (clear > best_clear) { best_clear = clear; nav_yaw = 315; }
+			clear = self.sense_nav_s; if (clear > best_clear) { best_clear = clear; nav_yaw = 270; }
+			clear = self.sense_nav_sw; if (clear > best_clear) { best_clear = clear; nav_yaw = 225; }
+			clear = self.sense_nav_w; if (clear > best_clear) { best_clear = clear; nav_yaw = 180; }
+			clear = self.sense_nav_nw; if (clear > best_clear) { best_clear = clear; nav_yaw = 135; }
+		}
+		else if (self.sense_nav_best_dir >= 0)
+			nav_yaw = self.sense_nav_best_dir;
+
+		if (nav_yaw >= 0)
+		{
+			makevectors('0 1 0' * nav_yaw);
+			nav_dir = v_forward;
+			nav_dir_z = 0;
+			self.keys = (self.keys & 960) | frik_KeysForDir(nav_dir);
+		}
 	}
 
 	if (self.b_aiflags & AI_PRECISION)
