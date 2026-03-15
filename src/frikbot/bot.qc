@@ -326,6 +326,7 @@ void()				frik_obstacles;
 float(float flag)			frik_recognize_plat;
 float(vector sdir)		frik_KeysForDir;
 void(vector whichway, float danger) frik_obstructed;
+void()				frik_dodge_obstruction;
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;

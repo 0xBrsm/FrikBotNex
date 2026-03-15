@@ -498,8 +498,8 @@ I have no idea how well it will work
 
 void() frik_dodge_obstruction =
 {
-	local vector way, org;
-	local float oflags, yaw;
+	local vector way, org, estart;
+	local float oflags, yaw, econts, cleared;
 
 	if (!(self.b_aiflags & AI_OBSTRUCTED))
 		return;
@@ -515,7 +515,29 @@ void() frik_dodge_obstruction =
 	org = self.origin;
 
 	yaw = vectoyaw(self.obs_dir);
+	cleared = FALSE;
 	if (walkmove(yaw, 32))
+	{
+		// walkmove detects solid walls but NOT edges/dropoffs
+		// probe for dropoff in the obstruction direction before clearing
+		estart = org + self.obs_dir * 16;
+		estart_z = org_z + self.mins_z;
+		traceline(estart, estart - '0 0 34', TRUE, self);
+
+		if (trace_fraction == 1)
+			econts = CONTENT_EMPTY;
+		else
+			econts = pointcontents(trace_endpos + '0 0 4');
+
+		if ((trace_fraction == 1 || econts < -3) && !bot_wants_to_drop())
+		{
+			// edge or hazard still in obs_dir — keep obstructed
+		}
+		else
+			cleared = TRUE;
+	}
+
+	if (cleared)
 		self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
 	else
 	{
@@ -583,7 +605,8 @@ void() bot_bhop =
 	}
 	else
 	{
-		if (self.b_skill < 1)
+		// balanced: standard skill 2+ threshold
+		if (self.b_skill < 2)
 			return;
 	}
 

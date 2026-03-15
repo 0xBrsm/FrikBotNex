@@ -274,6 +274,7 @@ float() bot_util_fight =
 
 	mysz = self.sense_my_size;
 	foesz = self.sense_enemy_size;
+	if (foesz < 1) foesz = 1;	// guard: sense data may lag enemy acquisition by 1 frame
 
 	// health+armor ratio
 	health_ratio = mysz / foesz;
@@ -344,6 +345,7 @@ float() bot_util_retreat =
 
 	mysz = self.sense_my_size;
 	foesz = self.sense_enemy_size;
+	if (foesz < 1) foesz = 1;
 
 	health_ratio = mysz / foesz;
 	if (health_ratio < 0.4)

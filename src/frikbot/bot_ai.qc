@@ -1434,9 +1434,10 @@ void() BotAI =
                 		self.route_failed = 0;
                 	}
                         else if(!begin_route())
-                        {	
+                        {
                                 bot_look_for_crap(FALSE);
-                                self.keys = 0;
+                                if (!self.target1)
+                                	frik_bot_roam();
                         }
 			
                 }

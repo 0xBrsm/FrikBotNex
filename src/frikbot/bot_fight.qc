@@ -387,6 +387,8 @@ void() bot_fight_style =
 	local float u_fight, u_retreat, u_pressure, u_flank, u_best;
 	local float new_state, cur_score, hyst_margin, hyst_time;
 
+	local float has_los;
+
 	// --- enemy validity ---
 	if (self.enemy.health <= 0)
 	{
@@ -406,6 +408,7 @@ void() bot_fight_style =
 		{
 			// lost LOS briefly — keep fighting but don't shoot
 			// movement states continue (retreat, strafe, etc.)
+			has_los = FALSE;
 		}
 		else
 		{
@@ -417,6 +420,7 @@ void() bot_fight_style =
 	{
 		// have LOS — update timestamp
 		self.b_los_time = time;
+		has_los = TRUE;
 	}
 
 	// --- update opponent model ---
@@ -443,9 +447,9 @@ void() bot_fight_style =
 			// haven't switched yet — force LG
 			self.impulse = 8;
 		}
-		else
+		else if (has_los)
 		{
-			// LG is active — shoot it, combo is running
+			// LG is active and have LOS — shoot it, combo is running
 			bot_shoot();
 		}
 	}
@@ -455,7 +459,8 @@ void() bot_fight_style =
 		// skip shot if teammate is in the way (from sense cache)
 		// also check for obstacles between us and enemy — don't shoot into walls
 		// (splash weapons cause self-damage, hitscan is wasted)
-		if (!self.sense_friendly_block && self.sense_fwd_wall_dist >= foedist)
+		// suppress during LOS grace period to avoid shooting through walls
+		if (has_los && !self.sense_friendly_block && self.sense_fwd_wall_dist >= foedist)
 			bot_shoot();
 
 		// --- RL->LG combo: initiate phase ---
@@ -509,12 +514,17 @@ void() bot_fight_style =
 			if (self.b_skill >= 1)
 			{
 				bot_weapon_switch(foedist);
-				if (bot_in_weapon_range(foedist, v))
+				if (has_los && bot_in_weapon_range(foedist, v))
 					bot_shoot();
 			}
 			return;
 		}
-		self.keys = self.keys & 960;
+		// obstructed in combat: try to clear the block so the bot
+		// doesn't freeze in place until the enemy leaves
+		if ((self.b_aiflags & AI_OBSTRUCTED) && !(self.b_aiflags & (AI_PRECISION | AI_BLIND)))
+			frik_dodge_obstruction();
+		else
+			self.keys = self.keys & 960;
 		return;
 	}
 
@@ -547,6 +557,12 @@ void() bot_fight_style =
 			mysz = mysz + 40;
 		else if (self.b_personality == PERSONALITY_DEFENSIVE)
 			mysz = mysz - 30;
+
+		// hysteresis: stick with current decision when sizes are close
+		if (self.b_combat_state == CSTATE_RETREAT)
+			foesz = foesz - 15;	// must seem clearly weaker to re-engage
+		else if (self.b_combat_state == CSTATE_FIGHT)
+			foesz = foesz + 15;	// must seem clearly stronger to retreat
 
 		if (foesz > mysz)
 		{
@@ -598,12 +614,11 @@ void() bot_fight_style =
 		new_state = CSTATE_FLANK;
 	}
 
-	// hysteresis: require margin to switch states (prevents jitter)
-	// human emulation: higher margin = more commitment to decisions
-	// skill 3: 10-point margin, 0.5s commitment (crisp reactions)
-	// skill 2: 15-point margin, 0.8s commitment (slight tunnel vision)
-	// skill 1: 20-point margin, 1.2s commitment (commits hard to decisions)
-	if (new_state != self.b_combat_state)
+	// hysteresis: two-tier commitment prevents state thrashing
+	// tier 1 (commitment window): only switch on overwhelming advantage (2x margin)
+	// tier 2 (after window): still require normal margin to switch
+	// without tier 2, scores that fluctuate by 1-2 points cause frame-by-frame thrashing
+	if (new_state != self.b_combat_state && self.b_combat_state != CSTATE_NONE)
 	{
 		if (self.b_skill >= 3)
 		{	hyst_margin = 10; hyst_time = 0.5; }
@@ -618,13 +633,21 @@ void() bot_fight_style =
 			cur_score = u_retreat;
 		else if (self.b_combat_state == CSTATE_PRESSURE)
 			cur_score = u_pressure;
-		else if (self.b_combat_state == CSTATE_FLANK)
-			cur_score = u_flank;
 		else
-			cur_score = 0;
+			cur_score = u_flank;
 
-		if (u_best < cur_score + hyst_margin && (time - self.b_combat_time) < hyst_time)
-			new_state = self.b_combat_state;	// keep current state
+		if ((time - self.b_combat_time) < hyst_time)
+		{
+			// commitment window: only switch if overwhelming advantage
+			if (u_best < cur_score + hyst_margin * 2)
+				new_state = self.b_combat_state;
+		}
+		else
+		{
+			// after window: still require margin to switch
+			if (u_best < cur_score + hyst_margin)
+				new_state = self.b_combat_state;
+		}
 	}
 
 	// state transition
@@ -646,9 +669,10 @@ void() bot_fight_style =
 			bot_start_topic(5);
 			self.b_chattime = 1;
 		}
-		// always shoot while retreating at skill 2+
+		// always shoot while retreating at skill 2+ (if we have LOS)
 		bot_weapon_switch(foedist);
-		bot_shoot();
+		if (has_los)
+			bot_shoot();
 	}
 	else if (self.b_combat_state == CSTATE_PRESSURE)
 	{
