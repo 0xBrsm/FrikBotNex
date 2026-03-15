@@ -329,7 +329,6 @@ void()				frik_obstacles;
 float(float flag)			frik_recognize_plat;
 float(vector sdir)		frik_KeysForDir;
 void(vector whichway, float danger) frik_obstructed;
-void()				frik_dodge_obstruction;
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;
@@ -352,45 +351,36 @@ float(float v)			frik_anglemod;
 void() bot_chat;
 void(float tpic) bot_start_topic;
 
-// bot_think.qc — opponent modeling, team coordination, utility scoring, threat assessment
+// bot_fight.qc — combat, weapons, enemy detection
 void() bot_opp_model_update;
 void() bot_opp_model_reset;
-float(entity foe) bot_team_fighting_enemy;
 entity() bot_nearest_teammate;
-float(entity foe) bot_teammate_retreating_from;
-float() bot_util_fight;
-float() bot_util_retreat;
-float() bot_util_pressure;
-float() bot_util_flank;
+float(entity foe) bot_team_fighting_enemy;
 float(entity e) bot_size_player;
-void() bot_dodge_stuff;
 vector(float wep) weapon_range;
 float() bot_enemy_near_wall;
-
-// bot_shoot.qc — weapon scoring, switching, shooting
 float(float wep, float brange) bot_weapon_score;
 void(float brange) bot_weapon_switch;
 void() bot_shoot;
-
-// bot_fight.qc — combat movement and state machine
+void() bot_dodge_stuff;
+void() bot_fight_style;
 void() bot_combat_strafe;
 void() bot_retreat;
-void() bot_pressure_move;
-void() bot_flank_move;
-void() bot_fight_style;
+void() bot_drop_enemy;
+
+// bot_goal.qc — want-based goal system
+float(entity thing) bot_want;
+void(float scope) bot_pick_goal;
+
+// bot_ai.qc — priority pipeline + main AI loop
+float() bot_ai_survival;
+float() bot_ai_unstuck;
+float() bot_ai_combat;
+float() bot_ai_navigate;
+void() bot_ai_idle;
+void() bot_handle_ai;
+void() bot_path;
 void(float scope) bot_look_for_crap;
-
-// bot_tier.qc — priority pipeline
-float()				bot_tier_survival;
-float()				bot_tier_unstuck;
-float()				bot_tier_combat;
-float()				bot_tier_navigate;
-void()				bot_tier_idle;
-
-// editor stuffs
-
-void()				bot_way_edit;
-void()				bot_menu_display;
 
 
 // ----------Commands---------
@@ -807,8 +797,7 @@ float () BotPostFrame =
 	if (self.ishuman)
 	{
 
-		if (waypoint_mode > WM_LOADED)
-			bot_menu_display();
+		// editor display removed (bot_ed.qc not compiled)
 
 		BotImpulses();
 
@@ -1398,8 +1387,7 @@ void() BotImpulses =
 		KickABot();
 	else if (self.impulse == 103)
 		botcam_u();
-	else if (self.impulse == 104)
-		bot_way_edit();
+	// impulse 104 (waypoint editor) removed — bot_ed.qc not compiled
 	else
 		return;
 

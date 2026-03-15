@@ -18,7 +18,7 @@ NO EVENT WILL RYAN "FRIKAC" SMITH BE LIABLE FOR ANY
 GENERAL, CONSEQUENTIAL, INDIRECT, INCIDENTAL,
 EXEMPLARY, OR SPECIAL DAMAGES, EVEN IF RYAN "FRIKAC"
 SMITH HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
-DAMAGES, IRRESPECTIVE OF THE CAUSE OF SUCH DAMAGES. 
+DAMAGES, IRRESPECTIVE OF THE CAUSE OF SUCH DAMAGES.
 
 You accept this software on the condition that you
 indemnify and hold harmless Ryan "FrikaC" Smith from
@@ -26,7 +26,7 @@ any and all liability or damages to third parties,
 including attorney fees, court costs, and other
 related costs and expenses, arising out of your use
 of this software irrespective of the cause of said
-liability. 
+liability.
 
 The export from the United States or the subsequent
 reexport of this software is subject to compliance
@@ -35,289 +35,28 @@ control restrictions. You agree that in the event you
 seek to export this software, you assume full
 responsibility for obtaining all necessary export
 licenses and approvals and for assuring compliance
-with applicable reexport restrictions. 
+with applicable reexport restrictions.
 
 Any reproduction of this software must contain
-this notice in its entirety. 
+this notice in its entirety.
 
 */
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-target_onstack
+Priority pipeline: one brain, one decision per frame.
+Each tier either claims self.keys (returns TRUE) or
+passes down. Only one tier writes movement per frame.
 
-checks to see if an entity is on the bot's stack
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float(entity scot) target_onstack =
-{
-	if (scot == world)
-		return FALSE;
-	else if (self.target1 == scot)
-		return 1;
-	else if (self.target2 == scot)
-		return 2;
-	else if (self.target3 == scot)
-		return 3;
-	else if (self.target4 == scot)
-		return 4;
-	else
-		return FALSE;
-};
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-target_add
-
-adds a new entity to the stack, since it's a
-LIFO stack, this will be the bot's new target1
+P1: Survival  -- lava, void, drowning. NOT optional.
+P2: Unstuck   -- wall/corner escape
+P3: Combat    -- let bot_fight_style handle it
+P4: Navigate  -- waypoints, items, doors, trains
+P5: Idle      -- roaming, jumping, eavesdropping
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
-
-void(entity ent) target_add =
-{
-	if (ent == world)
-		return;
-	if (target_onstack(ent))
-		return;
-	self.target4 = self.target3;
-	self.target3 = self.target2;
-	self.target2 = self.target1;
-	self.target1 = ent;
-	self.search_time = time + 5;
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-target_drop
-
-Removes an entity from the bot's target stack.
-The stack will empty everything up to the object
-So if you have target2 item_health, target1
-waypoint, and you drop the health, the waypoint
-is gone too.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void(entity ent) target_drop =
-{
-	local float tg;
-	
-	tg = target_onstack(ent);
-	if (tg == 1)
-	{
-		self.target1 = self.target2;
-		self.target2 = self.target3;
-		self.target3 = self.target4;
-		self.target4 = world;
-	}
-	else if (tg == 2)
-	{
-		self.target1 = self.target3;
-		self.target2 = self.target4;
-		self.target3 = self.target4 = world;
-	}
-	else if (tg == 3)
-	{
-		self.target1 = self.target4;
-		self.target2 = self.target3 = self.target4 = world;
-	}
-	else if (tg == 4)
-		self.target1 = self.target2 = self.target3 = self.target4 = world;
-	self.search_time = time + 5;
-};
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_lost
-
-Bot has lost its target.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void(entity targ, float success) bot_lost =
-{
-	if (!targ)
-		return;
-
-	target_drop(targ);
-	if (targ.classname == "waypoint")
-		targ.b_sound = targ.b_sound - (targ.b_sound & ClientBitFlag(self.b_clientno));
-
-	// find a new route
-	if (!success)
-	{
-		self.target1 = self.target2 = self.target3 = self.target4 = world;
-		self.last_way = FindWayPoint(self.current_way);
-		ClearMyRoute();
-		self.b_aiflags = 0;
-		self.b_ambush_time = 0;
-	}
-        else
-        {
-		if (targ.classname == "item_artifact_invisibility")
-			if (self.items & IT_INVISIBILITY)
-				bot_start_topic(3);
-                
-                if (targ.flags & FL_ITEM)
-                {
-                        if (targ.model == string_null)
-                                targ._last = world;
-                        else
-                                targ._last = self;
-                }
-        }
-
-
-	// blacklist item for re-targeting, but only on successful pickup
-	// timeout losses (success=FALSE) shouldn't block re-targeting —
-	// the item is still there and the bot should try again immediately
-	if (targ.classname != "player" && success)
-		targ.search_time = time + 5;
-};
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_check_lost
-
-decide if my most immediate target should be
-removed.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-void(entity targ) bot_check_lost =
-{
-	local vector dist;
-	dist = realorigin(targ) - self.origin;
-	dist_z = 0;
-	if (targ == world)
-		return;
-
-	// waypoints and items are lost if you get close enough to them
-
-	else if (targ.flags & FL_ITEM)
-	{
-		if (vlen(targ.origin - self.origin) < 32)
-			bot_lost(targ, TRUE);
-		else if (targ.model == string_null)
-			bot_lost(targ, TRUE);
-	}
-	else if (targ.classname == "waypoint")
-	{
-		if (!(self.b_aiflags & (AI_SNIPER | AI_AMBUSH)))
-		{
-			if (self.b_aiflags & AI_RIDE_TRAIN)
-			{
-				if (vlen(targ.origin - self.origin) < 48)
-					bot_lost(targ, TRUE);
-			}
-			else if (self.b_aiflags & AI_PRECISION)
-			{
-				if (vlen(targ.origin - self.origin) < 24)
-					bot_lost(targ, TRUE);
-			}
-			else if (vlen(targ.origin - self.origin) < 32)
-				bot_lost(targ, TRUE);
-		}
-	}
-	else if (targ.classname == "temp_waypoint")
-	{
-		if (vlen(targ.origin - self.origin) < 32)
-			bot_lost(targ, TRUE);
-	}
-	else if (targ.classname == "player")
-	{
-		if (targ.health <= 0)
-			bot_lost(targ, TRUE);
-		else if ((coop) || (teamplay && targ.team == self.team))
-		{
-			if (targ.target1.classname == "player")
-			{
-				if (!targ.target1.ishuman)
-					bot_lost(targ, TRUE);
-			}
-			else if (targ.teleport_time > time)
-			{
-				// try not to telefrag teammates
-				self.keys = self.keys & 960;
-			}
-			else if (vlen(targ.origin - self.origin) < 128)
-			{
-				if (vlen(targ.origin - self.origin) < 48)
-					frik_walkmove(self.origin - targ.origin);
-				else
-				{
-					self.keys = self.keys & 960;
-					bot_start_topic(4);
-				}
-				self.search_time = time + 5; // never time out
-			}
-			else if (!fisible(targ))
-				bot_lost(targ, FALSE);	
-		}
-		else if (waypoint_mode > WM_LOADED)
-		{
-			if (vlen(targ.origin - self.origin) < 128)
-			{
-				bot_lost(targ, TRUE);	
-			}
-		}
-	}
-
-	// buttons are lost of their frame changes
-	else if (targ.classname == "func_button")
-	{
-		if (targ.frame)
-		{
-			bot_lost(targ, TRUE);
-			if (self.enemy == targ)
-				self.enemy = world;
-			//if (self.target1)
-			//	bot_get_path(self.target1, TRUE);
-				
-		}
-	}
-	// trigger_multiple style triggers are lost if their thinktime changes
-	else if ((targ.movetype == MOVETYPE_NONE) && (targ.solid == SOLID_TRIGGER))
-	{
-		if (targ.nextthink >= time)
-		{
-			bot_lost(targ, TRUE);
-			//if (self.target1)
-			//	bot_get_path(self.target1, TRUE);
-		}
-	}
-	// lose any target way above the bot's head
-	// FIXME: if the bot can fly in your mod..
-	if ((targ.origin_z - self.origin_z) > 64)
-	{
-		dist = targ.origin - self.origin;
-		dist_z = 0;
-		if (vlen(dist) < 32)
-			if (self.flags & FL_ONGROUND)
-				if(!frik_recognize_plat(FALSE))
-					bot_lost(targ, FALSE);
-	}
-	else if (targ.classname == "train")
-	{
-		if (frik_recognize_plat(FALSE))
-			bot_lost(targ, TRUE);
-	}
-	// targets are lost if the bot's search time has expired
-	if (time > self.search_time)
-		bot_lost(targ, FALSE);
-};
 
 
 /*
@@ -325,8 +64,8 @@ void(entity targ) bot_check_lost =
 
 bot_handle_ai
 
-This is a 0.10 addition. Handles any action
-based b_aiflags.
+Waypoint flag handler. Processes AI flags that
+involve movement or special actions. 0.10 addition.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -336,47 +75,40 @@ void() bot_handle_ai =
 	local entity newt;
 	local vector v;
 
-	// handle ai flags -- note, not all aiflags are handled
-	// here, just those that perform some sort of action
-
-	// wait is used by the ai to stop the bot until his search time expires / or route changes
-
+	// AI_WAIT: stop moving, keep looking pretty
 	if (self.b_aiflags & AI_WAIT)
 		self.keys = self.keys & 960;
 
-	if (self.b_aiflags & AI_DOORFLAG) // was on a door when spawned
+	// AI_DOORFLAG: door was here when waypoint spawned
+	if (self.b_aiflags & AI_DOORFLAG)
 	{
 		b_temp3 = self;
 		self = self.last_way;
-		if (!frik_recognize_plat(FALSE)) // if there is nothing there now
+		if (!frik_recognize_plat(FALSE))
 		{
-			newt = FindThing("door"); // this is likely the door responsible (crossfingers)
+			newt = FindThing("door"); // crossfingers
 			self = b_temp3;
 
 			if (self.b_aiflags & AI_DOOR_NO_OPEN)
 			{
 				if (newt.nextthink)
-					self.keys = self.keys & 960; // wait until it closes
+					self.keys = self.keys & 960;
 				else
-				{
 					bot_lost(self.last_way, FALSE);
-				}
 			}
 			else
 			{
 				if (newt.targetname)
 				{
 					newt = find(world, target, newt.targetname);
-					if (newt.health > 0) 
+					if (newt.health > 0)
 					{
 						self.enemy = newt;
 						bot_weapon_switch(1);
 					}
 					else
 					{
-					//	target_drop(self.last_way);
 						target_add(newt);
-					//	bot_get_path(newt, TRUE);
 					}
 				}
 				self.b_aiflags = self.b_aiflags - AI_DOORFLAG;
@@ -386,6 +118,7 @@ void() bot_handle_ai =
 			self = b_temp3;
 	}
 
+	// AI_JUMP: bunny hop over gap
 	if (self.b_aiflags & AI_JUMP)
 	{
 		if (self.flags & FL_ONGROUND)
@@ -394,6 +127,7 @@ void() bot_handle_ai =
 			self.b_aiflags = self.b_aiflags - AI_JUMP;
 		}
 	}
+	// AI_SUPER_JUMP: rocket jump (the fun kind)
 	else if (self.b_aiflags & AI_SUPER_JUMP)
 	{
 		if (self.weapon != 32)
@@ -409,33 +143,31 @@ void() bot_handle_ai =
 			}
 			else
 				bot_lost(self.target1, FALSE);
-			
 		}
 	}
+
+	// AI_SURFACE: swim up if underwater
 	if (self.b_aiflags & AI_SURFACE)
 	{
 		if (self.waterlevel > 2)
-  		{
+		{
 			self.keys = KEY_MOVEUP;
-			self.button2 = TRUE; // swim!
-    		}
+			self.button2 = TRUE;
+		}
 		else
 			self.b_aiflags = self.b_aiflags - AI_SURFACE;
 	}
+
+	// AI_RIDE_TRAIN: stay on the choo-choo
 	if (self.b_aiflags & AI_RIDE_TRAIN)
 	{
-		// simple, but effective
-		// this can probably be used for a lot of different
-		// things, not just trains (door elevators come to mind)
-
-		// keep search_time alive while riding
 		if (self.search_time < time + 3)
 			self.search_time = time + 3;
 
 		b_temp3 = self;
 		self = self.last_way;
 
-		if (!frik_recognize_plat(FALSE)) // if there is nothing there now
+		if (!frik_recognize_plat(FALSE))
 		{
 			self = b_temp3;
 			self.keys = self.keys & 960;
@@ -457,15 +189,16 @@ void() bot_handle_ai =
 			}
 		}
 	}
+
+	// AI_PLAT_BOTTOM: waiting for the elevator like it's Monday morning
 	if (self.b_aiflags & AI_PLAT_BOTTOM)
 	{
 		newt = FindThing("plat");
 		if (newt.state != 1)
 		{
-			// keep search_time alive while waiting for plat
 			if (self.search_time < time + 3)
 				self.search_time = time + 3;
-			v =  self.origin - realorigin(newt);
+			v = self.origin - realorigin(newt);
 			v_z = 0;
 			if (vlen(v) > 96)
 				self.keys = self.keys & 960;
@@ -475,6 +208,8 @@ void() bot_handle_ai =
 		else
 			self.b_aiflags = self.b_aiflags - AI_PLAT_BOTTOM;
 	}
+
+	// AI_DIRECTIONAL: check if we passed the waypoint
 	if (self.b_aiflags & AI_DIRECTIONAL)
 	{
 		if ((normalize(self.last_way.origin - self.origin) * self.b_dir) > 0.4)
@@ -483,20 +218,21 @@ void() bot_handle_ai =
 			bot_lost(self.target1, TRUE);
 		}
 	}
+
+	// AI_SNIPER: find a nice spot, sit down, aim carefully
 	if (self.b_aiflags & AI_SNIPER)
 	{
 		self.b_aiflags = (self.b_aiflags | AI_WAIT | AI_PRECISION) - AI_SNIPER;
-		// FIXME: Add a switch to wep command
-		// FIXME: increase delay?
 	}
+
+	// AI_AMBUSH: surprise! (or not, if they don't show up)
 	if (self.b_aiflags & AI_AMBUSH)
 	{
 		self.b_aiflags = (self.b_aiflags | AI_WAIT) - AI_AMBUSH;
 
-		// ready best weapon while waiting
 		bot_weapon_switch(-1);
 
-		// extend patience based on skill
+		// patience scales with skill
 		if (self.b_skill == 0)
 			self.search_time = time + AMBUSH_PATIENCE_SKILL0;
 		else if (self.b_skill == 1)
@@ -506,7 +242,7 @@ void() bot_handle_ai =
 		else
 			self.search_time = time + AMBUSH_PATIENCE_SKILL3;
 
-		// personality: campers are patient, aggressive bots get bored
+		// personality: campers are patient, aggressive bots get bored fast
 		if (self.b_personality == PERSONALITY_CAMPER)
 			self.search_time = self.search_time + (self.search_time - time) * 0.5;
 		else if (self.b_personality == PERSONALITY_AGGRESSIVE)
@@ -514,7 +250,7 @@ void() bot_handle_ai =
 
 		self.b_ambush_time = time;
 
-		// face the most likely approach direction (toward first linked waypoint)
+		// face the most likely approach direction
 		if (self.last_way)
 		{
 			if (self.last_way.target1 && self.last_way.target1.classname == "waypoint")
@@ -526,7 +262,6 @@ void() bot_handle_ai =
 			}
 		}
 	}
-
 };
 
 /*
@@ -534,23 +269,21 @@ void() bot_handle_ai =
 
 bot_path
 
-Bot will follow a route generated by the
-begin_route set of functions in bot_way.qc.
-This code, while it works pretty well, can get
-confused
+Follow a route generated by begin_route.
+This code works pretty well but can get confused.
+(It's been doing its best since 0.10)
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
 void() bot_path =
 {
-
 	local entity jj, tele;
 
 	bot_check_lost(self.target1);
 	if (!self.target1)
 	{
-		self.keys=0;
+		self.keys = 0;
 		return;
 	}
 	if (target_onstack(self.last_way))
@@ -559,74 +292,63 @@ void() bot_path =
 	jj = FindRoute(self.last_way);
 	if (!jj)
 	{
-		// this is an ugly hack
 		if (self.target1.current_way != self.last_way)
 		{
 			if (self.target1.classname != "temp_waypoint")
 				if (self.target1.classname != "player")
 					bot_lost(self.target1, FALSE);
 		}
-
 		return;
 	}
 
-	// update the bot's special ai features
-
-	// Readahed types are AI conditions to perform while heading to a waypoint
-	// point types are AI flags that should be executed once reaching a waypoint
-
+	// readahead from next waypoint, point flags from current
 	self.b_aiflags = (jj.b_aiflags & AI_READAHEAD_TYPES) | (self.last_way.b_aiflags & AI_POINT_TYPES);
 	target_add(jj);
 	if (self.last_way)
 	{
-		if (CheckLinked(self.last_way, jj) == 2) // waypoints are telelinked
+		if (CheckLinked(self.last_way, jj) == 2)
 		{
-			tele = FindThing("trigger_teleport"); // this is probbly the teleport responsible
+			tele = FindThing("trigger_teleport"); // probbly the right one
 			target_add(tele);
 		}
-		traceline(self.last_way.origin, jj.origin, FALSE, self); // check for blockage
-   		if (trace_fraction != 1)
+		traceline(self.last_way.origin, jj.origin, FALSE, self);
+		if (trace_fraction != 1)
 		{
-			if (trace_ent.classname == "door" && !(self.b_aiflags & AI_DOOR_NO_OPEN)) // a door blocks the way
+			if (trace_ent.classname == "door" && !(self.b_aiflags & AI_DOOR_NO_OPEN))
 			{
-				// linked doors fix
 				if (trace_ent.owner)
 					trace_ent = trace_ent.owner;
 				if ((trace_ent.health > 0) && (self.enemy == world))
 				{
 					self.enemy = trace_ent;
 					bot_weapon_switch(1);
-					self.b_aiflags = self.b_aiflags | AI_BLIND; // nick knack paddy hack
+					self.b_aiflags = self.b_aiflags | AI_BLIND;
 				}
 				else if (trace_ent.targetname)
 				{
 					tele = find(world, target, trace_ent.targetname);
-					if (tele.health > 0) 
+					if (tele.health > 0)
 					{
 						self.enemy = tele;
 						bot_weapon_switch(1);
 					}
 					else
 					{
-					//	target_drop(jj);
 						target_add(tele);
-					//	bot_get_path(tele, TRUE);
-						self.b_aiflags = self.b_aiflags | AI_BLIND; // give a bot a bone	
+						self.b_aiflags = self.b_aiflags | AI_BLIND;
 						return;
-					}					
-				}		
+					}
+				}
 			}
 			else if (trace_ent.classname == "func_wall")
 			{
-				// give up
 				bot_lost(self.target1, FALSE);
 				return;
 			}
 		}
 	}
-	// this is used for AI_DRIECTIONAL
+	// directional tracking
 	self.b_dir = normalize(jj.origin - self.last_way.origin);
-
 	self.last_way = jj;
 };
 
@@ -634,332 +356,11 @@ void() bot_path =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-Bot Priority Look. What a stupid name. This is where
-the bot finds things it wants to kill/grab.
+Bot Priority Look. What a stupid name. This is
+where the bot finds things it wants to kill/grab.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
-// priority scale
-// 0 - 10 virtually ignore
-// 10 - 30 normal item range
-// 30 - 50 bot will consider this a target worth changing course for
-// 50 - 90 bot will hunt these as vital items
-
-// *!* Make sure you add code to bot_check_lost to remove the target *!*
-
-float(entity thing) priority_for_thing =
-{
-	local float thisp, time_left, awareness, urgency;
-	local vector dv;
-	thisp = 0;
-	// This is the most executed function in the bot. Careful what you do here.
-
-	// skill 1+: anticipate item respawns by positioning near items about to reappear
-	// human emulation: imprecise timing — skill 3 arrives ~3s early,
-	// lower skills have wider windows but arrive too early or late
-	if ((thing.flags & FL_ITEM) && thing.model == string_null && self.b_skill >= 1)
-	{
-		time_left = thing.nextthink - time;
-		if (thing.nextthink > 0 && time_left > 0)
-		{
-			// skill 3: ~3s window, skill 2: ~8s, skill 1: ~12s (vague awareness)
-			if (self.b_skill >= 3)
-				awareness = 3;
-			else if (self.b_skill >= 2)
-				awareness = 8;
-			else
-				awareness = 12;
-
-			if (time_left < awareness)
-			{
-				// scale priority by how close to respawn (avoid camping forever)
-				urgency = 1.0 - (time_left / awareness);
-
-				if (thing.classname == "item_artifact_super_damage")
-					return 40 + urgency * 40;
-				else if (thing.classname == "item_artifact_invulnerability")
-					return 40 + urgency * 40;
-				else if (thing.classname == "item_artifact_invisibility")
-					return 35 + urgency * 40;
-				else if (thing.classname == "item_health")
-				{
-					if (thing.spawnflags & 2) // megahealth
-						return 30 + urgency * 35;
-				}
-				else if (thing.classname == "item_armorInv")
-					return 25 + urgency * 30;
-				else if (thing.classname == "item_armor2")
-					return 20 + urgency * 25;
-			}
-		}
-	}
-
-	if ((thing.flags & FL_ITEM) && thing.model != string_null && thing.search_time < time)
-	{
-
-		// ugly hack
-                if (thing._last != self)
-                        thisp = 20;
-		//~ ai fix start
-		if (thing.classname == "item_artifact_super_damage")
-			thisp = 10*(random()) + 55;
-		else if (thing.classname == "item_artifact_invulnerability")
-			thisp = 10*(random()) + 55;
-		else if (thing.classname == "item_artifact_invisibility")
-			thisp = 10*(random()) + 55;
-		else if (thing.classname == "item_health")
-		{
-			if (thing.spawnflags & 2)
-			{
-				// megahealth: always valuable unless already mega'd
-				if (self.health < 200)
-					thisp = 10*(random()) + 50;
-			}
-			else if (self.health <= 50)
-				thisp = 70;
-			else if (self.health <= 80)
-				thisp = 40;
-			// above 80: thisp stays 0 (or 20 from _last check) — not worth detour
-		}
-		else if (thing.classname == "weapon_rocketlauncher")
-		{
-			if (!(self.items & 32)) // IT_ROCKET_LAUNCHER
-				thisp = 60;
-		}
-		else if (thing.classname == "weapon_lightning")
-		{
-			if (!(self.items & 64)) // IT_LIGHTNING
-				thisp = 50;
-		}
-		else if (thing.classname == "weapon_grenadelauncher")
-		{
-			if (!(self.items & 16)) // IT_GRENADE_LAUNCHER
-				thisp = 45;
-		}
-		else if (thing.classname == "weapon_supernailgun")
-		{
-			if (!(self.items & 8)) // IT_SUPER_NAILGUN
-				thisp = 35;
-		}
-		else if (thing.classname == "weapon_nailgun")
-		{
-			if (!(self.items & 4)) // IT_NAILGUN 
-				thisp = 30;
-		}
-		else if (thing.classname == "weapon_supershotgun")
-		{
-			if (!(self.items & 2)) // IT_SUPER_SHOTGUN  
-				thisp = 25;
-		}
-		else if (thing.model == "progs/armor.mdl")
-		{
-			// only pick up armor that's an upgrade
-			// item_armor1 = green (100, 0.3), item_armor2 = yellow (150, 0.6), item_armorInv = red (200, 0.8)
-			if (thing.classname == "item_armorInv")
-			{
-				if (self.armortype < 0.8 || self.armorvalue < 150)
-					thisp = 60;
-			}
-			else if (thing.classname == "item_armor2")
-			{
-				if (self.armortype < 0.6 || (self.armortype == 0.6 && self.armorvalue < 100))
-					thisp = 50;
-			}
-			else if (thing.classname == "item_armor1")
-			{
-				if (self.armortype < 0.3 || (self.armortype == 0.3 && self.armorvalue < 50))
-					thisp = 30;
-			}
-		}
-		else if (thing.model == "progs/backpack.mdl")
-			thisp = 45;
-		else if (thing.classname == "item_artifact_envirosuit")
-			thisp = 30;
-
-		// skill 1+: loadout-aware adjustments
-		if (self.b_skill >= 1 && thisp > 0)
-		{
-			// weapons we already own are still worth picking up for ammo
-			if (thing.classname == "weapon_rocketlauncher" && (self.items & 32))
-			{
-				if (self.ammo_rockets < 5)
-					thisp = 40; // need rockets badly
-			}
-			else if (thing.classname == "weapon_lightning" && (self.items & 64))
-			{
-				if (self.ammo_cells < 10)
-					thisp = 35;
-			}
-			else if (thing.classname == "weapon_supernailgun" && (self.items & 8))
-			{
-				if (self.ammo_nails < 20)
-					thisp = 30;
-			}
-
-			// reduce health priority when healthy
-			if (thing.classname == "item_health" && !(thing.spawnflags & 2))
-			{
-				if (self.health >= 90)
-					thisp = thisp * 0.3;
-			}
-
-			// boost ammo backpacks when running low on primary ammo
-			if (thing.model == "progs/backpack.mdl")
-			{
-				if (self.ammo_rockets < 3 && (self.items & 32))
-					thisp = thisp + 15;
-				else if (self.ammo_cells < 5 && (self.items & 64))
-					thisp = thisp + 10;
-			}
-		}
-	}
-	//~ ai fix end
-	else if ((thing.flags & FL_MONSTER) && thing.health > 0)
-		thisp = 45;
-	else if (thing.classname == "player")
-	{ 
-		if (thing.health > 0)
-		{
-			if (thing == self)
-				return 0;
-			else
-			{
-				if (thing.items & IT_INVISIBILITY) //FIXME
-					thisp = 2;
-				else if (coop)
-				{
-					thisp = 200;
-					if (thing.target1.classname == "player")
-						if (!thing.target1.ishuman)
-							return 0;
-				}
-				else if (teamplay && thing.team == self.team)
-				{
-					thisp = 100;
-					if (thing.target1.classname == "player")
-						return 0;
-				}
-				else
-			{
-				thisp = 30;
-				// skill 1+ opponent model: de-prioritize enemies we're losing to
-				if (self.b_skill >= 1 && self.b_opp_ent == thing)
-				{
-					if (self.b_opp_aggro > 0.7 && self.health < 50)
-						thisp = thisp * 0.6;	// scary enemy, avoid
-				}
-				// team coordination: focus fire + help retreating teammates
-				if (teamplay && self.b_skill >= 1)
-				{
-					// boost priority if teammate is already fighting this enemy
-					if (bot_team_fighting_enemy(thing) >= 1)
-						thisp = thisp + 15;
-					// strong boost if teammate is retreating from this enemy
-					if (bot_teammate_retreating_from(thing))
-						thisp = thisp + 25;
-				}
-			}
-			}
-		}
-	}
-	else if (thing.classname == "waypoint")
-	{
-		if (thing.b_aiflags & AI_SNIPER)
-			thisp = 45;
-		else if (thing.b_aiflags & AI_AMBUSH)
-			thisp = 30;
-
-		// skill 1+: map control - prefer high ground and power positions when well-armed
-		if (self.b_skill >= 1 && thisp > 0)
-		{
-			if ((self.items & 32) && self.ammo_rockets >= 3) // have RL + ammo
-			{
-				// high ground bonus: waypoints above current position
-				if ((thing.origin_z - self.origin_z) > 64)
-					thisp = thisp + 10;
-
-				// extra value for sniper/ambush spots when armed
-				if (thing.b_aiflags & AI_SNIPER)
-					thisp = thisp + 10;
-				else if (thing.b_aiflags & AI_AMBUSH)
-					thisp = thisp + 8;
-			}
-		}
-	}
-	if (pointcontents(thing.origin) < -3)
-		return 0;
-
-	// personality-based priority adjustments
-	if (thisp > 0)
-	{
-		if (self.b_personality == PERSONALITY_AGGRESSIVE)
-		{
-			// aggressive: values weapons and players more, health/armor less
-			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
-				thisp = thisp + 15;
-			if (thing.flags & FL_ITEM)
-			{
-				if (thing.model == "progs/armor.mdl" || thing.classname == "item_health")
-					thisp = thisp * 0.8;
-			}
-		}
-		else if (self.b_personality == PERSONALITY_DEFENSIVE)
-		{
-			// defensive: values health and armor more, avoids players
-			if (thing.classname == "item_health" || thing.model == "progs/armor.mdl")
-				thisp = thisp + 10;
-			if (thing.classname == "player" && !(teamplay && thing.team == self.team) && !coop)
-				thisp = thisp * 0.7;
-		}
-		else if (self.b_personality == PERSONALITY_CAMPER)
-		{
-			// camper: loves ambush/sniper waypoints
-			if (thing.classname == "waypoint")
-			{
-				if (thing.b_aiflags & (AI_SNIPER | AI_AMBUSH))
-					thisp = thisp + 15;
-			}
-		}
-	}
-
-	if (thisp)
-	{
-		if (thing.current_way)
-		{
-			// check to see if it's unreachable
-			if (thing.current_way.items == -1)
-				return 0;
-			else
-				thisp = thisp + (13000 - thing.current_way.items) * 0.05;
-		}
-
-		// skill 1+: penalize areas near recent deaths (danger zones)
-		// death memory fades over 60 seconds
-		// uses squared distance (65536 = 256^2) to avoid sqrt in this hot path
-		if (self.b_skill >= 1 && self.b_death1 != '0 0 0')
-		{
-			dv = thing.origin - self.b_death1;
-			if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
-			{
-				if ((time - self.b_death_time) < 60)
-					thisp = thisp * 0.5;
-			}
-			if (self.b_death2 != '0 0 0')
-			{
-				dv = thing.origin - self.b_death2;
-				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
-					thisp = thisp * 0.7;
-			}
-			if (self.b_death3 != '0 0 0')
-			{
-				dv = thing.origin - self.b_death3;
-				if (dv_x * dv_x + dv_y * dv_y + dv_z * dv_z < 65536)
-					thisp = thisp * 0.85;
-			}
-		}
-	}
-	return thisp;
-};
 
 void(float scope) bot_look_for_crap =
 {
@@ -974,7 +375,7 @@ void(float scope) bot_look_for_crap =
 	bestp = 1;
 	while(foe)
 	{
-		thatp = priority_for_thing(foe);
+		thatp = bot_want(foe);
 		if (thatp)
 			if (!scope)
 				if (!sisible(foe))
@@ -990,7 +391,7 @@ void(float scope) bot_look_for_crap =
 	if (best == world)
 		return;
 	if (!target_onstack(best))
-	{	
+	{
 		target_add(best);
 		if (scope)
 		{
@@ -1002,13 +403,430 @@ void(float scope) bot_look_for_crap =
 
 
 /*
+==============================================
+  THE PIPELINE
+  "What should I do?" answered five ways.
+==============================================
+*/
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_ai_survival  (P1)
+
+Hazard avoidance. Drowning, lava, slime, void.
+This tier is NEVER skipped. Survival trumps all.
+
+Returns TRUE if we're dodging death.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_ai_survival =
+{
+	local vector ang;
+
+	// drowning -- need air NOW
+	if (self.waterlevel > 2)
+	{
+		if (time > (self.air_finished - 2))
+		{
+			traceline(self.origin, self.origin + '0 0 6800', TRUE, self);
+			if (trace_inopen)
+			{
+				self.keys = KEY_MOVEUP;
+				self.button2 = TRUE;
+				return TRUE;
+			}
+		}
+	}
+
+	// AI_DANGER: something scary in obs_dir, run the other way
+	if (self.b_aiflags & AI_DANGER)
+	{
+		self.keys = frik_KeysForDir('0 0 0' - self.obs_dir);
+		return TRUE;
+	}
+
+	// lava/slime directly ahead (catch it BEFORE reaching the edge)
+	if (self.sense_fwd_ground_type < -3 && self.sense_fwd_wall_dist < 64)
+	{
+		ang = self.velocity;
+		ang_z = 0;
+		if (vlen(ang) > 0.1 && !bot_wants_to_drop())
+		{
+			self.keys = frik_KeysForDir('0 0 0' - normalize(ang));
+			return TRUE;
+		}
+	}
+
+	// edge over void/hazard
+	if (self.sense_on_edge)
+	{
+		local float conts;
+		conts = self.sense_fwd_ground_type;
+		if (conts < -3 || conts == CONTENT_EMPTY)
+		{
+			if (!bot_wants_to_drop())
+			{
+				ang = self.velocity;
+				ang_z = 0;
+				if (vlen(ang) > 0.1)
+				{
+					self.keys = frik_KeysForDir('0 0 0' - normalize(ang));
+					return TRUE;
+				}
+			}
+		}
+	}
+
+	// hazard to sides (lava flanking our path)
+	if (self.sense_hazard_left || self.sense_hazard_right)
+	{
+		ang = self.velocity;
+		ang_z = 0;
+		if (vlen(ang) > 0.1)
+		{
+			local vector side;
+			ang = normalize(ang);
+			side_x = ang_y * -1;
+			side_y = ang_x;
+
+			if (self.sense_hazard_left && !self.sense_hazard_right)
+			{
+				self.keys = frik_KeysForDir(ang - side);
+				return TRUE;
+			}
+			else if (self.sense_hazard_right && !self.sense_hazard_left)
+			{
+				self.keys = frik_KeysForDir(ang + side);
+				return TRUE;
+			}
+			else
+			{
+				// hazard both sides -- corridor of doom
+				if (self.sense_fwd_ground_type < -3)
+				{
+					self.keys = frik_KeysForDir('0 0 0' - ang);
+					return TRUE;
+				}
+			}
+		}
+	}
+
+	return FALSE;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_ai_unstuck  (P2)
+
+Wall/corner escape. Only runs on ground.
+Detects zero-velocity + movement keys as
+"stuck" and tries to wiggle free.
+
+Returns TRUE if stuck and dodging.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_ai_unstuck =
+{
+	local vector ang, estart;
+	local float econts, nav_yaw, stuck_dur;
+	local float best_clear, clear;
+
+	if (!(self.flags & FL_ONGROUND))
+		return FALSE;
+
+	// check if AI_OBSTRUCTED was set by frik_obstacles
+	if (self.b_aiflags & AI_OBSTRUCTED)
+	{
+		stuck_dur = time - self.obs_time;
+
+		// try walkmove to see if obstruction cleared
+		local float oflags;
+		local vector org;
+		local float yaw;
+
+		oflags = self.flags;
+		org = self.origin;
+		yaw = vectoyaw(self.obs_dir);
+
+		if (walkmove(yaw, 32))
+		{
+			// walkmove doesn't detect edges -- check for dropoff
+			estart = org + self.obs_dir * 16;
+			estart_z = org_z + self.mins_z;
+			traceline(estart, estart - '0 0 34', TRUE, self);
+
+			if (trace_fraction == 1)
+				econts = CONTENT_EMPTY;
+			else
+				econts = pointcontents(trace_endpos + '0 0 4');
+
+			if ((trace_fraction == 1 || econts < -3) && !bot_wants_to_drop())
+			{
+				// edge still there -- keep dodging
+			}
+			else
+			{
+				// clear! obstruction gone
+				self.b_aiflags = self.b_aiflags - (self.b_aiflags & (AI_OBSTRUCTED | AI_DANGER));
+				self.origin = org;
+				self.flags = oflags;
+				return FALSE;
+			}
+		}
+
+		self.origin = org;
+		self.flags = oflags;
+
+		// still stuck -- use local nav or wallhug
+		nav_yaw = -1;
+
+		if (stuck_dur > 1.0)
+		{
+			// been stuck too long -- pick most open direction
+			best_clear = self.sense_nav_n; nav_yaw = 90;
+			clear = self.sense_nav_ne; if (clear > best_clear) { best_clear = clear; nav_yaw = 45; }
+			clear = self.sense_nav_e; if (clear > best_clear) { best_clear = clear; nav_yaw = 0; }
+			clear = self.sense_nav_se; if (clear > best_clear) { best_clear = clear; nav_yaw = 315; }
+			clear = self.sense_nav_s; if (clear > best_clear) { best_clear = clear; nav_yaw = 270; }
+			clear = self.sense_nav_sw; if (clear > best_clear) { best_clear = clear; nav_yaw = 225; }
+			clear = self.sense_nav_w; if (clear > best_clear) { best_clear = clear; nav_yaw = 180; }
+			clear = self.sense_nav_nw; if (clear > best_clear) { best_clear = clear; nav_yaw = 135; }
+		}
+		else if (self.sense_nav_best_dir >= 0)
+			nav_yaw = self.sense_nav_best_dir;
+
+		if (nav_yaw >= 0)
+		{
+			makevectors('0 1 0' * nav_yaw);
+			self.keys = frik_KeysForDir(v_forward);
+		}
+		else
+		{
+			// no nav data -- wallhug dodge
+			local vector way;
+			if (self.wallhug)
+			{
+				way_x = self.obs_dir_y * -1;
+				way_y = self.obs_dir_x;
+			}
+			else
+			{
+				way_x = self.obs_dir_y;
+				way_y = self.obs_dir_x * -1;
+			}
+			self.keys = frik_KeysForDir(way);
+		}
+		return TRUE;
+	}
+
+	// wall-stuck detection: no velocity but pressing movement keys
+	ang = self.velocity;
+	ang_z = 0;
+	if (vlen(ang) < 10 && (self.keys & 60))
+	{
+		makevectors(self.v_angle);
+		ang = '0 0 0';
+		if (self.keys & KEY_MOVEFORWARD) ang = ang + v_forward;
+		if (self.keys & KEY_MOVEBACK) ang = ang - v_forward;
+		if (self.keys & KEY_MOVELEFT) ang = ang - v_right;
+		if (self.keys & KEY_MOVERIGHT) ang = ang + v_right;
+		ang_z = 0;
+		if (vlen(ang) > 0.1)
+		{
+			ang = normalize(ang);
+			traceline(self.origin, self.origin + ang * 32, TRUE, self);
+			if (trace_fraction < 1)
+			{
+				// wall in intended direction -- set up dodge for next frame
+				frik_obstructed(ang, FALSE);
+			}
+		}
+	}
+
+	return FALSE;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_ai_combat  (P3)
+
+Got an enemy? Let bot_fight_style handle it.
+Simple delegation, nothing fancy.
+
+Returns TRUE if in combat.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_ai_combat =
+{
+	if (!self.enemy)
+		return FALSE;
+
+	bot_fight_style();
+	return TRUE;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_ai_navigate  (P4)
+
+Waypoint following, item pickup, route planning.
+The "go somewhere useful" tier.
+
+Returns TRUE if navigating to a target.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float() bot_ai_navigate =
+{
+	if (self.target1)
+	{
+		frik_movetogoal();
+		bot_path();
+
+		if (self.b_aiflags)
+			bot_handle_ai();
+
+		return TRUE;
+	}
+
+	// no target -- try to find one
+	if (waypoint_mode < WM_EDITOR)
+	{
+		if (self.route_failed)
+		{
+			if (waypoint_mode == WM_DYNAMIC)
+				frik_bot_roam();
+			self.route_failed = 0;
+			return TRUE;
+		}
+		else if (!begin_route())
+		{
+			bot_pick_goal(FALSE);
+			if (self.target1)
+				return TRUE;
+		}
+		else
+			return TRUE;
+	}
+	else
+	{
+		self.b_aiflags = AI_WAIT;
+		self.keys = 0;
+		return TRUE;
+	}
+
+	return FALSE;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_ai_idle  (P5)
+
+Nothing to do. Roam around, jump for fun,
+listen for footsteps, fiddle with weapons.
+The "bored bot" tier.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() bot_ai_idle =
+{
+	local float jump_chance, snd_dist, snd_best;
+	local entity snd_foe;
+	local vector snd_view;
+
+	frik_bot_roam();
+
+	// idle weapon switching -- rare, for realism
+	if (random() < 0.2)
+		if (random() < 0.2)
+			bot_weapon_switch(-1);
+
+	// recreational jumping (personality-scaled)
+	if (self.flags & FL_ONGROUND && time > self.b_idle_jump_time)
+	{
+		if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			jump_chance = 0.25;
+		else if (self.b_personality == PERSONALITY_CAMPER)
+			jump_chance = 0.03;
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			jump_chance = 0.08;
+		else
+			jump_chance = 0.12;
+
+		if (random() < jump_chance)
+			self.button2 = TRUE;
+
+		self.b_idle_jump_time = time + 0.8 + random() * 2;
+	}
+
+	// skill 1+: pre-aim toward nearby enemy sounds
+	if (self.b_skill >= 1)
+	{
+		// hearing range scales with personality
+		if (self.b_personality == PERSONALITY_CAMPER)
+			snd_best = 1000000;
+		else if (self.b_personality == PERSONALITY_DEFENSIVE)
+			snd_best = 810000;
+		else if (self.b_personality == PERSONALITY_AGGRESSIVE)
+			snd_best = 360000;
+		else
+			snd_best = 640000;
+
+		snd_foe = player_head;
+		while (snd_foe)
+		{
+			if (snd_foe != self && snd_foe.health > 0 && snd_foe.b_sound > time)
+			{
+				if (!(teamplay && snd_foe.team == self.team) && !coop)
+				{
+					snd_view = snd_foe.origin - self.origin;
+					// squared distance (avoid sqrt in hot path)
+					snd_dist = snd_view_x * snd_view_x + snd_view_y * snd_view_y + snd_view_z * snd_view_z;
+					if (snd_dist < snd_best)
+					{
+						snd_best = snd_dist;
+						snd_view = normalize(snd_foe.origin - self.origin);
+						snd_view = vectoangles(snd_view);
+						snd_view_x = snd_view_x * -1;
+						self.b_angle = snd_view;
+					}
+				}
+			}
+			snd_foe = snd_foe._next;
+		}
+	}
+};
+
+
+/*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
 bot_angle_set
 
-Sets the bots look keys & b_angle to point at
-the target - used for fighting and just
-generally making the bot look good.
+Point the bot's face at things. Handles
+humanized aim (drift, flick, tracking error)
+for enemies and simple aim for nav targets.
+
+This is where bots stop looking like robots
+and start looking like bad players.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -1032,8 +850,7 @@ void() bot_angle_set =
 		if (self.b_aim_delay == 0)
 		{
 			self.b_aim_delay = time;
-			// initial aim offset based on skill
-			// skill 0: 25 degrees, skill 1: 15, skill 2: 8, skill 3: 3
+			// initial aim offset: skill 0 = 25 deg, skill 3 = 3 deg
 			if (self.b_skill == 0)
 				self.b_aim_offset = 25;
 			else if (self.b_skill == 1)
@@ -1043,9 +860,7 @@ void() bot_angle_set =
 			else
 				self.b_aim_offset = 3;
 
-			// human emulation: flick overshoot on target acquisition
-			// humans snap past the target then settle back
-			// generates a directional bias that decays over ~0.3s
+			// flick overshoot on target acquisition
 			if (self.b_skill >= 2)
 				self.b_aim_flick = (random() - 0.5) * 8;
 			else
@@ -1060,43 +875,26 @@ void() bot_angle_set =
 		else
 		{
 			local float levels;
-
 			levels = 3;
-
 			view = self.enemy.origin;
 			pred_vel = self.enemy.velocity;
 
-			// skill 2+ with opponent model: enhance velocity prediction
-			// for projectile weapons using behavioral tendencies
+			// skill 2+ opponent model: enhance velocity prediction
 			if (self.b_skill >= 2 && self.missile_speed < 2000
 				&& self.b_opp_ent == self.enemy)
 			{
-				// get enemy's facing direction for lateral prediction
 				foe_fwd = normalize(self.origin - self.enemy.origin);
 				foe_right_x = foe_fwd_y * -1;
 				foe_right_y = foe_fwd_x;
 				foe_right_z = 0;
 
-				// strafe tendency: blend model prediction into velocity
-				// b_opp_strafe ranges -1 to +1, scale to movement speed
 				if (self.b_opp_strafe > 0.15 || self.b_opp_strafe < -0.15)
-				{
-					// weight: 30% model, 70% current velocity
-					// this smoothly corrects for direction changes
 					pred_vel = pred_vel + foe_right * self.b_opp_strafe * 100;
-				}
 
-				// aggression: rushing enemies close distance faster
 				if (self.b_opp_aggro > 0.65)
-				{
-					// enemy is aggressive — they'll push toward us
 					pred_vel = pred_vel + foe_fwd * 40;
-				}
 				else if (self.b_opp_aggro < 0.3)
-				{
-					// enemy is retreating — they'll move away
 					pred_vel = pred_vel - foe_fwd * 30;
-				}
 			}
 
 			while (levels)
@@ -1116,11 +914,7 @@ void() bot_angle_set =
 		view = vectoangles(view);
 		view_x = view_x * -1;
 
-		// apply aim variance based on skill
-		// aim_offset converges toward a floor over time
-
-		// convergence rate: skill 3 converges in ~0.2s, skill 0 in ~1.5s
-		// decay is clamped to 0.95 to prevent sign flip at very low framerates
+		// convergence rate: skill 3 ~0.2s, skill 0 ~1.5s
 		if (self.b_skill == 0)
 			decay = real_frametime * 0.7;
 		else if (self.b_skill == 1)
@@ -1134,7 +928,6 @@ void() bot_angle_set =
 		self.b_aim_offset = self.b_aim_offset * (1 - decay);
 
 		// floor: minimum persistent jitter per skill
-		// skill 0: 6 degrees, skill 1: 3, skill 2: 1.5, skill 3: 0.5
 		if (self.b_skill == 0)
 		{	if (self.b_aim_offset < 6) self.b_aim_offset = 6; }
 		else if (self.b_skill == 1)
@@ -1144,8 +937,7 @@ void() bot_angle_set =
 		else
 		{	if (self.b_aim_offset < 0.5) self.b_aim_offset = 0.5; }
 
-		// tracking error: fast-moving enemies add offset for low skill
-		// scaled by frametime so it's frame-rate independent
+		// tracking error: fast-moving enemies wobble low-skill aim
 		espeed = vlen(self.enemy.velocity);
 		if (espeed > 200)
 		{
@@ -1157,40 +949,32 @@ void() bot_angle_set =
 				self.b_aim_offset = self.b_aim_offset + espeed * 0.001 * real_frametime * 10;
 		}
 
-		// cap aim offset to prevent wild spraying
 		if (self.b_aim_offset > 30)
 			self.b_aim_offset = 30;
 
-		// skill 3 opponent model: bias aim toward enemy strafe tendency
-		// for hitscan weapons only (projectiles use velocity prediction above)
+		// skill 3 hitscan bias toward enemy strafe tendency
 		if (self.b_skill >= 3 && self.b_opp_ent == self.enemy
 			&& self.missile_speed >= 2000)
 		{
 			if (self.b_opp_strafe > 0.2 || self.b_opp_strafe < -0.2)
-			{
 				view_y = view_y - self.b_opp_strafe * 3;
-			}
 		}
 
-		// --- human emulation: aim behavior ---
+		// --- human emulation ---
 
-		// 1. flick overshoot: decays toward 0 over ~0.3s
-		// creates the "snap past target, settle back" pattern
+		// 1. flick overshoot: snap past target, settle back
 		if (self.b_aim_flick != 0)
 		{
 			view_y = view_y + self.b_aim_flick;
-			// decay flick: fast exponential
 			self.b_aim_flick = self.b_aim_flick * (1 - real_frametime * 4);
 			if (fabs(self.b_aim_flick) < 0.3)
 				self.b_aim_flick = 0;
 		}
 
 		// 2. tracking drift: slow sine wave wobble
-		// simulates imperfect mouse tracking (humans drift off target)
 		self.b_aim_drift_phase = self.b_aim_drift_phase + real_frametime * 1.8;
 		if (self.b_aim_drift_phase > 6.28)
 			self.b_aim_drift_phase = self.b_aim_drift_phase - 6.28;
-		// compute sin via makevectors (no sin builtin in standard QuakeC)
 		makevectors(self.b_aim_drift_phase * 57.2958 * '0 1 0');
 		drift_sin = v_forward_y;
 		if (self.b_skill <= 1)
@@ -1200,9 +984,7 @@ void() bot_angle_set =
 		else
 			view_y = view_y + drift_sin * 0.4;
 
-		// 3. overcorrection: correlated jitter
-		// if last frame's error was right, this frame tends left (and vice versa)
-		// creates the "wiggle around target" look instead of random scatter
+		// 3. overcorrection: correlated jitter (wiggle around target)
 		aim_error = self.b_aim_offset;
 		view_y = view_y + (random() - 0.5) * aim_error - self.b_aim_last_yaw_err * 0.3;
 		view_x = view_x + (random() - 0.5) * aim_error;
@@ -1212,36 +994,30 @@ void() bot_angle_set =
 	}
 	else if (self.target1)
 	{
-		// no enemy - reset aim tracking
+		// no enemy -- reset aim tracking
 		self.b_aim_delay = 0;
 		self.b_aim_offset = 0;
 
 		view = realorigin(self.target1);
 		if (self.target1.flags & FL_ITEM)
-				view = view + '0 0 48';
+			view = view + '0 0 48';
 		view = view - (self.origin + self.view_ofs);
 		view = vectoangles(view);
 		view_x = view_x * -1;
 
-		// human emulation: slight yaw overshoot during navigation turns
-		// humans don't snap perfectly to new waypoint directions
+		// slight yaw overshoot during turns (humans don't snap perfectly)
 		view_y = view_y + (random() - 0.5) * 5;
 
 		// idle glance: occasionally look to one side while navigating
-		// simulates checking flanks, glancing at doorways, general awareness
 		if (self.b_idle_glance_yaw != 0)
 		{
-			// currently glancing — blend toward glance target then snap back
 			view_y = view_y + self.b_idle_glance_yaw;
-			// decay the glance over ~0.4s
 			self.b_idle_glance_yaw = self.b_idle_glance_yaw * (1 - real_frametime * 3);
 			if (fabs(self.b_idle_glance_yaw) < 2)
 				self.b_idle_glance_yaw = 0;
 		}
 		else if (time > self.b_idle_glance_time)
 		{
-			// time to maybe glance somewhere
-			// personality scaling: campers glance often, aggressive rarely
 			if (self.b_personality == PERSONALITY_CAMPER)
 			{	glance_chance = 0.4; glance_interval = 2 + random() * 3; }
 			else if (self.b_personality == PERSONALITY_DEFENSIVE)
@@ -1253,10 +1029,9 @@ void() bot_angle_set =
 
 			if (random() < glance_chance)
 			{
-				// pick a side — mostly small checks, rarely a full look-behind
 				if (random() < 0.85)
 				{
-					// normal glance: 30-70 degrees to one side
+					// normal glance: 30-70 degrees
 					if (random() < 0.5)
 						self.b_idle_glance_yaw = 30 + random() * 40;
 					else
@@ -1264,7 +1039,7 @@ void() bot_angle_set =
 				}
 				else
 				{
-					// rare check-behind: quick 130-170 degree look
+					// rare check-behind: 130-170 degrees
 					if (random() < 0.5)
 						self.b_idle_glance_yaw = 130 + random() * 40;
 					else
@@ -1283,27 +1058,25 @@ void() bot_angle_set =
 		self.b_angle_x = 0;
 	}
 
-	// apply view angles based on skill
-	// all skills now use direct angle setting (aim variance handles humanization)
-	// skill 0-1 still use keyboard look for the "sluggish" feel
+	// --- apply view angles ---
+	// skill 2+: direct angle set (aim variance handles humanization)
+	// skill 0-1: keyboard look for "sluggish" feel
 	if (self.b_skill >= 2)
 	{
 		self.keys = self.keys & 63;
 		if (self.b_skill >= 3)
 		{
-			// skill 3: direct angle set (instant snap)
 			self.v_angle = self.b_angle;
 			while (self.v_angle_x < -180)
 				self.v_angle_x = self.v_angle_x + 360;
 			while (self.v_angle_x > 180)
 				self.v_angle_x = self.v_angle_x - 360;
 		}
-		// skill 2: b_angle is set, mouse emulation in bot_phys.qc
-		// handles smooth interpolation — don't override v_angle here
+		// skill 2: b_angle set, mouse emulation in bot_phys.qc
 	}
 	else if ((self.enemy == world || self.enemy.movetype == MOVETYPE_PUSH) && self.target1.classname != "player")
 	{
-		// no combat target - instant turn (prevents falling off ledges)
+		// no combat target -- instant turn (don't walk off ledges)
 		self.keys = self.keys & 63;
 		self.v_angle = self.b_angle;
 		while (self.v_angle_x < -180)
@@ -1332,13 +1105,15 @@ void() bot_angle_set =
 	}
 };
 
+
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
 BotAI
 
-This is the main ai loop. Though called every
-frame, the ai_time limits it's actual updating
+The main event. Called every physics frame
+from bot_phys.qc. One question per frame:
+"what should I do?"
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -1346,14 +1121,10 @@ float stagger_think;
 
 void() BotAI =
 {
-	// am I dead? Fire randomly until I respawn
-	// health < 1 is used because fractional healths show up as 0 on normal player
-	// status bars, and the mod probably already compensated for that
-
+	// am I dead? mash buttons until respawn
 	if (self.health < 1)
 	{
-		// record death location once per death (skill 1+)
-		// only record if last death was more than 2s ago (new death)
+		// skill 1+: remember where we died
 		if ((time - self.b_death_time) > 2 && self.b_skill >= 1)
 		{
 			self.b_death3 = self.b_death2;
@@ -1390,8 +1161,7 @@ void() BotAI =
 		return;
 	}
 
-	// stagger the bot's AI out so they all don't think at the same time, causing game
-	// 'spikes'
+	// AI throttle: skill 0-1 only think every 0.05s (staggered)
 	if (self.b_skill < 2)
 	{
 		if (self.ai_time > time)
@@ -1410,17 +1180,17 @@ void() BotAI =
 		bot_start_topic(7);
 	stagger_think = time;
 
-	// shut the bot's buttons off, various functions will turn them on by AI end
+	// clear buttons -- subsystems turn them on as needed
 	self.button2 = 0;
 	self.button0 = 0;
 
-	// unified spatial awareness pass — compute once, read everywhere
+	// unified spatial awareness pass
 	bot_sense();
 
-	// enemy/projectile detection runs BEFORE decisions so combat tier has data
+	// enemy/projectile detection BEFORE decisions
 	bot_dodge_stuff();
 
-	// route table editing — special case, not part of pipeline
+	// route table editing -- special case, not part of pipeline
 	if (route_table == self)
 	{
 		if (busy_waypoints <= 0)
@@ -1435,13 +1205,11 @@ void() BotAI =
 	}
 
 	// --- priority pipeline: first tier to claim wins ---
-	// P1: survival (hazard/drowning), P2: unstuck (wall/corner),
-	// P3: combat, P4: navigation, P5: idle
-	if (!bot_tier_survival())
-	if (!bot_tier_unstuck())
-	if (!bot_tier_combat())
-	if (!bot_tier_navigate())
-		bot_tier_idle();
+	if (!bot_ai_survival())
+	if (!bot_ai_unstuck())
+	if (!bot_ai_combat())
+	if (!bot_ai_navigate())
+		bot_ai_idle();
 
 	bot_angle_set();
 
