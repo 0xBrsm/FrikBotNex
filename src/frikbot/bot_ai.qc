@@ -179,7 +179,10 @@ void(entity targ, float success) bot_lost =
         }
 
 
-	if (targ.classname != "player")
+	// blacklist item for re-targeting, but only on successful pickup
+	// timeout losses (success=FALSE) shouldn't block re-targeting —
+	// the item is still there and the bot should try again immediately
+	if (targ.classname != "player" && success)
 		targ.search_time = time + 5;
 };
 
@@ -707,9 +710,16 @@ float(entity thing) priority_for_thing =
 		else if (thing.classname == "item_health")
 		{
 			if (thing.spawnflags & 2)
-				thisp = 10*(random()) + 50;
+			{
+				// megahealth: always valuable unless already mega'd
+				if (self.health < 200)
+					thisp = 10*(random()) + 50;
+			}
 			else if (self.health <= 50)
 				thisp = 70;
+			else if (self.health <= 80)
+				thisp = 40;
+			// above 80: thisp stays 0 (or 20 from _last check) — not worth detour
 		}
 		else if (thing.classname == "weapon_rocketlauncher")
 		{
@@ -743,14 +753,22 @@ float(entity thing) priority_for_thing =
 		}
 		else if (thing.model == "progs/armor.mdl")
 		{
-			if (self.armorvalue < 200)
+			// only pick up armor that's an upgrade
+			// item_armor1 = green (100, 0.3), item_armor2 = yellow (150, 0.6), item_armorInv = red (200, 0.8)
+			if (thing.classname == "item_armorInv")
 			{
-				if (self.armorvalue <= 50)
+				if (self.armortype < 0.8 || self.armorvalue < 150)
 					thisp = 60;
-				else if (self.armorvalue <= 100 && thing.classname != "item_armor1")
-					thisp = 55;
-				else if (self.armorvalue <= 150 && thing.classname == "item_armorInv")
+			}
+			else if (thing.classname == "item_armor2")
+			{
+				if (self.armortype < 0.6 || (self.armortype == 0.6 && self.armorvalue < 100))
 					thisp = 50;
+			}
+			else if (thing.classname == "item_armor1")
+			{
+				if (self.armortype < 0.3 || (self.armortype == 0.3 && self.armorvalue < 50))
+					thisp = 30;
 			}
 		}
 		else if (thing.model == "progs/backpack.mdl")
@@ -1328,10 +1346,6 @@ float stagger_think;
 
 void() BotAI =
 {
-	local float jump_chance, snd_dist, snd_best;
-	local entity snd_foe;
-	local vector snd_view;
-
 	// am I dead? Fire randomly until I respawn
 	// health < 1 is used because fractional healths show up as 0 on normal player
 	// status bars, and the mod probably already compensated for that
@@ -1397,15 +1411,16 @@ void() BotAI =
 	stagger_think = time;
 
 	// shut the bot's buttons off, various functions will turn them on by AI end
-
 	self.button2 = 0;
 	self.button0 = 0;
 
 	// unified spatial awareness pass — compute once, read everywhere
 	bot_sense();
 
-	// target1 is like goalentity in normal Quake monster AI.
-	// it's the bot's most immediate target
+	// enemy/projectile detection runs BEFORE decisions so combat tier has data
+	bot_dodge_stuff();
+
+	// route table editing — special case, not part of pipeline
 	if (route_table == self)
 	{
 		if (busy_waypoints <= 0)
@@ -1415,131 +1430,21 @@ void() BotAI =
 		}
 		self.b_aiflags = 0;
 		self.keys = 0;
-	}
-	else if (self.target1)
-	{
-		frik_movetogoal();
-		bot_path();
-	}
-	else
-	{
-		if (waypoint_mode < WM_EDITOR)
-                {
-                	if(self.route_failed)
-                	{
-                		if (waypoint_mode == WM_DYNAMIC)
-                	        	frik_bot_roam();
-                	        else
-                	        	self.keys = 0;
-                		self.route_failed = 0;
-                	}
-                        else if(!begin_route())
-                        {
-                                bot_look_for_crap(FALSE);
-                                if (!self.target1)
-                                	frik_bot_roam();
-                        }
-			
-                }
-		else
-		{
-			self.b_aiflags = AI_WAIT;
-			self.keys = 0;
-		}
+		bot_angle_set();
+		return;
 	}
 
-	// bot_angle_set points the bot at it's goal (self.enemy or target1)
+	// --- priority pipeline: first tier to claim wins ---
+	// P1: survival (hazard/drowning), P2: unstuck (wall/corner),
+	// P3: combat, P4: navigation, P5: idle
+	if (!bot_tier_survival())
+	if (!bot_tier_unstuck())
+	if (!bot_tier_combat())
+	if (!bot_tier_navigate())
+		bot_tier_idle();
 
 	bot_angle_set();
 
-	// fight my enemy. Enemy is probably a field QC coders will most likely use a lot
-	// for their own needs, since it's unused on a normal player
-	// FIXME
-	if (self.enemy)
-		bot_fight_style();
-	else
-	{
-		if (random() < 0.2)
-			if (random() < 0.2)
-				bot_weapon_switch(-1);
-
-		// idle behavior: recreational jumping while navigating
-		// quake players hop around for fun, especially aggressive ones
-		if (self.target1 && self.flags & FL_ONGROUND && time > self.b_idle_jump_time)
-		{
-			if (self.b_personality == PERSONALITY_AGGRESSIVE)
-				jump_chance = 0.25;
-			else if (self.b_personality == PERSONALITY_CAMPER)
-				jump_chance = 0.03;
-			else if (self.b_personality == PERSONALITY_DEFENSIVE)
-				jump_chance = 0.08;
-			else
-				jump_chance = 0.12;
-
-			if (random() < jump_chance)
-				self.button2 = TRUE;
-
-			self.b_idle_jump_time = time + 0.8 + random() * 2;
-		}
-
-		// skill 1+: pre-aim toward nearby sounds when idle
-		if (self.b_skill >= 1)
-		{
-			// personality: campers are hyper-aware, aggressive have tunnel vision
-			// uses squared distances to avoid sqrt in this loop
-			if (self.b_personality == PERSONALITY_CAMPER)
-				snd_best = 1000000;	// 1000^2
-			else if (self.b_personality == PERSONALITY_DEFENSIVE)
-				snd_best = 810000;	// 900^2
-			else if (self.b_personality == PERSONALITY_AGGRESSIVE)
-				snd_best = 360000;	// 600^2
-			else
-				snd_best = 640000;	// 800^2
-			snd_foe = player_head;
-			while (snd_foe)
-			{
-				if (snd_foe != self && snd_foe.health > 0 && snd_foe.b_sound > time)
-				{
-					if (!(teamplay && snd_foe.team == self.team) && !coop)
-					{
-						snd_view = snd_foe.origin - self.origin;
-						snd_dist = snd_view_x * snd_view_x + snd_view_y * snd_view_y + snd_view_z * snd_view_z;
-						if (snd_dist < snd_best)
-						{
-							snd_best = snd_dist;
-							snd_view = normalize(snd_foe.origin - self.origin);
-							snd_view = vectoangles(snd_view);
-							snd_view_x = snd_view_x * -1;
-							self.b_angle = snd_view;
-						}
-					}
-				}
-				snd_foe = snd_foe._next;
-			}
-		}
-	}
-	bot_dodge_stuff();
-
-	// checks to see if bot needs to start going up for air
-	if (self.waterlevel > 2)
-  	{
-		if (time > (self.air_finished - 2))
-		{
-			traceline (self.origin, self.origin + '0 0 6800', TRUE, self);
-			if (trace_inopen)	
-			{
-				self.keys = KEY_MOVEUP;
-				self.button2 = TRUE; // swim!
-				return; // skip ai flags for now - this is life or death
-			}
-		}
-    	}
-
-	// b_aiflags handling
-
-	
-	if (self.b_aiflags)
-		bot_handle_ai(); 
-	else
-		bot_chat(); // don't want chat to screw him up if he's rjing or something
+	if (!self.b_aiflags)
+		bot_chat();
 };

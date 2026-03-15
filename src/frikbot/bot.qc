@@ -312,6 +312,9 @@ entity(vector org)		make_waypoint;
 void()				ClearAllWays;
 void()				FixWaypoints;
 float()				begin_route;
+float()				bot_wants_to_drop;
+void()				bot_path;
+void()				bot_handle_ai;
 void(entity this, float direct)			bot_get_path;
 void()				WaypointThink;
 entity(entity start)				FindWayPoint;
@@ -376,6 +379,13 @@ void() bot_pressure_move;
 void() bot_flank_move;
 void() bot_fight_style;
 void(float scope) bot_look_for_crap;
+
+// bot_tier.qc — priority pipeline
+float()				bot_tier_survival;
+float()				bot_tier_unstuck;
+float()				bot_tier_combat;
+float()				bot_tier_navigate;
+void()				bot_tier_idle;
 
 // editor stuffs
 

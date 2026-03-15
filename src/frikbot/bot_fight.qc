@@ -135,6 +135,8 @@ void() bot_combat_strafe =
 
 	if (foedist + 32 < v_x)
 		movedir = movedir + normalize(self.origin - org) * 0.5; // too close, back up
+	else if (foedist > v_x * 3)
+		movedir = normalize(org - self.origin); // way too far, charge directly
 	else if (foedist - 32 > v_x)
 		movedir = movedir + normalize(org - self.origin) * 0.5; // too far, close in
 
@@ -502,30 +504,6 @@ void() bot_fight_style =
 			bot_drop_enemy();
 			return;
 		}
-	}
-
-	// --- movement constrained by AI flags ---
-	if (self.b_aiflags & (AI_PRECISION | AI_BLIND | AI_OBSTRUCTED))
-	{
-		// constrained: simplified fight-or-retreat only
-		if (self.sense_enemy_size > self.sense_my_size + 5)
-		{
-			bot_retreat();
-			if (self.b_skill >= 1)
-			{
-				bot_weapon_switch(foedist);
-				if (has_los && bot_in_weapon_range(foedist, v))
-					bot_shoot();
-			}
-			return;
-		}
-		// obstructed in combat: try to clear the block so the bot
-		// doesn't freeze in place until the enemy leaves
-		if ((self.b_aiflags & AI_OBSTRUCTED) && !(self.b_aiflags & (AI_PRECISION | AI_BLIND)))
-			frik_dodge_obstruction();
-		else
-			self.keys = self.keys & 960;
-		return;
 	}
 
 	// --- projectile dodge takes priority over state movement ---

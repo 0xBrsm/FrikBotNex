@@ -18,6 +18,7 @@ defs.qc
 ../frikbot/bot_think.qc
 ../frikbot/bot_shoot.qc
 ../frikbot/bot_fight.qc
+../frikbot/bot_tier.qc
 ../frikbot/bot_ai.qc
 ../frikbot/bot_misc.qc
 ../frikbot/bot_phys.qc

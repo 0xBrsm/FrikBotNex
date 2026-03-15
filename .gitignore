@@ -5,4 +5,5 @@ fteqcc.log
 # Ignore stray .dat files, keep only root progs.dat for download
 *.dat
 !/progs.dat
+scripts/
 .claude/

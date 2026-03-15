@@ -206,14 +206,13 @@ void(vector whichway, float danger) frik_obstructed =
 	local float dist, stuck_time;
 	local vector disway, org;
 
-	if (self.b_aiflags & AI_BLIND)
-		return;
-
 	if (danger)
 	{
 		self.b_aiflags = self.b_aiflags | AI_DANGER;
-		self.keys = frik_KeysForDir('0 0 0' - whichway);
+		// don't write keys here — survival tier handles movement
 	}
+	if (self.b_aiflags & AI_BLIND)
+		return;
 	if (self.b_aiflags & AI_PRECISION)
 		return;
 
@@ -790,43 +789,7 @@ void() frik_movetogoal =
 		self.b_nav_jitter_time = time + jitter_wait;
 	}
 
-	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
-
-	// local navigation: when obstructed and sense nav has a viable direction,
-	// override movement keys to route around the obstacle spatially
-	if (self.b_aiflags & AI_OBSTRUCTED)
-	{
-		local vector nav_dir;
-		local float nav_yaw, stuck_dur;
-		local float best_clear, clear;
-
-		stuck_dur = time - self.obs_time;
-		nav_yaw = -1;
-
-		if (stuck_dur > 1.0)
-		{
-			// stuck too long — ignore goal, pick most open direction
-			best_clear = self.sense_nav_n; nav_yaw = 90;
-			clear = self.sense_nav_ne; if (clear > best_clear) { best_clear = clear; nav_yaw = 45; }
-			clear = self.sense_nav_e; if (clear > best_clear) { best_clear = clear; nav_yaw = 0; }
-			clear = self.sense_nav_se; if (clear > best_clear) { best_clear = clear; nav_yaw = 315; }
-			clear = self.sense_nav_s; if (clear > best_clear) { best_clear = clear; nav_yaw = 270; }
-			clear = self.sense_nav_sw; if (clear > best_clear) { best_clear = clear; nav_yaw = 225; }
-			clear = self.sense_nav_w; if (clear > best_clear) { best_clear = clear; nav_yaw = 180; }
-			clear = self.sense_nav_nw; if (clear > best_clear) { best_clear = clear; nav_yaw = 135; }
-		}
-		else if (self.sense_nav_best_dir >= 0)
-			nav_yaw = self.sense_nav_best_dir;
-
-		if (nav_yaw >= 0)
-		{
-			makevectors('0 1 0' * nav_yaw);
-			nav_dir = v_forward;
-			nav_dir_z = 0;
-			self.keys = (self.keys & 960) | frik_KeysForDir(nav_dir);
-		}
-	}
 
 	if (self.b_aiflags & AI_PRECISION)
 	{
@@ -847,12 +810,24 @@ float(vector weird) frik_walkmove =
 	// sue me
  	self.keys = (self.keys & 960) | frik_KeysForDir(weird);
 
-	frik_dodge_obstruction();
 	frik_recognize_plat(TRUE);
-	if (self.b_aiflags & AI_OBSTRUCTED)
+
+	// test if movement in this direction is actually possible
+	// callers like bot_combat_strafe use this to flip direction on walls
+	local vector org;
+	local float oflags, yaw;
+	org = self.origin;
+	oflags = self.flags;
+	yaw = vectoyaw(weird);
+	if (!walkmove(yaw, 16))
+	{
+		self.origin = org;
+		self.flags = oflags;
 		return FALSE;
-	else
-		return TRUE;
+	}
+	self.origin = org;
+	self.flags = oflags;
+	return TRUE;
 };
 
 
