@@ -354,55 +354,6 @@ void() bot_path =
 
 
 /*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-Bot Priority Look. What a stupid name. This is
-where the bot finds things it wants to kill/grab.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void(float scope) bot_look_for_crap =
-{
-	local entity foe, best;
-	local float thatp, bestp, dist;
-
-	if (scope == 1)
-		foe = findradius(self.origin, 13000);
-	else
-		foe = findradius(self.origin, 500);
-
-	bestp = 1;
-	while(foe)
-	{
-		thatp = bot_want(foe);
-		if (thatp)
-			if (!scope)
-				if (!sisible(foe))
-					thatp = 0;
-		if (thatp > bestp)
-		{
-			bestp = thatp;
-			best = foe;
-			dist = vlen(self.origin - foe.origin);
-		}
-		foe = foe.chain;
-	}
-	if (best == world)
-		return;
-	if (!target_onstack(best))
-	{
-		target_add(best);
-		if (scope)
-		{
-			bot_get_path(best, FALSE);
-			self.b_aiflags = self.b_aiflags | AI_WAIT;
-		}
-	}
-};
-
-
-/*
 ==============================================
   THE PIPELINE
   "What should I do?" answered five ways.
@@ -1124,15 +1075,6 @@ void() BotAI =
 	// am I dead? mash buttons until respawn
 	if (self.health < 1)
 	{
-		// skill 1+: remember where we died
-		if ((time - self.b_death_time) > 2 && self.b_skill >= 1)
-		{
-			self.b_death3 = self.b_death2;
-			self.b_death2 = self.b_death1;
-			self.b_death1 = self.origin;
-			self.b_death_time = time;
-		}
-
 		self.button0 = floor(random() * 2);
 		self.button2 = 0;
 		self.keys = 0;
@@ -1143,12 +1085,10 @@ void() BotAI =
 		self.b_aim_delay = 0;
 		self.b_aim_offset = 0;
 		self.b_strafe_dir = 0;
-		self.b_retreat = 0;
 		self.b_ambush_time = 0;
 		self.b_bhop_land = 0;
 		self.b_combat_state = CSTATE_NONE;
 		self.b_los_time = 0;
-		self.b_combo_time = 0;
 		self.b_aim_flick = 0;
 		self.b_aim_last_yaw_err = 0;
 		self.b_react_time = 0;
@@ -1196,7 +1136,7 @@ void() BotAI =
 		if (busy_waypoints <= 0)
 		{
 			if (waypoint_mode < WM_EDITOR)
-				bot_look_for_crap(TRUE);
+				bot_pick_goal(TRUE);
 		}
 		self.b_aiflags = 0;
 		self.keys = 0;

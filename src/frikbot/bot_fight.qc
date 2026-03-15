@@ -99,24 +99,6 @@ entity() bot_nearest_teammate =
 	return best;
 };
 
-float(entity foe) bot_team_fighting_enemy =
-{
-	local entity t;
-	local float count;
-	if (!teamplay || !foe) return 0;
-	count = 0;
-	t = player_head;
-	while (t)
-	{
-		if (t != self && t.team == self.team && t.health > 0)
-			if (t.enemy == foe && t.enemy.health > 0)
-				if (vlen(t.origin - self.origin) < 1000)
-					count = count + 1;
-		t = t._next;
-	}
-	return count;
-};
-
 // -=-=- "Measuring the competition" — Player Sizing -=-=-
 
 float(entity e) bot_size_player =
@@ -155,7 +137,6 @@ vector(float wep) weapon_range =
 
 // -=-=- "Walls are your friend" — Splash Helpers -=-=-
 
-float() bot_enemy_near_wall = { return self.sense_enemy_wall; };
 float(float dist, vector wr) bot_in_weapon_range = { return (dist > wr_y && dist < wr_z); };
 
 float() bot_has_ammo =
@@ -205,7 +186,7 @@ float(float wep, float brange) bot_weapon_score =
 	{
 		// wall bonus for splash weapons
 		if (wep == IT_ROCKET_LAUNCHER || wep == IT_GRENADE_LAUNCHER)
-			if (self.enemy != world && bot_enemy_near_wall())
+			if (self.enemy != world && self.sense_enemy_wall)
 				score = score + 15;
 		if (wep == IT_ROCKET_LAUNCHER && self.waterlevel >= 1)
 			score = score + 10;
@@ -486,7 +467,7 @@ void() bot_combat_strafe =
 	if (ratio > 1.3) ideal = ideal * 0.7;			// winning: pressure
 	else if (ratio < 0.6) ideal = ideal * 1.3;		// losing: keep distance
 	else if ((self.weapon == IT_ROCKET_LAUNCHER || self.weapon == IT_GRENADE_LAUNCHER)
-		&& foedist > 150 && foedist < 500 && bot_enemy_near_wall())
+		&& foedist > 150 && foedist < 500 && self.sense_enemy_wall)
 		ideal = foedist;							// splash angle: hold
 
 	movedir = right * self.b_strafe_dir;
@@ -514,7 +495,7 @@ void() bot_retreat =
 
 	org = realorigin(self.enemy);
 	away = normalize(self.origin - org);
-	self.b_retreat = 1;
+
 
 	if (self.b_skill == 0)
 	{ if (random() < 0.3) frik_walkmove(away); return; }
@@ -551,7 +532,7 @@ void() bot_retreat =
 
 	if (self.b_skill == 3 && self.health < 50)
 		if (!self.target1 || self.target1.classname == "waypoint")
-			bot_look_for_crap(FALSE);
+			bot_pick_goal(FALSE);
 };
 
 // -=-=- bot_fight_style — The Main Event -=-=-
@@ -590,7 +571,7 @@ void() bot_fight_style =
 	else
 		bot_weapon_switch(foedist);
 
-	self.b_retreat = 0;
+
 
 	if (self.weapon == IT_AXE && foedist > 64)
 		if (self.impulse == 0 || self.impulse == 1)

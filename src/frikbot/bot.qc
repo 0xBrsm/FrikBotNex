@@ -136,7 +136,7 @@ for all variables in the bot...
 // ----- entity fields ---
 .float	wallhug, keys, oldkeys, ishuman;
 .float	b_frags, b_clientno, b_shirt, b_pants; 
-.float	priority, ai_time, b_sound, missile_speed;
+.float	ai_time, b_sound, missile_speed;
 .float	portal_time, b_skill, switch_wallhug;
 .float	b_aiflags, b_num, b_chattime;
 .float	b_menu, b_menu_time, b_menu_value;
@@ -145,15 +145,10 @@ for all variables in the bot...
 .float b_strafe_time, b_strafe_dir;
 .float b_bhop_strafe;
 .float b_aim_delay, b_aim_offset;
-.float b_retreat;
 .float b_ambush_time;
 .float b_bhop_land;
-.float b_wall_near, b_wall_time;
 .float obs_time;		// when AI_OBSTRUCTED was first set (corner commitment)
 .float b_wepswitch_time;
-.float b_combo_time;		// RL->LG combo: when to switch to LG (0 = inactive)
-.vector b_death1, b_death2, b_death3;
-.float b_death_time;
 .float b_personality;
 
 // human emulation: movement
@@ -203,9 +198,6 @@ float AMBUSH_PATIENCE_SKILL3	= 18;
 float CSTATE_NONE	= 0;	// not in combat
 float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
 float CSTATE_RETREAT	= 2;	// outgunned, falling back
-float CSTATE_PRESSURE	= 3;	// enemy weak, pushing for the kill
-float CSTATE_FLANK	= 4;	// circling to get splash angle
-
 .entity	temp_way, last_way, phys_obj;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
@@ -255,7 +247,6 @@ float AI_TRACE_TEST	= 131072; // route test
 // these are flags for bots/players (dynamic/editor flags)
 float AI_OBSTRUCTED	= 1;
 float AI_HOLD_SELECT	= 2;
-float AI_ROUTE_FAILED	= 2;
 float AI_WAIT		= 4;
 float AI_DANGER		= 8;
 
@@ -355,10 +346,8 @@ void(float tpic) bot_start_topic;
 void() bot_opp_model_update;
 void() bot_opp_model_reset;
 entity() bot_nearest_teammate;
-float(entity foe) bot_team_fighting_enemy;
 float(entity e) bot_size_player;
 vector(float wep) weapon_range;
-float() bot_enemy_near_wall;
 float(float wep, float brange) bot_weapon_score;
 void(float brange) bot_weapon_switch;
 void() bot_shoot;
@@ -380,7 +369,6 @@ float() bot_ai_navigate;
 void() bot_ai_idle;
 void() bot_handle_ai;
 void() bot_path;
-void(float scope) bot_look_for_crap;
 
 
 // ----------Commands---------

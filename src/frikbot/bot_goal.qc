@@ -348,5 +348,8 @@ void(float scope) bot_pick_goal =
 
 	target_add(best);
 	if (scope)
+	{
 		bot_get_path(best, FALSE);
+		self.b_aiflags = self.b_aiflags | AI_WAIT;
+	}
 };

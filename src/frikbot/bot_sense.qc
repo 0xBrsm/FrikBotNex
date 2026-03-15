@@ -216,7 +216,7 @@ void() bot_sense_forward =
 	stop = start + ang * 256;
 	traceline(start, stop, TRUE, self);
 
-	self.sense_fwd_wall_dist = vlen(trace_endpos - start);
+	self.sense_fwd_wall_dist = trace_fraction * 256;
 	self.sense_fwd_normal = trace_plane_normal;
 
 	// gap detection: if height differential is negative, we may have a gap
@@ -337,12 +337,12 @@ void() bot_sense_lateral =
 
 	// Trace 1: left clearance
 	traceline(start, start + left * 256, TRUE, self);
-	self.sense_left_dist = vlen(trace_endpos - start);
+	self.sense_left_dist = trace_fraction * 256;
 	self.sense_left_normal = trace_plane_normal;
 
 	// Trace 2: right clearance
 	traceline(start, start + right * 256, TRUE, self);
-	self.sense_right_dist = vlen(trace_endpos - start);
+	self.sense_right_dist = trace_fraction * 256;
 	self.sense_right_normal = trace_plane_normal;
 };
 
@@ -492,42 +492,42 @@ void() bot_sense_local_nav =
 	// N (+Y)
 	dir = '0 1 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_n = vlen(trace_endpos - start);
+	self.sense_nav_n = trace_fraction * 256;
 
 	// NE (+X+Y)
 	dir = '0.707 0.707 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_ne = vlen(trace_endpos - start);
+	self.sense_nav_ne = trace_fraction * 256;
 
 	// E (+X)
 	dir = '1 0 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_e = vlen(trace_endpos - start);
+	self.sense_nav_e = trace_fraction * 256;
 
 	// SE (+X-Y)
 	dir = '0.707 -0.707 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_se = vlen(trace_endpos - start);
+	self.sense_nav_se = trace_fraction * 256;
 
 	// S (-Y)
 	dir = '0 -1 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_s = vlen(trace_endpos - start);
+	self.sense_nav_s = trace_fraction * 256;
 
 	// SW (-X-Y)
 	dir = '-0.707 -0.707 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_sw = vlen(trace_endpos - start);
+	self.sense_nav_sw = trace_fraction * 256;
 
 	// W (-X)
 	dir = '-1 0 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_w = vlen(trace_endpos - start);
+	self.sense_nav_w = trace_fraction * 256;
 
 	// NW (-X+Y)
 	dir = '-0.707 0.707 0';
 	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_nw = vlen(trace_endpos - start);
+	self.sense_nav_nw = trace_fraction * 256;
 
 	// compute openness: average clearance normalized to 0-1
 	total_dist = self.sense_nav_n + self.sense_nav_ne + self.sense_nav_e
