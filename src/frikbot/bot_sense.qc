@@ -7,101 +7,175 @@
 
 /*
 
-Unified spatial awareness pass that runs once per bot per AI tick.
-Replaces scattered, redundant traceline calls across the bot system
-with cached entity fields that all subsystems read from.
+Unified spatial awareness. Two passes per AI tick:
 
-Three probe passes: ground state, forward obstacles, and visibility.
+1. bot_sense_space — omnidirectional geometry awareness
+   8-direction nav fan (wall clearance + floor safety)
+   plus ground state and forward obstacle detail.
+
+2. bot_sense_visibility — enemy/target LOS, friendly fire.
 
 */
 
 // --- Sense system metadata ---
-.float sense_time;              // last full update time (avoid redundant runs)
-.float sense_ground_time;       // last ground probe time (used as frame guard)
-.float sense_fwd_time;          // last forward probe time (used as frame guard)
+.float sense_time;              // last full update time
+.float sense_space_time;        // last geometry probe time
 
 // --- Ground state ---
-// Replaces: frik_recognize_plat() trace, frik_check_hazard() center trace,
-//           SV_UserFriction() edge trace
 .float sense_ground_dist;       // distance to floor directly below (0-64)
-.float sense_ground_type;       // CONTENT_SOLID, CONTENT_LAVA, CONTENT_SLIME, CONTENT_WATER
+.float sense_ground_type;       // CONTENT_SOLID, CONTENT_LAVA, etc.
 .entity sense_ground_ent;       // entity below (platform/train) or world
-.float sense_on_edge;           // true if leading edge is over a dropoff (edge friction)
+.float sense_on_edge;           // true if leading edge is over a dropoff
 
-// --- Forward probe ---
-// Replaces: frik_obstacles() traces (lines 310, 326, 333, 362),
-//           frik_check_hazard() center ahead trace
-.float sense_fwd_wall_dist;     // distance to wall/obstacle ahead (0-256)
-.float sense_fwd_height;        // height differential of ground ahead vs current (-256 to +256)
-.float sense_fwd_ground_type;   // ground type ahead (solid/lava/slime/void)
+// --- 8-direction nav fan ---
+// Wall clearance (0-256) per compass direction (world frame)
+.float sense_dir_n;             // +Y
+.float sense_dir_ne;            // +X+Y
+.float sense_dir_e;             // +X
+.float sense_dir_se;            // +X-Y
+.float sense_dir_s;             // -Y
+.float sense_dir_sw;            // -X-Y
+.float sense_dir_w;             // -X
+.float sense_dir_nw;            // -X+Y
+
+// Floor safety per direction (bitmask: bit set = floor is safe)
+.float sense_floor_safe;        // 8 bits: N=1, NE=2, E=4, SE=8, S=16, SW=32, W=64, NW=128
+
+// Aggregates
+.float sense_openness;          // average clearance / 256 (0=boxed in, 1=open)
+.float sense_best_dir;          // best yaw toward goal considering clearance + floor (-1=none)
+
+// --- Forward probe (velocity-relative, for frik_obstacles) ---
+.float sense_fwd_wall_dist;     // distance to wall ahead (0-256)
+.float sense_fwd_height;        // height differential of ground ahead
+.float sense_fwd_ground_type;   // ground type ahead
 .float sense_fwd_gap_width;     // gap width ahead (0 = no gap)
 .float sense_fwd_jumpable;      // TRUE if gap/step is jumpable
-.vector sense_fwd_normal;       // wall surface normal (for deflection/wall-following)
+.vector sense_fwd_normal;       // wall surface normal
 
-// --- Hazard probes (ahead + lateral) ---
-// Replaces: frik_check_hazard() left/right traces
-.float sense_hazard_left;       // TRUE if lava/slime to the left-ahead
-.float sense_hazard_right;      // TRUE if lava/slime to the right-ahead
+// --- Hazard probes (velocity-relative) ---
+.float sense_hazard_left;       // TRUE if lava/slime left-ahead
+.float sense_hazard_right;      // TRUE if lava/slime right-ahead
 
 // --- Target/enemy visibility cache ---
-// Replaces: fisible() multi-trace calls, bot_fight_style() LOS check,
-//           bot_enemy_near_wall() trace
-.float sense_target_vis;        // TRUE if target1 is visible
-.float sense_enemy_vis;         // TRUE if enemy is visible
-.float sense_enemy_dist;        // distance to enemy
-.float sense_enemy_wall;        // TRUE if enemy has wall behind them (splash potential)
-.float sense_my_size;           // cached bot_size_player(self) for this frame
-.float sense_enemy_size;        // cached bot_size_player(enemy) for this frame
-.float sense_friendly_block;    // TRUE if teammate in line of fire
+.float sense_target_vis;
+.float sense_enemy_vis;
+.float sense_enemy_dist;
+.float sense_enemy_wall;
+.float sense_my_size;
+.float sense_enemy_size;
+.float sense_friendly_block;
 
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_sense_ground
+bot_sense_space
 
-Ground state probing: floor distance, floor type,
-platform detection, and edge detection.
+Omnidirectional geometry awareness.
+Replaces bot_sense_ground + bot_sense_forward.
 
-Traces: 2 (replaces 5-6 scattered traces)
+Per direction: horizontal trace (clearance) +
+trace down at 48u ahead (floor safety).
+
+Plus: ground state, edge detection, forward
+obstacle detail for frik_obstacles.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-void() bot_sense_ground =
+// floor check distance ahead per direction
+float FLOOR_CHECK_DIST = 48;
+// nav fan trace range
+float NAV_RANGE = 256;
+
+// direction vectors (world frame, precomputed)
+// N, NE, E, SE, S, SW, W, NW
+vector nav_dirs_0, nav_dirs_1, nav_dirs_2, nav_dirs_3;
+vector nav_dirs_4, nav_dirs_5, nav_dirs_6, nav_dirs_7;
+float nav_dirs_init;
+
+void() nav_init_dirs =
 {
-	local vector start, stop;
-	local float conts;
+	nav_dirs_0 = '0 1 0';
+	nav_dirs_1 = '0.707 0.707 0';
+	nav_dirs_2 = '1 0 0';
+	nav_dirs_3 = '0.707 -0.707 0';
+	nav_dirs_4 = '0 -1 0';
+	nav_dirs_5 = '-0.707 -0.707 0';
+	nav_dirs_6 = '-1 0 0';
+	nav_dirs_7 = '-0.707 0.707 0';
+	nav_dirs_init = TRUE;
+};
 
-	if (self.sense_ground_time == time)
-		return;     // already ran this frame
-	self.sense_ground_time = time;
+// probe one direction: returns clearance, sets floor safety bit
+float(vector dir, float bit) nav_probe =
+{
+	local vector start, check;
+	local float dist, conts;
 
-	// Trace 1: straight down from origin to detect floor
-	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+	// wall clearance: horizontal trace at origin
+	traceline(self.origin, self.origin + dir * NAV_RANGE, TRUE, self);
+	dist = trace_fraction * NAV_RANGE;
 
-	self.sense_ground_dist = (1 - trace_fraction) * 64;
-	self.sense_ground_ent = trace_ent;
+	// floor safety: trace down at FLOOR_CHECK_DIST ahead (or wall dist if closer)
+	if (dist > FLOOR_CHECK_DIST)
+		check = self.origin + dir * FLOOR_CHECK_DIST;
+	else if (dist > 16)
+		check = self.origin + dir * (dist - 8);
+	else
+	{
+		// too close to wall, floor check at our feet
+		self.sense_floor_safe = self.sense_floor_safe | bit;  // assume safe near wall
+		return dist;
+	}
 
-	// determine ground content type
+	check_z = self.origin_z + self.mins_z;
+	traceline(check, check - '0 0 64', TRUE, self);
+
 	if (trace_fraction < 1)
 	{
 		conts = pointcontents(trace_endpos + '0 0 4');
-		self.sense_ground_type = conts;
+		if (conts >= -3)  // CONTENT_SOLID, CONTENT_WATER, or CONTENT_SKY are >= -3
+			self.sense_floor_safe = self.sense_floor_safe | bit;
 	}
+	// else: no floor = unsafe, bit stays unset
+
+	return dist;
+};
+
+void() bot_sense_space =
+{
+	local vector ang, start, stop, side, check;
+	local float conts, hgt, test, total, sped;
+	local float goal_yaw, best_score, score, dist, ang_diff;
+	local vector goal_dir;
+
+	if (self.sense_space_time == time)
+		return;
+	self.sense_space_time = time;
+
+	if (!nav_dirs_init)
+		nav_init_dirs();
+
+	// ---- ground state ----
+
+	// trace straight down
+	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+	self.sense_ground_dist = (1 - trace_fraction) * 64;
+	self.sense_ground_ent = trace_ent;
+	if (trace_fraction < 1)
+		self.sense_ground_type = pointcontents(trace_endpos + '0 0 4');
 	else
 		self.sense_ground_type = CONTENT_EMPTY;
 
-	// Trace 2: edge detection (leading velocity edge, down 34u)
-	// Matches SV_UserFriction logic: trace from leading edge downward
+	// edge detection (velocity-relative)
 	if (self.flags & FL_ONGROUND)
 	{
 		local vector vel;
-		local float sped;
 		vel = self.velocity;
 		vel_z = 0;
 		sped = vlen(vel);
-
 		if (sped > 0)
 		{
 			start_x = self.origin_x + vel_x * 16 / sped;
@@ -109,7 +183,6 @@ void() bot_sense_ground =
 			start_z = self.origin_z + self.mins_z;
 			stop = start;
 			stop_z = start_z - 34;
-
 			traceline(start, stop, TRUE, self);
 			self.sense_on_edge = (trace_fraction == 1);
 		}
@@ -118,38 +191,81 @@ void() bot_sense_ground =
 	}
 	else
 		self.sense_on_edge = FALSE;
-};
 
+	// ---- 8-direction nav fan ----
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+	self.sense_floor_safe = 0;  // clear all bits
 
-bot_sense_forward
+	self.sense_dir_n  = nav_probe(nav_dirs_0, 1);
+	self.sense_dir_ne = nav_probe(nav_dirs_1, 2);
+	self.sense_dir_e  = nav_probe(nav_dirs_2, 4);
+	self.sense_dir_se = nav_probe(nav_dirs_3, 8);
+	self.sense_dir_s  = nav_probe(nav_dirs_4, 16);
+	self.sense_dir_sw = nav_probe(nav_dirs_5, 32);
+	self.sense_dir_w  = nav_probe(nav_dirs_6, 64);
+	self.sense_dir_nw = nav_probe(nav_dirs_7, 128);
 
-Forward obstacle analysis: wall distance, height
-differential, gap detection, hazard probing.
+	// openness
+	total = self.sense_dir_n + self.sense_dir_ne + self.sense_dir_e + self.sense_dir_se
+		  + self.sense_dir_s + self.sense_dir_sw + self.sense_dir_w + self.sense_dir_nw;
+	self.sense_openness = total / (NAV_RANGE * 8);
 
-Traces: 3-5 (replaces 6-8 scattered traces)
+	// best direction toward goal (clearance + floor safety + goal alignment + hysteresis)
+	local float prev_dir;
+	prev_dir = self.sense_best_dir;
+	self.sense_best_dir = -1;
+	if (self.target1 && self.target1 != world)
+	{
+		goal_dir = realorigin(self.target1) - self.origin;
+		goal_dir_z = 0;
+		if (vlen(goal_dir) > 1)
+		{
+			goal_yaw = vectoyaw(normalize(goal_dir));
+			best_score = -1;
 
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
+			// score each direction: 60% goal alignment + 40% clearance
+			// +15% hysteresis bonus for current direction (prevents flicker)
+			dist = self.sense_dir_n;
+			if ((self.sense_floor_safe & 1) && dist > 32)
+			{ ang_diff = fabs(angcomp(90, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 90) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 90; } }
 
-void() bot_sense_forward =
-{
-	local vector ang, start, stop, check, side;
-	local float conts, hgt, test;
+			dist = self.sense_dir_ne;
+			if ((self.sense_floor_safe & 2) && dist > 32)
+			{ ang_diff = fabs(angcomp(45, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 45) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 45; } }
 
-	if (self.sense_fwd_time == time)
-		return;     // already ran this frame
-	self.sense_fwd_time = time;
+			dist = self.sense_dir_e;
+			if ((self.sense_floor_safe & 4) && dist > 32)
+			{ ang_diff = fabs(angcomp(0, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 0) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 0; } }
+
+			dist = self.sense_dir_se;
+			if ((self.sense_floor_safe & 8) && dist > 32)
+			{ ang_diff = fabs(angcomp(315, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 315) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 315; } }
+
+			dist = self.sense_dir_s;
+			if ((self.sense_floor_safe & 16) && dist > 32)
+			{ ang_diff = fabs(angcomp(270, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 270) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 270; } }
+
+			dist = self.sense_dir_sw;
+			if ((self.sense_floor_safe & 32) && dist > 32)
+			{ ang_diff = fabs(angcomp(225, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 225) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 225; } }
+
+			dist = self.sense_dir_w;
+			if ((self.sense_floor_safe & 64) && dist > 32)
+			{ ang_diff = fabs(angcomp(180, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 180) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 180; } }
+
+			dist = self.sense_dir_nw;
+			if ((self.sense_floor_safe & 128) && dist > 32)
+			{ ang_diff = fabs(angcomp(135, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 135) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 135; } }
+		}
+	}
+
+	// ---- forward probe (velocity-relative, for frik_obstacles) ----
 
 	ang = self.velocity;
 	ang_z = 0;
 
-	// need meaningful velocity to probe forward
 	if (vlen(ang) < 0.1)
 	{
-		// no velocity: reset forward sense data
 		self.sense_fwd_wall_dist = 256;
 		self.sense_fwd_height = 0;
 		self.sense_fwd_ground_type = CONTENT_SOLID;
@@ -163,7 +279,7 @@ void() bot_sense_forward =
 
 	ang = normalize(ang);
 
-	// Trace 1: Forward at head height, then down -- detect height differential
+	// height differential
 	start = self.origin + ang * 32;
 	start_z = self.origin_z + self.maxs_z;
 	stop = start;
@@ -171,24 +287,18 @@ void() bot_sense_forward =
 	traceline(start, stop - '0 0 256', TRUE, self);
 
 	if (trace_allsolid || trace_startsolid)
-	{
-		self.sense_fwd_height = 0;
 		hgt = 0;
-	}
 	else
-	{
 		hgt = trace_endpos_z - stop_z;
-		self.sense_fwd_height = hgt;
-	}
+	self.sense_fwd_height = hgt;
 
-	// get content of ground ahead from trace 1
 	if (trace_fraction < 1 && !trace_allsolid)
 		conts = pointcontents(trace_endpos + '0 0 4');
 	else
 		conts = CONTENT_EMPTY;
 	self.sense_fwd_ground_type = conts;
 
-	// Trace 2: Forward at feet level -- measure gap and wall distance
+	// wall distance + gap
 	start = self.origin;
 	start_z = self.origin_z + self.mins_z - 8;
 	stop = start + ang * 256;
@@ -197,21 +307,16 @@ void() bot_sense_forward =
 	self.sense_fwd_wall_dist = trace_fraction * 256;
 	self.sense_fwd_normal = trace_plane_normal;
 
-	// gap detection: if height differential is negative, we may have a gap
 	if (hgt < 0)
 	{
 		test = self.sense_fwd_wall_dist;
 		if (test > 20)
 		{
-			// check gap width with lateral sweep
 			side_x = ang_y * -1;
 			side_y = ang_x;
 			traceline(start - (side * 10), start + (side * 10), TRUE, self);
 			if (trace_fraction == 1 && !trace_startsolid)
-			{
-				// gap is wider than 20 units
 				self.sense_fwd_gap_width = test;
-			}
 			else
 				self.sense_fwd_gap_width = 0;
 		}
@@ -221,7 +326,7 @@ void() bot_sense_forward =
 	else
 		self.sense_fwd_gap_width = 0;
 
-	// jumpability: pure math from gap width and velocity
+	// jumpability
 	if (self.sense_fwd_gap_width > 0)
 	{
 		local float jumpable_dist;
@@ -232,38 +337,29 @@ void() bot_sense_forward =
 		self.sense_fwd_jumpable = (jumpable_dist >= self.sense_fwd_gap_width);
 	}
 	else if (hgt > 18)
-		self.sense_fwd_jumpable = TRUE;  // step up, need jump
+		self.sense_fwd_jumpable = TRUE;
 	else
 		self.sense_fwd_jumpable = FALSE;
 
-	// Traces 3-4: Hazard probes (left-ahead, right-ahead)
-	// Only when on ground -- skip when airborne
+	// hazard probes
 	if (self.flags & FL_ONGROUND)
 	{
 		side_x = ang_y * -1;
 		side_y = ang_x;
 
-		// left-ahead
 		check = self.origin + ang * 48 + side * 24;
 		check_z = self.origin_z + self.mins_z;
 		traceline(check, check - '0 0 64', TRUE, self);
 		if (trace_fraction < 1)
-		{
-			conts = pointcontents(trace_endpos + '0 0 4');
-			self.sense_hazard_left = (conts < -3);
-		}
+			self.sense_hazard_left = (pointcontents(trace_endpos + '0 0 4') < -3);
 		else
 			self.sense_hazard_left = FALSE;
 
-		// right-ahead
 		check = self.origin + ang * 48 - side * 24;
 		check_z = self.origin_z + self.mins_z;
 		traceline(check, check - '0 0 64', TRUE, self);
 		if (trace_fraction < 1)
-		{
-			conts = pointcontents(trace_endpos + '0 0 4');
-			self.sense_hazard_right = (conts < -3);
-		}
+			self.sense_hazard_right = (pointcontents(trace_endpos + '0 0 4') < -3);
 		else
 			self.sense_hazard_right = FALSE;
 	}
@@ -278,13 +374,69 @@ void() bot_sense_forward =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
+Sense API — read the nav fan by yaw angle.
+Snaps to nearest 45-degree compass direction.
+No new traces, just reads cached data.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+// snap a yaw to nearest fan index (0-7) and return clearance
+float(float yaw) sense_clearance =
+{
+	local float idx;
+	yaw = yaw - floor(yaw / 360) * 360;  // normalize to 0-360
+	idx = rint(yaw / 45);
+	if (idx > 7) idx = 0;
+
+	if (idx == 0) return self.sense_dir_e;
+	if (idx == 1) return self.sense_dir_ne;
+	if (idx == 2) return self.sense_dir_n;
+	if (idx == 3) return self.sense_dir_nw;
+	if (idx == 4) return self.sense_dir_w;
+	if (idx == 5) return self.sense_dir_sw;
+	if (idx == 6) return self.sense_dir_s;
+	if (idx == 7) return self.sense_dir_se;
+	return 0;
+};
+
+// snap a yaw to nearest fan index and return floor safety
+float(float yaw) sense_floor_ok =
+{
+	local float idx, bit;
+	yaw = yaw - floor(yaw / 360) * 360;
+	idx = rint(yaw / 45);
+	if (idx > 7) idx = 0;
+
+	// bit order: N=1, NE=2, E=4, SE=8, S=16, SW=32, W=64, NW=128
+	if (idx == 0) bit = 4;    // E
+	if (idx == 1) bit = 2;    // NE
+	if (idx == 2) bit = 1;    // N
+	if (idx == 3) bit = 128;  // NW
+	if (idx == 4) bit = 64;   // W
+	if (idx == 5) bit = 32;   // SW
+	if (idx == 6) bit = 16;   // S
+	if (idx == 7) bit = 8;    // SE
+
+	return (self.sense_floor_safe & bit);
+};
+
+// is a direction walkable? (has clearance AND safe floor)
+float(float yaw) sense_walkable =
+{
+	if (sense_clearance(yaw) > 32 && sense_floor_ok(yaw))
+		return TRUE;
+	return FALSE;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
 bot_sense_visibility
 
-Cache LOS checks for current enemy and nav
-target. Also check friendly fire and enemy
-wall proximity for splash damage.
-
-Traces: 2-4 (replaces 6-10 scattered traces)
+Enemy/target LOS, friendly fire, splash potential.
+Separate from geometry — this is about entities.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -295,7 +447,6 @@ void() bot_sense_visibility =
 
 	spot1 = self.origin + self.view_ofs;
 
-	// --- target1 visibility ---
 	if (self.target1 && self.target1 != world)
 	{
 		org = realorigin(self.target1);
@@ -308,7 +459,6 @@ void() bot_sense_visibility =
 	else
 		self.sense_target_vis = FALSE;
 
-	// --- enemy visibility + distance ---
 	if (self.enemy && self.enemy != world)
 	{
 		org = realorigin(self.enemy);
@@ -319,7 +469,6 @@ void() bot_sense_visibility =
 			self.sense_enemy_vis = TRUE;
 		else
 		{
-			// corner check for player-sized enemies (matching fisible behavior)
 			if (self.enemy.classname == "player")
 			{
 				traceline(spot1, org + self.enemy.maxs, TRUE, self);
@@ -338,8 +487,6 @@ void() bot_sense_visibility =
 				self.sense_enemy_vis = FALSE;
 		}
 
-		// --- enemy wall proximity (splash potential) ---
-		// only compute in combat
 		if (self.sense_enemy_vis)
 		{
 			dir = normalize(org - self.origin);
@@ -349,8 +496,6 @@ void() bot_sense_visibility =
 		else
 			self.sense_enemy_wall = FALSE;
 
-		// --- friendly fire check ---
-		// only in combat with teamplay or coop
 		if (self.sense_enemy_vis && (teamplay || coop))
 		{
 			makevectors(self.v_angle);
@@ -360,7 +505,6 @@ void() bot_sense_visibility =
 			{
 				if ((trace_ent.team == self.team && teamplay) || coop)
 				{
-					// only block if teammate is between us and enemy
 					if (vlen(trace_endpos - spot1) < self.sense_enemy_dist)
 						self.sense_friendly_block = TRUE;
 					else
@@ -390,11 +534,7 @@ void() bot_sense_visibility =
 
 bot_sense
 
-Main entry point. Called once per bot per AI
-tick from BotAI(), before any decision-making.
-
-Runs all three probe passes every frame:
-ground state, forward obstacles, visibility.
+Main entry point. Called once per bot per AI tick.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -402,17 +542,15 @@ ground state, forward obstacles, visibility.
 void() bot_sense =
 {
 	if (self.sense_time == time)
-		return;     // already ran this frame
+		return;
 	self.sense_time = time;
 
-	// cache per-frame size calculations (called 4-6x otherwise)
 	self.sense_my_size = bot_size_player(self);
 	if (self.enemy && self.enemy != world)
 		self.sense_enemy_size = bot_size_player(self.enemy);
 	else
 		self.sense_enemy_size = 0;
 
-	bot_sense_ground();
-	bot_sense_forward();
+	bot_sense_space();
 	bot_sense_visibility();
 };

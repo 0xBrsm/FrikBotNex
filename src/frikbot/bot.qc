@@ -145,7 +145,6 @@ for all variables in the bot...
 .float b_strafe_time, b_strafe_dir;
 .float b_aim_delay, b_aim_offset;
 .float b_ambush_time;
-.float obs_time;		// when AI_OBSTRUCTED was first set (corner commitment)
 .float b_wepswitch_time;
 .float b_react_time;		// delay before engaging newly detected enemy
 .float b_wep_commit_time;	// locked into current weapon until this time
@@ -290,7 +289,6 @@ entity(vector org)		make_waypoint;
 void()				ClearAllWays;
 void()				FixWaypoints;
 float()				begin_route;
-float()				bot_wants_to_drop;
 void()				bot_path;
 void()				bot_handle_ai;
 void(entity this, float direct)			bot_get_path;
@@ -303,10 +301,14 @@ void()				bot_jump;
 void()				frik_bot_roam;
 float(vector weird)		frik_walkmove;
 void()				frik_movetogoal;
-void()				frik_obstacles;
 float(float flag)			frik_recognize_plat;
 float(vector sdir)		frik_KeysForDir;
-void(vector whichway, float danger) frik_obstructed;
+
+// sense API
+void()				bot_sense_space;
+float(float yaw)		sense_clearance;
+float(float yaw)		sense_floor_ok;
+float(float yaw)		sense_walkable;
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;
@@ -1297,6 +1299,7 @@ void() WaypointWatch =
 			waypoint_mode = WM_LOADED;
 	}
 };
+
 void() BotFrame =
 {
 	local float num;
@@ -1317,7 +1320,6 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				frik_obstacles();
 				CL_KeyMove();
 				SV_ClientThink();
 				SV_Physics_Client();

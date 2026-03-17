@@ -551,8 +551,7 @@ void() PostPhysics =
 						}
 						else
 						{
-							if (dst > 1)
-								frik_obstructed(obstr, FALSE); 
+							// wall collision — nav fan handles routing
 
 							org = self.origin;
 							self.flags = cflags;
