@@ -107,8 +107,10 @@ void() CL_KeyMove = // CL_BaseMove + CL_AdjustAngles
 			if (vlen(self.mouse_emu) > 180)
 				self.mouse_emu = normalize(self.mouse_emu) * 180;
 		}
-		else 
+		else if (real_frametime > 0.0001)
 			self.mouse_emu = view * (1 / real_frametime);
+		else
+			self.mouse_emu = view;
 		self.v_angle = self.v_angle + self.mouse_emu * real_frametime;
 
 		
@@ -186,7 +188,12 @@ void() DropPunchAngle =
 {
 	local float len;
 	len = vlen(self.punchangle);
-	self.punchangle = normalize(self.punchangle);
+	if (len < 0.001)
+	{
+		self.punchangle = '0 0 0';
+		return;
+	}
+	self.punchangle = self.punchangle * (1.0 / len);
 	len = len - 10 * real_frametime;
 	if (len < 0)
 		len = 0;
@@ -199,7 +206,9 @@ void(vector wishvel) SV_AirAccelerate =
 	local float addspeed, wishspd, accelspeed, currentspeed;
 
 	wishspd = vlen(wishvel);
-	wishvel = normalize(wishvel);
+	if (wishspd < 0.001)
+		return;
+	wishvel = wishvel * (1.0 / wishspd);
 	if (wishspd > 30)
 		wishspd = 30;
 	currentspeed = self.velocity * wishvel;
@@ -218,7 +227,9 @@ void(vector wishvel) SV_Accelerate =
 	local float addspeed, wishspd, accelspeed, currentspeed;
 
 	wishspd = vlen(wishvel);
-	wishvel = normalize(wishvel);
+	if (wishspd < 0.001)
+		return;
+	wishvel = wishvel * (1.0 / wishspd);
 
 	currentspeed = self.velocity * wishvel;
 	addspeed = wishspd - currentspeed;
