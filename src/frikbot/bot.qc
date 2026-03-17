@@ -356,6 +356,7 @@ void(float scope) bot_get;
 
 // bot_ai.qc — main AI loop
 void() bot_handle_ai;
+void() bot_server_spawn;
 void() bot_path;
 
 
@@ -1304,6 +1305,7 @@ void() BotFrame =
 {
 	local float num;
 
+	bot_server_spawn();
 	// for the sake of speed
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");

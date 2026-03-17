@@ -494,6 +494,74 @@ from bot_phys.qc. One question per frame:
 */
 float stagger_think;
 
+// debug: per-bot movement metrics (accumulated, printed every 10s)
+.float _m_stuck;       // frames with vel < 10 while alive
+.float _m_lava;        // frames on lava/slime
+.float _m_nodir;       // frames with sense_best_dir == -1
+.float _m_frames;      // total alive frames
+.float _m_report_time; // next report time
+
+float _spawn_done;
+void() bot_server_spawn =
+{
+	local float n;
+	if (_spawn_done) return;
+	n = cvar("temp1");
+	if (n <= 0) return;
+	_spawn_done = TRUE;
+	while (n > 0) { BotConnect(0, 0, cvar("skill")); n = n - 1; }
+	localcmd("temp1 0\n");
+};
+
+void() bot_debug_metrics =
+{
+	local string s;
+	local vector vel;
+
+	if (self.health < 1)
+		return;
+
+	self._m_frames = self._m_frames + 1;
+
+	vel = self.velocity;
+	vel_z = 0;
+	if (vlen(vel) < 10)
+		self._m_stuck = self._m_stuck + 1;
+
+	if (self.sense_ground_type < -3)
+		self._m_lava = self._m_lava + 1;
+
+	if (self.sense_best_dir == -1)
+		self._m_nodir = self._m_nodir + 1;
+
+	// report every 10s
+	if (time < self._m_report_time)
+		return;
+	self._m_report_time = time + 10;
+
+	if (self._m_frames < 1)
+		return;
+
+	bprint("["); bprint(self.netname); bprint("] ");
+	bprint("10s: stuck=");
+	s = ftos(rint(100 * self._m_stuck / self._m_frames));
+	bprint(s); bprint("% lava=");
+	s = ftos(rint(100 * self._m_lava / self._m_frames));
+	bprint(s); bprint("% nodir=");
+	s = ftos(rint(100 * self._m_nodir / self._m_frames));
+	bprint(s); bprint("% hp=");
+	s = ftos(rint(self.health));
+	bprint(s); bprint(" t:");
+	if (self.target1) bprint(self.target1.classname); else bprint("-");
+	bprint("\n");
+
+	// reset counters
+	self._m_stuck = 0;
+	self._m_lava = 0;
+	self._m_nodir = 0;
+	self._m_frames = 0;
+};
+
 void() BotAI =
 {
 	// --- dead: mash respawn ---
@@ -625,6 +693,7 @@ void() BotAI =
 	}
 
 	bot_angle_set();
+	bot_debug_metrics();
 
 	if (!self.b_aiflags)
 		bot_chat();
