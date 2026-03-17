@@ -210,10 +210,31 @@ void() bot_sense_space =
 		  + self.sense_dir_s + self.sense_dir_sw + self.sense_dir_w + self.sense_dir_nw;
 	self.sense_openness = total / (NAV_RANGE * 8);
 
-	// best direction toward goal (clearance + floor safety + goal alignment + hysteresis)
-	local float prev_dir;
-	prev_dir = self.sense_best_dir;
+	// best direction toward goal (clearance + floor safety + goal alignment)
 	self.sense_best_dir = -1;
+
+	// helper: score one direction (defined inline via locals since QC has no closures)
+	// scoring: 60% goal alignment + 40% clearance. Requires safe floor + min clearance.
+	local float nav_yaws_0, nav_yaws_1, nav_yaws_2, nav_yaws_3;
+	local float nav_yaws_4, nav_yaws_5, nav_yaws_6, nav_yaws_7;
+	local float nav_dists_0, nav_dists_1, nav_dists_2, nav_dists_3;
+	local float nav_dists_4, nav_dists_5, nav_dists_6, nav_dists_7;
+	local float nav_bits_0, nav_bits_1, nav_bits_2, nav_bits_3;
+	local float nav_bits_4, nav_bits_5, nav_bits_6, nav_bits_7;
+	local float i, dir_yaw, dir_dist, dir_bit;
+	local float on_hazard;
+
+	nav_yaws_0 = 90;  nav_dists_0 = self.sense_dir_n;  nav_bits_0 = 1;
+	nav_yaws_1 = 45;  nav_dists_1 = self.sense_dir_ne; nav_bits_1 = 2;
+	nav_yaws_2 = 0;   nav_dists_2 = self.sense_dir_e;  nav_bits_2 = 4;
+	nav_yaws_3 = 315; nav_dists_3 = self.sense_dir_se; nav_bits_3 = 8;
+	nav_yaws_4 = 270; nav_dists_4 = self.sense_dir_s;  nav_bits_4 = 16;
+	nav_yaws_5 = 225; nav_dists_5 = self.sense_dir_sw; nav_bits_5 = 32;
+	nav_yaws_6 = 180; nav_dists_6 = self.sense_dir_w;  nav_bits_6 = 64;
+	nav_yaws_7 = 135; nav_dists_7 = self.sense_dir_nw; nav_bits_7 = 128;
+
+	on_hazard = (self.sense_ground_type < -3);
+
 	if (self.target1 && self.target1 != world)
 	{
 		goal_dir = realorigin(self.target1) - self.origin;
@@ -223,39 +244,60 @@ void() bot_sense_space =
 			goal_yaw = vectoyaw(normalize(goal_dir));
 			best_score = -1;
 
-			// score each direction: 60% goal alignment + 40% clearance
-			// +15% hysteresis bonus for current direction (prevents flicker)
-			dist = self.sense_dir_n;
-			if ((self.sense_floor_safe & 1) && dist > 32)
-			{ ang_diff = fabs(angcomp(90, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 90) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 90; } }
+			// score all 8 directions
+			i = 0;
+			while (i < 8)
+			{
+				if (i == 0) { dir_yaw = nav_yaws_0; dir_dist = nav_dists_0; dir_bit = nav_bits_0; }
+				else if (i == 1) { dir_yaw = nav_yaws_1; dir_dist = nav_dists_1; dir_bit = nav_bits_1; }
+				else if (i == 2) { dir_yaw = nav_yaws_2; dir_dist = nav_dists_2; dir_bit = nav_bits_2; }
+				else if (i == 3) { dir_yaw = nav_yaws_3; dir_dist = nav_dists_3; dir_bit = nav_bits_3; }
+				else if (i == 4) { dir_yaw = nav_yaws_4; dir_dist = nav_dists_4; dir_bit = nav_bits_4; }
+				else if (i == 5) { dir_yaw = nav_yaws_5; dir_dist = nav_dists_5; dir_bit = nav_bits_5; }
+				else if (i == 6) { dir_yaw = nav_yaws_6; dir_dist = nav_dists_6; dir_bit = nav_bits_6; }
+				else { dir_yaw = nav_yaws_7; dir_dist = nav_dists_7; dir_bit = nav_bits_7; }
 
-			dist = self.sense_dir_ne;
-			if ((self.sense_floor_safe & 2) && dist > 32)
-			{ ang_diff = fabs(angcomp(45, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 45) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 45; } }
+				if ((self.sense_floor_safe & dir_bit) && dir_dist > 32)
+				{
+					ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
+					score = (1 - ang_diff / 180) * 0.6 + (dir_dist / NAV_RANGE) * 0.4;
+					if (score > best_score)
+					{
+						best_score = score;
+						self.sense_best_dir = dir_yaw;
+					}
+				}
+				i = i + 1;
+			}
+		}
+	}
 
-			dist = self.sense_dir_e;
-			if ((self.sense_floor_safe & 4) && dist > 32)
-			{ ang_diff = fabs(angcomp(0, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 0) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 0; } }
+	// hazard escape: if on lava/slime and no direction found, pick ANY safe floor direction
+	if (on_hazard && self.sense_best_dir == -1)
+	{
+		best_score = -1;
+		i = 0;
+		while (i < 8)
+		{
+			if (i == 0) { dir_yaw = nav_yaws_0; dir_dist = nav_dists_0; dir_bit = nav_bits_0; }
+			else if (i == 1) { dir_yaw = nav_yaws_1; dir_dist = nav_dists_1; dir_bit = nav_bits_1; }
+			else if (i == 2) { dir_yaw = nav_yaws_2; dir_dist = nav_dists_2; dir_bit = nav_bits_2; }
+			else if (i == 3) { dir_yaw = nav_yaws_3; dir_dist = nav_dists_3; dir_bit = nav_bits_3; }
+			else if (i == 4) { dir_yaw = nav_yaws_4; dir_dist = nav_dists_4; dir_bit = nav_bits_4; }
+			else if (i == 5) { dir_yaw = nav_yaws_5; dir_dist = nav_dists_5; dir_bit = nav_bits_5; }
+			else if (i == 6) { dir_yaw = nav_yaws_6; dir_dist = nav_dists_6; dir_bit = nav_bits_6; }
+			else { dir_yaw = nav_yaws_7; dir_dist = nav_dists_7; dir_bit = nav_bits_7; }
 
-			dist = self.sense_dir_se;
-			if ((self.sense_floor_safe & 8) && dist > 32)
-			{ ang_diff = fabs(angcomp(315, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 315) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 315; } }
-
-			dist = self.sense_dir_s;
-			if ((self.sense_floor_safe & 16) && dist > 32)
-			{ ang_diff = fabs(angcomp(270, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 270) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 270; } }
-
-			dist = self.sense_dir_sw;
-			if ((self.sense_floor_safe & 32) && dist > 32)
-			{ ang_diff = fabs(angcomp(225, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 225) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 225; } }
-
-			dist = self.sense_dir_w;
-			if ((self.sense_floor_safe & 64) && dist > 32)
-			{ ang_diff = fabs(angcomp(180, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 180) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 180; } }
-
-			dist = self.sense_dir_nw;
-			if ((self.sense_floor_safe & 128) && dist > 32)
-			{ ang_diff = fabs(angcomp(135, goal_yaw)); score = (1 - ang_diff / 180) * 0.6 + (dist / NAV_RANGE) * 0.4; if (prev_dir == 135) score = score + 0.15; if (score > best_score) { best_score = score; self.sense_best_dir = 135; } }
+			// any safe floor, any clearance > 8
+			if ((self.sense_floor_safe & dir_bit) && dir_dist > 8)
+			{
+				if (dir_dist > best_score)
+				{
+					best_score = dir_dist;
+					self.sense_best_dir = dir_yaw;
+				}
+			}
+			i = i + 1;
 		}
 	}
 
