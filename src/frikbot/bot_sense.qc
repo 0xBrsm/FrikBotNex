@@ -11,7 +11,7 @@ Unified spatial awareness pass that runs once per bot per AI tick.
 Replaces scattered, redundant traceline calls across the bot system
 with cached entity fields that all subsystems read from.
 
-See AWARENESS.md for the full design document.
+Three probe passes: ground state, forward obstacles, and visibility.
 
 */
 
@@ -19,8 +19,6 @@ See AWARENESS.md for the full design document.
 .float sense_time;              // last full update time (avoid redundant runs)
 .float sense_ground_time;       // last ground probe time (used as frame guard)
 .float sense_fwd_time;          // last forward probe time (used as frame guard)
-.float sense_lateral_time;      // last lateral probe time
-.float sense_nav_time;          // last local nav probe time
 
 // --- Ground state ---
 // Replaces: frik_recognize_plat() trace, frik_check_hazard() center trace,
@@ -45,12 +43,6 @@ See AWARENESS.md for the full design document.
 .float sense_hazard_left;       // TRUE if lava/slime to the left-ahead
 .float sense_hazard_right;      // TRUE if lava/slime to the right-ahead
 
-// --- Lateral clearance (NEW -- enables local navigation) ---
-.float sense_left_dist;         // distance to wall on left (0-256)
-.float sense_right_dist;        // distance to wall on right (0-256)
-.vector sense_left_normal;      // left wall normal
-.vector sense_right_normal;     // right wall normal
-
 // --- Target/enemy visibility cache ---
 // Replaces: fisible() multi-trace calls, bot_fight_style() LOS check,
 //           bot_enemy_near_wall() trace
@@ -61,20 +53,6 @@ See AWARENESS.md for the full design document.
 .float sense_my_size;           // cached bot_size_player(self) for this frame
 .float sense_enemy_size;        // cached bot_size_player(enemy) for this frame
 .float sense_friendly_block;    // TRUE if teammate in line of fire
-
-// --- Local navigation fan (NEW -- enables waypoint-free intra-region movement) ---
-// 8-direction clearance distances at 45-degree intervals
-// Uses world frame (N=+Y, E=+X, etc.) for stability across frames
-.float sense_nav_n;             // +Y clearance
-.float sense_nav_ne;            // +X+Y clearance
-.float sense_nav_e;             // +X clearance
-.float sense_nav_se;            // +X-Y clearance
-.float sense_nav_s;             // -Y clearance
-.float sense_nav_sw;            // -X-Y clearance
-.float sense_nav_w;             // -X clearance
-.float sense_nav_nw;            // -X+Y clearance
-.float sense_nav_best_dir;      // computed best direction toward goal (yaw angle, -1 = none)
-.float sense_nav_openness;      // 0.0 = tight corridor, 1.0 = open room
 
 
 /*
@@ -300,56 +278,6 @@ void() bot_sense_forward =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_sense_lateral
-
-Left/right clearance probing. Gives corridor
-awareness for dodge maneuvering and local nav.
-
-Traces: 2 (new capability)
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void() bot_sense_lateral =
-{
-	local vector ang, left, right, start;
-
-	ang = self.velocity;
-	ang_z = 0;
-
-	if (vlen(ang) < 0.1)
-	{
-		// no velocity: use facing direction
-		makevectors(self.v_angle);
-		ang = v_forward;
-		ang_z = 0;
-	}
-
-	ang = normalize(ang);
-
-	// perpendicular vectors
-	left_x = ang_y;
-	left_y = ang_x * -1;
-	right_x = ang_y * -1;
-	right_y = ang_x;
-
-	start = self.origin;
-
-	// Trace 1: left clearance
-	traceline(start, start + left * 256, TRUE, self);
-	self.sense_left_dist = trace_fraction * 256;
-	self.sense_left_normal = trace_plane_normal;
-
-	// Trace 2: right clearance
-	traceline(start, start + right * 256, TRUE, self);
-	self.sense_right_dist = trace_fraction * 256;
-	self.sense_right_normal = trace_plane_normal;
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
 bot_sense_visibility
 
 Cache LOS checks for current enemy and nav
@@ -460,146 +388,13 @@ void() bot_sense_visibility =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_sense_local_nav
-
-8-direction fan traces for intra-region
-navigation. Provides clearance distances in
-all compass directions plus computed best
-direction toward goal and openness score.
-
-Traces: 8 (new capability)
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float(float dir_yaw, float dist, float goal_yaw) score_nav_dir =
-{
-	local float ang_diff, score;
-	ang_diff = fabs(angcomp(dir_yaw, goal_yaw));
-	score = (1 - ang_diff / 180) * 0.6 + (dist / 256) * 0.4;
-	return score;
-};
-
-void() bot_sense_local_nav =
-{
-	local vector start, dir;
-	local float total_dist, best_score, goal_yaw;
-	local float score, dist;
-	local vector goal_dir;
-
-	start = self.origin;
-
-	// N (+Y)
-	dir = '0 1 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_n = trace_fraction * 256;
-
-	// NE (+X+Y)
-	dir = '0.707 0.707 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_ne = trace_fraction * 256;
-
-	// E (+X)
-	dir = '1 0 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_e = trace_fraction * 256;
-
-	// SE (+X-Y)
-	dir = '0.707 -0.707 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_se = trace_fraction * 256;
-
-	// S (-Y)
-	dir = '0 -1 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_s = trace_fraction * 256;
-
-	// SW (-X-Y)
-	dir = '-0.707 -0.707 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_sw = trace_fraction * 256;
-
-	// W (-X)
-	dir = '-1 0 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_w = trace_fraction * 256;
-
-	// NW (-X+Y)
-	dir = '-0.707 0.707 0';
-	traceline(start, start + dir * 256, TRUE, self);
-	self.sense_nav_nw = trace_fraction * 256;
-
-	// compute openness: average clearance normalized to 0-1
-	total_dist = self.sense_nav_n + self.sense_nav_ne + self.sense_nav_e
-		+ self.sense_nav_se + self.sense_nav_s + self.sense_nav_sw
-		+ self.sense_nav_w + self.sense_nav_nw;
-	self.sense_nav_openness = total_dist / (256 * 8);
-
-	// compute best direction toward goal
-	self.sense_nav_best_dir = -1;
-
-	if (self.target1 && self.target1 != world)
-	{
-		goal_dir = realorigin(self.target1) - self.origin;
-		goal_dir_z = 0;
-		if (vlen(goal_dir) > 1)
-		{
-			goal_dir = normalize(goal_dir);
-			goal_yaw = vectoyaw(goal_dir);
-			best_score = -1;
-
-			// score each of the 8 directions:
-			// weighted combination of (a) alignment with goal and (b) clearance
-
-			dist = self.sense_nav_n;
-			score = score_nav_dir(90, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 90; }
-
-			dist = self.sense_nav_ne;
-			score = score_nav_dir(45, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 45; }
-
-			dist = self.sense_nav_e;
-			score = score_nav_dir(0, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 0; }
-
-			dist = self.sense_nav_se;
-			score = score_nav_dir(315, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 315; }
-
-			dist = self.sense_nav_s;
-			score = score_nav_dir(270, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 270; }
-
-			dist = self.sense_nav_sw;
-			score = score_nav_dir(225, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 225; }
-
-			dist = self.sense_nav_w;
-			score = score_nav_dir(180, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 180; }
-
-			dist = self.sense_nav_nw;
-			score = score_nav_dir(135, dist, goal_yaw);
-			if (dist > 32 && score > best_score) { best_score = score; self.sense_nav_best_dir = 135; }
-		}
-	}
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
 bot_sense
 
 Main entry point. Called once per bot per AI
 tick from BotAI(), before any decision-making.
 
-Amortizes expensive probes across frames:
-- Ground + forward: every frame
-- Lateral: every ~2 frames
-- Visibility: every frame (combat-critical)
-- Local nav fan: every ~3 frames
+Runs all three probe passes every frame:
+ground state, forward obstacles, visibility.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -617,20 +412,7 @@ void() bot_sense =
 	else
 		self.sense_enemy_size = 0;
 
-	bot_sense_ground();                      // every frame
-	bot_sense_forward();                     // every frame
-
-	if (time > self.sense_lateral_time)      // every 2nd frame
-	{
-		bot_sense_lateral();
-		self.sense_lateral_time = time + 0.028;  // ~2 frames at 72fps
-	}
-
-	bot_sense_visibility();                  // every frame (combat-critical)
-
-	if (time > self.sense_nav_time)          // every 3rd frame
-	{
-		bot_sense_local_nav();
-		self.sense_nav_time = time + 0.042;  // ~3 frames at 72fps
-	}
+	bot_sense_ground();
+	bot_sense_forward();
+	bot_sense_visibility();
 };

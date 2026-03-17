@@ -143,36 +143,32 @@ for all variables in the bot...
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
 .float b_strafe_time, b_strafe_dir;
-.float b_bhop_strafe;
 .float b_aim_delay, b_aim_offset;
 .float b_ambush_time;
-.float b_bhop_land;
 .float obs_time;		// when AI_OBSTRUCTED was first set (corner commitment)
 .float b_wepswitch_time;
-.float b_personality;
-
-// human emulation: movement
-.float b_nav_jitter_time;	// next time to add random strafe during navigation
-.float b_bhop_fumble;		// chance to miss a bhop jump this chain (0-1)
-
-// idle behavior
-.float b_idle_glance_time;	// next time to glance around while navigating
-.float b_idle_glance_yaw;	// target yaw offset for current glance (0 = not glancing)
-.float b_idle_jump_time;	// next recreational jump time
-
-// human emulation: aim
-.float b_aim_flick;		// overshoot amount on target acquisition (degrees)
-.float b_aim_drift_phase;	// sine wave phase for low-frequency tracking drift
-.float b_aim_last_yaw_err;	// last frame's yaw error for overcorrection modeling
-
-// human emulation: decisions
 .float b_react_time;		// delay before engaging newly detected enemy
 .float b_wep_commit_time;	// locked into current weapon until this time
 
 // combat state machine
 .float b_combat_state;
 .float b_combat_time;		// when we entered current state
-.float b_los_time;		// last time we had LOS to enemy
+
+// reward profile (per-bot weights, set at spawn)
+.float w_survival;
+.float w_combat;
+.float w_scavenge;
+.float w_quad;
+.float w_pent;
+.float w_ring;
+
+// item registry (cached on item entities at map load)
+.float item_res;		// resource type: RES_HEALTH, RES_ARMOR, etc.
+.float item_pool;		// which pool: POOL_SHELLS, POOL_NAILS, etc.
+.float item_mag;		// magnitude: what this gives / pool capacity (0-1)
+.float item_respawn_dur;	// seconds to respawn
+.float item_respawn_at;		// time when this item returns (0 = available)
+.entity _item_next;		// item registry linked list
 
 // opponent modeling (skill 2+)
 .entity b_opp_ent;		// which enemy we're tracking
@@ -181,18 +177,6 @@ for all variables in the bot...
 .float b_opp_strafe;		// enemy strafe tendency (-1 to +1)
 .float b_opp_dist;		// enemy preferred distance
 .float b_opp_track_time;	// last opponent model update
-
-// personality types
-float PERSONALITY_BALANCED	= 0;
-float PERSONALITY_AGGRESSIVE	= 1;
-float PERSONALITY_DEFENSIVE	= 2;
-float PERSONALITY_CAMPER	= 3;
-
-// ambush patience by skill level (seconds)
-float AMBUSH_PATIENCE_SKILL0	= 5;
-float AMBUSH_PATIENCE_SKILL1	= 8;
-float AMBUSH_PATIENCE_SKILL2	= 12;
-float AMBUSH_PATIENCE_SKILL3	= 18;
 
 // combat states (state machine)
 float CSTATE_NONE	= 0;	// not in combat
@@ -269,6 +253,9 @@ float OPT_SAVEBOTS	= 1;
 float OPT_NOCHAT	= 2;
 
 // -------globals-----
+entity	item_head;		// head of item registry linked list
+float	item_reg_time;		// last time registry was rebuilt
+
 float 	active_clients;
 float		max_clients, real_frametime;
 float		bot_count, b_options;
@@ -351,22 +338,21 @@ vector(float wep) weapon_range;
 float(float wep, float brange) bot_weapon_score;
 void(float brange) bot_weapon_switch;
 void() bot_shoot;
-void() bot_dodge_stuff;
+void() bot_projectile_scan;
+void() bot_find_enemy;
 void() bot_fight_style;
 void() bot_combat_strafe;
 void() bot_retreat;
 void() bot_drop_enemy;
 
-// bot_goal.qc — want-based goal system
+// bot_goal.qc — item registry + goal system
+void() map_stuff;
+void() act_normal;
+float(entity thing) bot_stuff;
 float(entity thing) bot_want;
-void(float scope) bot_pick_goal;
+void(float scope) bot_get;
 
-// bot_ai.qc — priority pipeline + main AI loop
-float() bot_ai_survival;
-float() bot_ai_unstuck;
-float() bot_ai_combat;
-float() bot_ai_navigate;
-void() bot_ai_idle;
+// bot_ai.qc — main AI loop
 void() bot_handle_ai;
 void() bot_path;
 
@@ -1092,9 +1078,7 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	else if (whatskill < 0)
 		whatskill = 0;
 	self.b_skill = whatskill;
-
-	// assign random personality for varied playstyles
-	self.b_personality = floor(random() * 4);
+	act_normal();
 
 	if (teamplay && !coop)
 	{

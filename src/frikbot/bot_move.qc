@@ -295,7 +295,7 @@ a hazard is detected.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-float drop_ok;  // cached result of bot_wants_to_drop() for current frame
+float frik_drop_ok;  // cached bot_wants_to_drop() for current frik_obstacles frame
 
 float() frik_check_hazard =
 {
@@ -310,11 +310,10 @@ float() frik_check_hazard =
 		return FALSE;
 	ang = normalize(ang);
 
-	// read from sense cache instead of tracing
 	// center-ahead hazard (but defer to navigation intent for drops)
 	if (self.sense_fwd_ground_type < -3)
 	{
-		if (!drop_ok)
+		if (!frik_drop_ok)
 		{
 			frik_obstructed(ang, TRUE);
 			return TRUE;
@@ -351,8 +350,8 @@ void() frik_obstacles =
 	if (self.b_aiflags & AI_BLIND)
 		return;
 
-	// cache bot_wants_to_drop for this frame (called up to 8x otherwise)
-	drop_ok = bot_wants_to_drop();
+	// cache for this frame (read by frik_check_hazard + gap logic)
+	frik_drop_ok = bot_wants_to_drop();
 
 	// refresh safety-critical sense data every physics frame
 	// (bot_sense() runs inside BotAI which is AFTER frik_obstacles
@@ -378,7 +377,7 @@ void() frik_obstacles =
 			if (conts < -3 || conts == CONTENT_EMPTY)
 			{
 				// navigating to a target below? trust pathfinding
-				if (drop_ok)
+				if (frik_drop_ok)
 					return;
 
 				// lava, slime, or void ahead — hard stop
@@ -408,80 +407,40 @@ void() frik_obstacles =
 	ang = self.velocity;
 	ang_z = 0;
 
-	if (!self.sense_fwd_jumpable) // I can't make it
+	// --- gap but not jumpable ---
+	if (!self.sense_fwd_jumpable)
 	{
-		if (conts < -3) // bad stuff down there
-		{
-			if (drop_ok)
-				return; // navigation says drop — trust it
-			frik_obstructed(normalize(ang), TRUE);
-			return;
-		}
-		else
-		{
-			if (drop_ok)
-				return; // safe to fall toward target
-			frik_obstructed(normalize(ang), FALSE);
-			return;
-		}
+		if (frik_drop_ok)
+			return; // navigation says drop — trust it
+		frik_obstructed(normalize(ang), (conts < -3));
+		return;
 	}
-	else
-	{
-		// I can make it -- check for a ledge blocking path
-		dist = gap;
-		ang = normalize(ang);
-		traceline(self.origin, self.origin + (ang * (dist + 20)), TRUE, self);
-		if (trace_fraction != 1)
-		{
-			if (conts < -3)
-			{
-				if (drop_ok)
-					return;
-				frik_obstructed(ang, TRUE);
-				return;
-			}
-			else
-			{
-				if (drop_ok)
-					return; // safe to fall toward target
-				frik_obstructed(ang, FALSE);
-				return;
-			}
-		}
 
-		if (self.target1)
-		{
-			// getting further away from my target?
-			dist = vlen(self.target1.origin - (ang + self.origin));
-			if (dist > vlen(self.target1.origin - self.origin))
-			{
-				if (conts < -3)
-				{
-					frik_obstructed(ang, TRUE);
-					return;
-				}
-				else
-				{
-					frik_obstructed(ang, FALSE);
-					return;
-				}
-			}
-		}
-	}
-	if (hgt < -18)
+	// --- gap and jumpable: check for wall blocking the jump ---
+	ang = normalize(ang);
+	traceline(self.origin, self.origin + (ang * (gap + 20)), TRUE, self);
+	if (trace_fraction != 1)
 	{
-		if (conts < -3)
+		if (frik_drop_ok)
+			return;
+		frik_obstructed(ang, (conts < -3));
+		return;
+	}
+
+	// getting further from target? treat as obstruction
+	if (self.target1)
+	{
+		dist = vlen(self.target1.origin - (ang + self.origin));
+		if (dist > vlen(self.target1.origin - self.origin))
 		{
-			if (drop_ok)
-				return;
-			frik_obstructed(normalize(self.velocity), TRUE);
+			frik_obstructed(ang, (conts < -3));
 			return;
 		}
-		if (drop_ok)
-			return; // safe to fall toward target
-		bot_jump();
 	}
-	// go for it
+
+	// clear to jump the gap
+	if (hgt < -18)
+		bot_jump();
 };
 
 /*
@@ -494,181 +453,10 @@ blah
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_bhop
-
-Bunny hop / strafe jump logic for skill 2+.
-Chains jumps on landing and adds air strafe
-to gain speed via SV_AirAccelerate.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void() bot_bhop =
-{
-	local float spd, yaw_nudge, tdist;
-	local vector vel;
-
-	// only skill 2+ bunny hops (aggressive personality: skill 1+ can bhop)
-	if (self.b_personality == PERSONALITY_AGGRESSIVE)
-	{
-		if (self.b_skill < 1)
-			return;
-	}
-	else if (self.b_personality == PERSONALITY_DEFENSIVE || self.b_personality == PERSONALITY_CAMPER)
-	{
-		// defensive/camper: rarely bhop
-		if (self.b_skill < 3)
-			return;
-	}
-	else
-	{
-		// balanced: standard skill 2+ threshold
-		if (self.b_skill < 2)
-			return;
-	}
-
-	// don't bhop during precision movement, on trains, or in water
-	if (self.b_aiflags & (AI_PRECISION | AI_RIDE_TRAIN | AI_WAIT))
-		return;
-	if (self.waterlevel > 1)
-		return;
-
-	// don't bhop during active combat — need precise movement control
-	if (self.enemy && self.enemy != world && self.enemy.health > 0)
-		return;
-
-	// don't bhop when target is close (prevents overshooting)
-	// require longer distance for bhop to be worthwhile
-	if (self.target1)
-	{
-		tdist = vlen(realorigin(self.target1) - self.origin);
-		if (tdist < 300)
-			return;
-	}
-	else
-		return;  // no target = no reason to bhop
-
-	// --- environmental safety checks (use sense cache) ---
-
-	// don't bhop in tight spaces — corridors, doorways, narrow passages
-	// openness 0.0 = walled in, 1.0 = open room; require open-ish area
-	if (self.sense_nav_openness < 0.35)
-		return;
-
-	// don't bhop when hazards (lava/slime) are nearby
-	if (self.sense_hazard_left || self.sense_hazard_right)
-		return;
-	if (self.sense_fwd_ground_type < -3)  // lava or slime ahead
-		return;
-
-	// don't bhop near edges/dropoffs
-	if (self.sense_on_edge)
-		return;
-
-	// don't bhop when a wall is close ahead (would just slam into it)
-	if (self.sense_fwd_wall_dist < 200)
-		return;
-
-	vel = self.velocity;
-	vel_z = 0;
-	spd = vlen(vel);
-
-	if (self.flags & FL_ONGROUND)
-	{
-		// in a chain - keep jumping if speed is above a lower "stop" threshold
-		if (self.b_bhop_land)
-		{
-			// abort chain if environment became unsafe
-			if (self.sense_hazard_left || self.sense_hazard_right
-				|| self.sense_on_edge || self.sense_fwd_ground_type < -3
-				|| self.sense_nav_openness < 0.25)
-			{
-				self.b_bhop_land = 0;
-				self.b_bhop_strafe = 0;
-				return;
-			}
-
-			// abort if we're now close to target (prevents overshooting)
-			if (self.target1)
-			{
-				if (vlen(realorigin(self.target1) - self.origin) < 200)
-				{
-					self.b_bhop_land = 0;
-					self.b_bhop_strafe = 0;
-					return;
-				}
-			}
-
-			if (spd > 200)
-			{
-				// human emulation: occasionally fumble a bhop in the chain
-				if (random() < self.b_bhop_fumble)
-				{
-					self.b_bhop_land = 0;
-					return;
-				}
-				bot_jump();
-				return;
-			}
-			else
-			{
-				// speed dropped too low, break the chain
-				self.b_bhop_land = 0;
-				self.b_bhop_strafe = 0;
-				return;
-			}
-		}
-
-		// start a bhop chain if moving fast enough
-		// skill 3: initiates aggressively, skill 1-2: needs near-max run speed
-		if ((self.b_skill >= 3 && spd > 150) || spd > 280)
-		{
-			bot_jump();
-			self.b_bhop_land = 1;
-			// set fumble rate for this chain based on skill
-			// skill 1: 25%, skill 2: 15%, skill 3: 5%
-			if (self.b_skill >= 3)
-				self.b_bhop_fumble = 0.05;
-			else if (self.b_skill >= 2)
-				self.b_bhop_fumble = 0.15;
-			else
-				self.b_bhop_fumble = 0.25;
-		}
-	}
-	else if (self.b_bhop_land)
-	{
-		// in air during bhop - strafe + yaw turn for air acceleration
-		// SV_AirAccelerate requires wish direction offset from velocity,
-		// achieved by holding strafe and turning into the strafe direction
-		if (self.b_bhop_strafe == 0)
-		{
-			if (random() < 0.5)
-				self.b_bhop_strafe = 1;
-			else
-				self.b_bhop_strafe = -1;
-		}
-		if (self.b_bhop_strafe > 0)
-			self.keys = self.keys | KEY_MOVERIGHT;
-		else
-			self.keys = self.keys | KEY_MOVELEFT;
-
-		// turn view into strafe direction for actual speed gain
-		// skill 3: 5-8 deg/frame, skill 2: 3-5 deg/frame
-		if (self.b_skill >= 3)
-			yaw_nudge = 5 + random() * 3;
-		else
-			yaw_nudge = 3 + random() * 2;
-		self.b_angle_y = self.b_angle_y + self.b_bhop_strafe * yaw_nudge;
-	}
-};
-
 void() frik_movetogoal =
 {
-	local vector way, start, stop, ang;
-	local float g, jitter_chance, jitter_wait;
+	local vector way;
+	local float g;
 
 	if (self.target1 == world)
 	{
@@ -686,30 +474,6 @@ void() frik_movetogoal =
 	way = normalize(way);
 	self.keys = (self.keys & 960) | frik_KeysForDir(way);
 
-	// human emulation: occasional strafe jitter during navigation
-	// humans don't run in perfectly straight lines
-	// personality: aggressive bots are fidgety, campers/defensive move clean
-	if (!self.enemy && time > self.b_nav_jitter_time)
-	{
-		if (self.b_personality == PERSONALITY_AGGRESSIVE)
-		{	jitter_chance = 0.25; jitter_wait = 0.2 + random() * 0.3; }
-		else if (self.b_personality == PERSONALITY_CAMPER)
-		{	jitter_chance = 0.06; jitter_wait = 0.5 + random() * 0.8; }
-		else if (self.b_personality == PERSONALITY_DEFENSIVE)
-		{	jitter_chance = 0.08; jitter_wait = 0.4 + random() * 0.6; }
-		else
-		{	jitter_chance = 0.15; jitter_wait = 0.3 + random() * 0.5; }
-
-		if (random() < jitter_chance)
-		{
-			if (random() < 0.5)
-				self.keys = self.keys | KEY_MOVELEFT;
-			else
-				self.keys = self.keys | KEY_MOVERIGHT;
-		}
-		self.b_nav_jitter_time = time + jitter_wait;
-	}
-
 	frik_recognize_plat(TRUE);
 
 	if (self.b_aiflags & AI_PRECISION)
@@ -721,22 +485,48 @@ void() frik_movetogoal =
 		if (fabs(g) > 10)
 			self.keys = self.keys & 960;
 	}
-	else
-		bot_bhop();
 };
 
 float(vector weird) frik_walkmove =
 {
 	// okay so it's not walkmove
 	// sue me
- 	self.keys = (self.keys & 960) | frik_KeysForDir(weird);
+	local vector org, dir, start, stop;
+	local float lookkeys, oflags, yaw, conts;
+
+	lookkeys = self.keys & 960;
+	self.keys = lookkeys | frik_KeysForDir(weird);
+
+	if (self.flags & FL_ONGROUND)
+	{
+		dir = weird;
+		dir_z = 0;
+		if (vlen(dir) > 0.1)
+		{
+			dir = normalize(dir);
+			start = self.origin + dir * 16;
+			start_z = self.origin_z + self.mins_z;
+			stop = start - '0 0 40';
+			traceline(start, stop, TRUE, self);
+			if (trace_fraction == 1)
+			{
+				self.keys = lookkeys;
+				return FALSE;
+			}
+
+			conts = pointcontents(trace_endpos + '0 0 4');
+			if (conts < -3)
+			{
+				self.keys = lookkeys;
+				return FALSE;
+			}
+		}
+	}
 
 	frik_recognize_plat(TRUE);
 
 	// test if movement in this direction is actually possible
 	// callers like bot_combat_strafe use this to flip direction on walls
-	local vector org;
-	local float oflags, yaw;
 	org = self.origin;
 	oflags = self.flags;
 	yaw = vectoyaw(weird);
@@ -744,6 +534,7 @@ float(vector weird) frik_walkmove =
 	{
 		self.origin = org;
 		self.flags = oflags;
+		self.keys = lookkeys;
 		return FALSE;
 	}
 	self.origin = org;

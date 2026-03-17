@@ -50,9 +50,7 @@ void() bot_opp_model_update =
 	if (time < self.b_opp_track_time + 0.1)
 		return;
 
-	if (self.b_skill >= 3) blend = 0.3;
-	else if (self.b_skill >= 2) blend = 0.15;
-	else blend = 0.08;
+	blend = 0.08 + self.b_skill * 0.07;
 
 	self.b_opp_weapon = self.enemy.weapon;
 	v = self.enemy.origin - self.origin;
@@ -259,9 +257,7 @@ void(float brange) bot_weapon_switch =
 	if (!best_pulse) return;
 	if (self.b_skill < 3 && self.b_wep_commit_time > time) return;
 	self.impulse = best_pulse;
-	if (self.b_skill == 0) self.b_wep_commit_time = time + 2.5 + random() * 2;
-	else if (self.b_skill == 1) self.b_wep_commit_time = time + 1.5 + random();
-	else if (self.b_skill == 2) self.b_wep_commit_time = time + 0.8 + random() * 0.5;
+	self.b_wep_commit_time = time + 2.5 - self.b_skill * 0.6 + random() * (2.0 - self.b_skill * 0.5);
 };
 
 void() bot_shoot =
@@ -274,29 +270,25 @@ void() bot_shoot =
 	self.button0 = TRUE;
 };
 
-// -=-=- "Where'd that come from!?" — Enemy Detection -=-=-
+// -=-=- Projectile Scan — dodge incoming fire -=-=-
 
-void() bot_dodge_stuff =
+void() bot_projectile_scan =
 {
 	local entity foe;
-	local float avdist, foesz, flen, tsz;
-	local vector v;
+	local float avdist, flen;
 
 	if (waypoint_mode > WM_LOADED) return;
 	self.avoid = world;
-
-	if (self.enemy)
-		foesz = self.sense_enemy_size + vlen(self.origin - realorigin(self.enemy)) * 0.5;
-	else
-		foesz = 9999999;
-
-	// scan for incoming projectiles — grenades, rockets, nails
 	avdist = 256;
+
 	foe = find(world, classname, "grenade");
 	while(foe)
 	{
-		flen = vlen(foe.origin - self.origin);
-		if (flen < avdist) { avdist = flen; self.avoid = foe; }
+		if (foe.owner != self)
+		{
+			flen = vlen(foe.origin - self.origin);
+			if (flen < avdist) { avdist = flen; self.avoid = foe; }
+		}
 		foe = find(foe, classname, "grenade");
 	}
 	if (!self.avoid)
@@ -319,27 +311,36 @@ void() bot_dodge_stuff =
 			foe = find(foe, classname, "spike");
 		}
 	}
+};
+
+// -=-=- Enemy Scan — find someone to fight -=-=-
+// Only scans when bot has no current enemy.
+
+void() bot_find_enemy =
+{
+	local entity foe;
+	local float foesz, tsz;
+	local vector v;
+
+	foesz = 9999999;
 
 	if (coop)
-	{	// hunt monsters
-		if (!self.enemy)
+	{
+		foe = findradius(self.origin, 9999);
+		while(foe)
 		{
-			foe = findradius(self.origin, 9999);
-			while(foe)
-			{
-				if (foe.flags & FL_MONSTER)
-					if (foe.health > 0)
-					{
-						tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
-						if (tsz < foesz) if (fisible(foe))
-						{ self.enemy = foe; foesz = tsz; }
-					}
-				foe = foe.chain;
-			}
+			if (foe.flags & FL_MONSTER)
+				if (foe.health > 0)
+				{
+					tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
+					if (tsz < foesz) if (fisible(foe))
+					{ self.enemy = foe; foesz = tsz; }
+				}
+			foe = foe.chain;
 		}
 	}
 	else
-	{	// deathmatch: pick best enemy from player list
+	{
 		foe = player_head;
 		while(foe)
 		{
@@ -354,30 +355,33 @@ void() bot_dodge_stuff =
 				}
 			foe = foe._next;
 		}
-		// reaction delay — humans need a sec to process
-		if (self.enemy && self.b_skill < 3)
-		{
-			if (self.b_react_time == 0)
-			{
-				if (self.b_skill == 0) self.b_react_time = time + 0.3 + random() * 0.4;
-				else if (self.b_skill == 1) self.b_react_time = time + 0.15 + random() * 0.25;
-				else self.b_react_time = time + 0.05 + random() * 0.1;
-			}
-			if (self.b_react_time > time)
-				self.enemy = world;
-		}
-		else if (!self.enemy)
-			self.b_react_time = 0;
 	}
 
-	// ambush first-strike: snap aim and fire immediately
+	// reaction delay
+	if (self.enemy && self.b_skill < 3)
+	{
+		if (self.b_react_time == 0)
+			self.b_react_time = time + 0.35 - self.b_skill * 0.1 + random() * (0.4 - self.b_skill * 0.1);
+		if (self.b_react_time > time)
+			self.enemy = world;
+	}
+	else if (!self.enemy)
+		self.b_react_time = 0;
+
+	// new enemy: start the LOS grace clock
+	if (self.enemy)
+		self.b_combat_time = time;
+
+	// ambush first-strike
 	if (self.b_ambush_time > 0 && self.enemy)
 	{
-		v = vectoangles(normalize(realorigin(self.enemy) - self.origin));
+		local vector org;
+		org = realorigin(self.enemy) - self.origin;
+		v = vectoangles(normalize(org));
 		v_x = v_x * -1;
 		self.b_angle = v;
 		if (self.b_skill >= 1) self.v_angle = v;
-		bot_weapon_switch(vlen(realorigin(self.enemy) - self.origin));
+		bot_weapon_switch(vlen(org));
 		bot_shoot();
 		self.b_ambush_time = 0;
 		self.b_aiflags = self.b_aiflags - (self.b_aiflags & AI_WAIT);
@@ -424,11 +428,10 @@ void() bot_combat_strafe =
 	makevectors(self.v_angle);
 	right = v_right;
 
-	if (foedist < 150 && self.b_skill >= 1) strafe_interval = 0.2 + random() * 0.3;
-	else if (self.b_skill == 0) strafe_interval = 2.0 + random();
-	else if (self.b_skill == 1) strafe_interval = 1.0 + random();
-	else if (self.b_skill == 2) strafe_interval = 0.5 + random();
-	else strafe_interval = 0.3 + random() * 0.5;
+	if (foedist < 150 && self.b_skill >= 1)
+		strafe_interval = 0.2 + random() * 0.3;
+	else
+		strafe_interval = 2.0 - self.b_skill * 0.55 + random() * (1.0 - self.b_skill * 0.15);
 
 	if (self.b_strafe_dir == 0)
 	{
@@ -532,7 +535,7 @@ void() bot_retreat =
 
 	if (self.b_skill == 3 && self.health < 50)
 		if (!self.target1 || self.target1.classname == "waypoint")
-			bot_pick_goal(FALSE);
+			bot_get(FALSE);
 };
 
 // -=-=- bot_fight_style — The Main Event -=-=-
@@ -544,18 +547,13 @@ void() bot_fight_style =
 	local vector v, v1, v2;
 	local float foedist, has_los;
 
-	if (self.enemy.health <= 0 || !self.enemy.takedamage)
-	{ bot_drop_enemy(); return; }
+	has_los = self.sense_enemy_vis;
 
-	if (!self.sense_enemy_vis)
-	{
-		if (self.b_skill >= 1 && (time - self.b_los_time) < 0.7)
-			has_los = FALSE;
-		else
-		{ bot_drop_enemy(); return; }
-	}
-	else
-	{ self.b_los_time = time; has_los = TRUE; }
+	// lost LOS? give up after 1s (b_react_time doubles as last-seen tracker here)
+	if (has_los)
+		self.b_react_time = time;
+	else if ((time - self.b_react_time) > 1.0)
+	{ bot_drop_enemy(); return; }
 
 	bot_opp_model_update();
 	foedist = self.sense_enemy_dist;
@@ -563,7 +561,7 @@ void() bot_fight_style =
 
 	if (bot_in_weapon_range(foedist, v))
 	{
-		if (has_los && !self.sense_friendly_block && self.sense_fwd_wall_dist >= foedist)
+		if (has_los && !self.sense_friendly_block)
 			bot_shoot();
 		if (self.b_skill >= 1 && time > self.b_wepswitch_time)
 		{ bot_weapon_switch(foedist); self.b_wepswitch_time = time + 1.5; }
@@ -605,7 +603,8 @@ void() bot_fight_style =
 		bot_retreat();
 		if (teamplay && random() < 0.02)
 		{ bot_start_topic(5); self.b_chattime = 1; }
-		if (has_los) bot_shoot();
+		if (has_los && !self.sense_friendly_block && bot_in_weapon_range(foedist, v))
+			bot_shoot();
 	}
 	else
 	{

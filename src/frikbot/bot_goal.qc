@@ -219,128 +219,381 @@ void(entity targ) bot_check_lost =
 		bot_lost(targ, FALSE);
 };
 
-// ----- bot_want: "how bad do I want this?" returns 0-100 -----
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-float(entity thing) bot_want =
+Map Stuff — item registry
+
+Classifies every item ONCE at map load.
+Caches objective facts on each entity:
+what resource, which pool, how much it gives.
+All string comparisons happen here, nowhere else.
+Rebuilt every 10s to catch backpacks.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+// ---- resource types ----
+float RES_HEALTH	= 1;
+float RES_ARMOR		= 2;
+float RES_WEAPON	= 3;
+float RES_AMMO		= 4;
+float RES_POWERUP	= 5;
+
+// ---- resource pools ----
+float POOL_HEALTH	= 1;
+float POOL_ARMOR	= 2;
+float POOL_SHELLS	= 3;
+float POOL_NAILS	= 4;
+float POOL_ROCKETS	= 5;
+float POOL_CELLS	= 6;
+float POOL_QUAD		= 7;
+float POOL_PENT		= 8;
+float POOL_RING		= 9;
+float POOL_SUIT		= 10;
+
+// ---- pool capacities (engine constants) ----
+float CAP_HEALTH	= 100;
+float CAP_ARMOR_EHP	= 160;	// RA effective HP: 200 * 0.8
+float CAP_SHELLS	= 100;
+float CAP_NAILS		= 200;
+float CAP_ROCKETS	= 100;
+float CAP_CELLS		= 100;
+
+// ---- pickup amounts (engine constants) ----
+float GIVE_HEALTH_NORMAL = 25;
+float GIVE_HEALTH_MEGA	= 100;
+float GIVE_WEP_SHELLS	= 5;
+float GIVE_WEP_NAILS	= 30;
+float GIVE_WEP_ROCKETS	= 5;
+float GIVE_WEP_CELLS	= 15;
+float GIVE_SHELLS_SM	= 20;	float GIVE_SHELLS_LG	= 40;
+float GIVE_NAILS_SM	= 25;	float GIVE_NAILS_LG	= 50;
+float GIVE_ROCKETS_SM	= 5;	float GIVE_ROCKETS_LG	= 10;
+float GIVE_CELLS_SM	= 6;	float GIVE_CELLS_LG	= 12;
+
+// ---- powerup duration ----
+float POWERUP_DUR	= 30;
+
+// ---- reward profiles ----
+// called at bot spawn to set per-bot weights
+
+void() act_normal =
 {
-	// already grabbed or on cooldown? pass
-	if (thing.flags & FL_ITEM)
-	{
-		if (thing.model == string_null)	return 0;
-		if (thing.search_time > time)	return 0;
-	}
+	self.w_survival = 1.0;
+	self.w_combat = 1.0;
+	self.w_scavenge = 0.5;
+	self.w_quad = 0.8;
+	self.w_pent = 0.8;
+	self.w_ring = 0.4;
+};
 
-	// powerups -- always juicy
-	if (thing.classname == "item_artifact_super_damage")	return 65;
-	if (thing.classname == "item_artifact_invulnerability")	return 65;
-	if (thing.classname == "item_artifact_invisibility")	return 65;
+// ---- respawn times (engine constants) ----
+float RESPAWN_ITEM	= 20;
+float RESPAWN_AMMO	= 30;
+float RESPAWN_QUAD	= 60;
+float RESPAWN_MEGA	= 120;
+float RESPAWN_PENT	= 300;
+float RESPAWN_RING	= 300;
+float RESPAWN_SUIT	= 60;
+
+void(entity it) map_classify =
+{
+	if (it.item_res)
+		return;
+
+	// powerups
+	if (it.classname == "item_artifact_super_damage")
+	{ it.item_res = RES_POWERUP; it.item_pool = POOL_QUAD; it.item_mag = 1.0; it.item_respawn_dur = RESPAWN_QUAD; return; }
+	if (it.classname == "item_artifact_invulnerability")
+	{ it.item_res = RES_POWERUP; it.item_pool = POOL_PENT; it.item_mag = 1.0; it.item_respawn_dur = RESPAWN_PENT; return; }
+	if (it.classname == "item_artifact_invisibility")
+	{ it.item_res = RES_POWERUP; it.item_pool = POOL_RING; it.item_mag = 1.0; it.item_respawn_dur = RESPAWN_RING; return; }
+	if (it.classname == "item_artifact_envirosuit")
+	{ it.item_res = RES_POWERUP; it.item_pool = POOL_SUIT; it.item_mag = 0.15; it.item_respawn_dur = RESPAWN_SUIT; return; }
 
 	// health
-	if (thing.classname == "item_health")
+	if (it.classname == "item_health")
 	{
-		if (thing.spawnflags & 2) // megahealth
+		it.item_res = RES_HEALTH; it.item_pool = POOL_HEALTH;
+		if (it.spawnflags & 2)
+		{ it.item_mag = GIVE_HEALTH_MEGA / CAP_HEALTH; it.item_respawn_dur = RESPAWN_MEGA; }
+		else
+		{ it.item_mag = GIVE_HEALTH_NORMAL / CAP_HEALTH; it.item_respawn_dur = RESPAWN_ITEM; }
+		return;
+	}
+
+	// armor (magnitude = effective HP / EHP cap)
+	if (it.classname == "item_armorInv")
+	{ it.item_res = RES_ARMOR; it.item_pool = POOL_ARMOR; it.item_mag = 1.0; it.item_respawn_dur = RESPAWN_ITEM; return; }
+	if (it.classname == "item_armor2")
+	{ it.item_res = RES_ARMOR; it.item_pool = POOL_ARMOR; it.item_mag = 0.5625; it.item_respawn_dur = RESPAWN_ITEM; return; }
+	if (it.classname == "item_armor1")
+	{ it.item_res = RES_ARMOR; it.item_pool = POOL_ARMOR; it.item_mag = 0.1875; it.item_respawn_dur = RESPAWN_ITEM; return; }
+
+	// weapons (magnitude = bonus ammo / pool cap)
+	if (it.classname == "weapon_rocketlauncher")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_ROCKETS; it.item_mag = GIVE_WEP_ROCKETS / CAP_ROCKETS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "weapon_lightning")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_CELLS; it.item_mag = GIVE_WEP_CELLS / CAP_CELLS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "weapon_grenadelauncher")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_ROCKETS; it.item_mag = GIVE_WEP_ROCKETS / CAP_ROCKETS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "weapon_supernailgun")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_NAILS; it.item_mag = GIVE_WEP_NAILS / CAP_NAILS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "weapon_nailgun")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_NAILS; it.item_mag = GIVE_WEP_NAILS / CAP_NAILS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "weapon_supershotgun")
+	{ it.item_res = RES_WEAPON; it.item_pool = POOL_SHELLS; it.item_mag = GIVE_WEP_SHELLS / CAP_SHELLS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+
+	// ammo boxes
+	if (it.classname == "item_rockets")
+	{ it.item_res = RES_AMMO; it.item_pool = POOL_ROCKETS; it.item_mag = ((it.spawnflags & 1) ? GIVE_ROCKETS_LG : GIVE_ROCKETS_SM) / CAP_ROCKETS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "item_cells")
+	{ it.item_res = RES_AMMO; it.item_pool = POOL_CELLS; it.item_mag = ((it.spawnflags & 1) ? GIVE_CELLS_LG : GIVE_CELLS_SM) / CAP_CELLS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "item_spikes")
+	{ it.item_res = RES_AMMO; it.item_pool = POOL_NAILS; it.item_mag = ((it.spawnflags & 1) ? GIVE_NAILS_LG : GIVE_NAILS_SM) / CAP_NAILS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+	if (it.classname == "item_shells")
+	{ it.item_res = RES_AMMO; it.item_pool = POOL_SHELLS; it.item_mag = ((it.spawnflags & 1) ? GIVE_SHELLS_LG : GIVE_SHELLS_SM) / CAP_SHELLS; it.item_respawn_dur = RESPAWN_AMMO; return; }
+
+	// backpacks (dynamic)
+	if (it.model == "progs/backpack.mdl")
+	{ it.item_res = RES_AMMO; it.item_pool = 0; it.item_mag = 0.25; it.item_respawn_dur = 0; return; }
+};
+
+void() map_stuff =
+{
+	local entity e, prev;
+	item_head = world;
+	prev = world;
+
+	e = nextent(world);
+	while (e)
+	{
+		if (e.item_res && e.item_respawn_dur == 0)
+			e.item_res = 0;
+		map_classify(e);
+		if (e.item_res)
 		{
-			if (self.health >= 200) return 0;
-			return 55;
+			if (prev)
+				prev._item_next = e;
+			else
+				item_head = e;
+			e._item_next = world;
+			prev = e;
 		}
-		if (self.health <= 30)	return 70;
-		if (self.health <= 50)	return 55;
-		if (self.health <= 80)	return 35;
-		return 5;
+		e = nextent(e);
 	}
+	item_reg_time = time;
+};
 
-	// armor -- only if it's an upgrade
-	if (thing.classname == "item_armorInv")
-	{
-		if (self.armortype < 0.8 || self.armorvalue < 150) return 60;
-		return 0;
-	}
-	if (thing.classname == "item_armor2")
-	{
-		if (self.armortype < 0.6 || (self.armortype == 0.6 && self.armorvalue < 100)) return 50;
-		return 0;
-	}
-	if (thing.classname == "item_armor1")
-	{
-		if (self.armortype < 0.3 || (self.armortype == 0.3 && self.armorvalue < 50)) return 25;
-		return 0;
-	}
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-	// weapons -- want what we ain't got
-	if (thing.classname == "weapon_rocketlauncher")
-	{
-		if (!(self.items & IT_ROCKET_LAUNCHER))	return 60;
-		if (self.ammo_rockets < 5)		return 30;
-		return 0;
-	}
-	if (thing.classname == "weapon_lightning")
-	{
-		if (!(self.items & IT_LIGHTNING))	return 55;
-		if (self.ammo_cells < 10)		return 25;
-		return 0;
-	}
-	if (thing.classname == "weapon_grenadelauncher")
-	{
-		if (!(self.items & IT_GRENADE_LAUNCHER))	return 45;
-		return 0;
-	}
-	if (thing.classname == "weapon_supernailgun")
-	{
-		if (!(self.items & IT_SUPER_NAILGUN))	return 40;
-		return 0;
-	}
-	if (thing.classname == "weapon_nailgun")
-	{
-		if (!(self.items & IT_NAILGUN))		return 30;
-		return 0;
-	}
-	if (thing.classname == "weapon_supershotgun")
-	{
-		if (!(self.items & IT_SUPER_SHOTGUN))	return 25;
-		return 0;
-	}
+bot_stuff — how full is the bot on this
+item's resource? 0 = empty/don't own, 1 = full.
 
-	// backpacks -- free ammo is free ammo
-	if (thing.model == "progs/backpack.mdl")	return 35;
+For weapons: 0 if don't own, ammo level if do.
 
-	// envirosuit -- meh
-	if (thing.classname == "item_artifact_envirosuit")	return 20;
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
 
-	// monsters -- worth a detour
-	if ((thing.flags & FL_MONSTER) && thing.health > 0)	return 45;
+float(float pool) bot_has_weapon_for =
+{
+	if (pool == POOL_ROCKETS)	return (self.items & IT_ROCKET_LAUNCHER) || (self.items & IT_GRENADE_LAUNCHER);
+	if (pool == POOL_CELLS)		return (self.items & IT_LIGHTNING);
+	if (pool == POOL_NAILS)		return (self.items & IT_SUPER_NAILGUN) || (self.items & IT_NAILGUN);
+	if (pool == POOL_SHELLS)	return (self.items & IT_SUPER_SHOTGUN) || (self.items & IT_SHOTGUN);
+	return FALSE;
+};
 
+float(entity thing) bot_stuff =
+{
+	local float remaining;
+
+	// weapons: 0 if don't own, ammo level if do
+	if (thing.item_res == RES_WEAPON)
+		if (!bot_has_weapon_for(thing.item_pool))
+			return 0;
+
+	// powerups: normalized time remaining (0 = don't have, 1 = just grabbed)
+	if (thing.item_pool == POOL_QUAD)
+	{ remaining = self.super_damage_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
+	if (thing.item_pool == POOL_PENT)
+	{ remaining = self.invincible_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
+	if (thing.item_pool == POOL_RING)
+	{ remaining = self.invisible_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
+	if (thing.item_pool == POOL_SUIT)
+	{ remaining = self.radsuit_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
+
+	if (thing.item_pool == POOL_HEALTH)	return self.health / CAP_HEALTH;
+	if (thing.item_pool == POOL_ARMOR)	return (self.armorvalue * self.armortype) / CAP_ARMOR_EHP;
+	if (thing.item_pool == POOL_ROCKETS)	return self.ammo_rockets / CAP_ROCKETS;
+	if (thing.item_pool == POOL_CELLS)	return self.ammo_cells / CAP_CELLS;
+	if (thing.item_pool == POOL_NAILS)	return self.ammo_nails / CAP_NAILS;
+	if (thing.item_pool == POOL_SHELLS)	return self.ammo_shells / CAP_SHELLS;
 	return 0;
 };
 
-// ----- bot_pick_goal: find the best thing to go after -----
-// scope TRUE = full map (13000 units, pathfind to it)
-// scope FALSE = nearby (500 units, line of sight required)
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-void(float scope) bot_pick_goal =
+bot_want — reward profile
+
+How much does this bot care about this item?
+Returns a weight based on two axes of bot state:
+
+survival = hp * (0.5 + ap * 0.5)
+combat   = best_weapon_tier * ammo_for_best
+
+Each category's weight = own_deficit * axis_deficit * param.
+Sibling resources contribute context without overriding.
+
+Three tunable params: A (survival), B (combat), C (powerups).
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float(entity thing) bot_want =
 {
-	local entity foe, best;
-	local float want, bestwant;
+	local float w;
+	local float hp, ap, survival;
+	local float tier, ammo, combat;
 
-	if (scope)
-		foe = findradius(self.origin, 13000);
-	else
-		foe = findradius(self.origin, 500);
+	// ---- bot state: two axes ----
 
-	bestwant = 0;
-	best = world;
-	while (foe)
+	hp = self.health / CAP_HEALTH;
+	if (hp > 1) hp = 1;
+	ap = (self.armorvalue * self.armortype) / CAP_ARMOR_EHP;
+	if (ap > 1) ap = 1;
+	survival = hp * (0.5 + ap * 0.5);
+
+	tier = 0;
+	ammo = 0;
+	if (self.items & IT_ROCKET_LAUNCHER)
+	{	tier = 1.0; ammo = self.ammo_rockets / CAP_ROCKETS; }
+	else if (self.items & IT_LIGHTNING)
+	{	tier = 1.0; ammo = self.ammo_cells / CAP_CELLS; }
+	else if (self.items & IT_GRENADE_LAUNCHER)
+	{	tier = 0.5; ammo = self.ammo_rockets / CAP_ROCKETS; }
+	else if (self.items & IT_SUPER_NAILGUN)
+	{	tier = 0.5; ammo = self.ammo_nails / CAP_NAILS; }
+	else if (self.items & IT_NAILGUN)
+	{	tier = 0.15; ammo = self.ammo_nails / CAP_NAILS; }
+	else if (self.items & IT_SUPER_SHOTGUN)
+	{	tier = 0.15; ammo = self.ammo_shells / CAP_SHELLS; }
+	combat = tier * ammo;
+
+	// ---- category weight (0-1) ----
+
+	if (thing.item_res == RES_HEALTH)
+		w = (1 - hp) * (1 - survival) * self.w_survival;
+	else if (thing.item_res == RES_ARMOR)
+		w = (1 - ap) * (1 - survival) * self.w_survival;
+	else if (thing.item_res == RES_WEAPON)
+		w = (1 - tier) * (1 - combat) * self.w_combat;
+	else if (thing.item_res == RES_AMMO)
 	{
-		want = bot_want(foe);
-		if (want > 0 && !scope)
-			if (!sisible(foe))
-				want = 0;
-		if (want > bestwant)
-		{
-			bestwant = want;
-			best = foe;
-		}
-		foe = foe.chain;
+		if (thing.item_pool == 0)
+			w = (1 - combat) * self.w_scavenge;
+		else if (bot_has_weapon_for(thing.item_pool))
+			w = (1 - ammo) * (1 - combat) * self.w_combat;
+		else
+			w = (1 - combat) * self.w_scavenge * 0.1;
 	}
+	else if (thing.item_res == RES_POWERUP)
+	{
+		if (thing.item_pool == POOL_QUAD)
+			w = combat * survival * self.w_quad;
+		else if (thing.item_pool == POOL_PENT)
+		{
+			w = 1 - survival;
+			if (combat > w) w = combat;
+			w = w * self.w_pent;
+		}
+		else if (thing.item_pool == POOL_RING)
+			w = combat * survival * self.w_ring;
+		else
+			w = 0.1;
+	}
+	else
+		return 0;
+
+	return w;
+};
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_get — pick the best item to go after
+
+Iterates the item registry. Scores each item:
+  score = raw_contribution * bot_want
+
+raw = mag / (bot_stuff + mag)   — objective
+bot_want                         — subjective profile
+
+scope TRUE = full map + pathfind
+scope FALSE = nearby (500u) + LOS
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void(float scope) bot_get =
+{
+	local entity it, best;
+	local float score, bestscore, raw, has, mag, dist;
+
+	if (time > item_reg_time + 10)
+		map_stuff();
+
+	bestscore = 0;
+	best = world;
+	it = item_head;
+
+	while (it)
+	{
+		dist = vlen(it.origin - self.origin);
+
+		if (!scope)
+			if (dist > 500)
+			{ it = it._item_next; continue; }
+
+		// availability check
+		score = 0;
+		if (it.item_res)
+		{
+			if (it.flags & FL_ITEM)
+			{
+				if (it.model == string_null)
+				{
+					// picked up — stamp respawn time
+					if (it.item_respawn_at == 0 && it.item_respawn_dur > 0)
+						it.item_respawn_at = time + it.item_respawn_dur;
+				}
+				else
+				{
+					it.item_respawn_at = 0;
+					// raw contribution * profile weight * proximity
+					mag = it.item_mag;
+					has = bot_stuff(it);
+					raw = mag / (has + mag);
+					score = raw * bot_want(it) * (400 / (400 + dist));
+				}
+			}
+		}
+
+		if (score > 0 && !scope)
+			if (!sisible(it))
+				score = 0;
+
+		if (score > bestscore)
+		{
+			bestscore = score;
+			best = it;
+		}
+		it = it._item_next;
+	}
+
 	if (best == world)
 		return;
 	if (target_onstack(best))
