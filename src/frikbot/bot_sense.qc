@@ -180,16 +180,17 @@ float(float test_yaw) _bot_go_test =
 	hvel_z = 0;
 	makevectors('0 1 0' * test_yaw);
 	dist = fabs(hvel * v_forward) * real_frametime * 2;
-	if (dist < 16) dist = 16;
+	if (dist < 32) dist = 32;
 	if (dist > 64) dist = 64;
 
 	pre = self.origin;
 	pre_flags = self.flags;
+	self.flags = self.flags | FL_ONGROUND;
 	if (walkmove(test_yaw, dist))
 	{
-		conts = pointcontents(self.origin - '0 0 24');
+		conts = pointcontents(self.origin + '0 0 1' * self.mins_z);
 		if (conts >= -3)
-			return TRUE;		// good — caller restores origin+flags
+			return TRUE;
 	}
 	setorigin(self, pre);
 	self.flags = pre_flags;

@@ -225,7 +225,10 @@ float(vector weird) frik_walkmove =
 
 	safe = bot_go(vectoyaw(weird));
 	if (safe < 0)
+	{
+		self.keys = self.keys & 960;	// stop — don't coast on old keys
 		return FALSE;
+	}
 
 	makevectors('0 1 0' * safe);
 	self.keys = (self.keys & 960) | frik_KeysForDir(v_forward);

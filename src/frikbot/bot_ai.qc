@@ -504,6 +504,7 @@ float stagger_think;
 // lava entry diagnosis: what mode was the bot in when it stepped onto lava?
 .float _m_move_mode;   // current movement mode (set before movement)
 .float _m_was_lava;    // was on lava last frame? (for transition detect)
+
 .float _m_le_nav;      // lava entries while nav-fan guided
 .float _m_le_beeline;  // lava entries while beeline (nodir)
 .float _m_le_combat;   // lava entries while fighting
