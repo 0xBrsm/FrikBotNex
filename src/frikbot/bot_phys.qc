@@ -532,12 +532,18 @@ void() PostPhysics =
 
 	self = self.owner;
 
+	local float _pre_lava, _post_setorigin_lava;
 	self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
+	_pre_lava = (pointcontents(self.origin + '0 0 1' * self.mins_z) < -3);
 	if (self.phys_obj.dest2 == self.origin)
 	{
-		setorigin(self, self.phys_obj.origin); 
-		// might've been moved during other person's physics
-		// (teleporters / plats)
+		setorigin(self, self.phys_obj.origin);
+		_post_setorigin_lava = (pointcontents(self.origin + '0 0 1' * self.mins_z) < -3);
+		if (!_pre_lava && _post_setorigin_lava)
+		{
+			bprint(self.netname);
+			bprint(" LAVA via setorigin\n");
+		}
 
 		if (self.movetype == MOVETYPE_WALK)
 		{
@@ -554,8 +560,14 @@ void() PostPhysics =
 						back = vectoyaw(obstr);
 						cflags = self.flags;
 						self.flags = self.flags | FL_PARTIALGROUND;
+						org = self.origin;
 						if(walkmove(back, dst))
 						{
+							if (!_post_setorigin_lava && pointcontents(self.origin + '0 0 1' * self.mins_z) < -3)
+							{
+								bprint(self.netname);
+								bprint(" LAVA via walkmove\n");
+							}
 							self.flags = cflags;
 							self.phys_obj.dest1_z = 0;
 							self.velocity = self.velocity + self.phys_obj.dest1 - self.phys_obj.velocity;

@@ -154,25 +154,16 @@ void() frik_movetogoal =
 	way = realorigin(self.target1) - self.origin;
 	if (vlen(way) < 25)
 	{
-		self.keys = self.keys & 960;
+		self.movevect = '0 0 0';
+		self.keys = self.oldkeys;
 		return;
 	}
 
-	local float go_yaw;
 	way_z = 0;
-	go_yaw = bot_go(vectoyaw(way));
-	if (go_yaw >= 0)
-	{
+	if (bot_go(vectoyaw(way)))
 		self._m_move_mode = MM_NAV;
-		makevectors('0 1 0' * go_yaw);
-		self.keys = (self.keys & 960) | frik_KeysForDir(v_forward);
-	}
 	else
-	{
-		// every direction blocked — stop
 		self._m_move_mode = MM_BEELINE;
-		self.keys = self.keys & 960;
-	}
 
 	// jump logic: step-ups and safe gap crossings
 	if (self.flags & FL_ONGROUND)
@@ -221,18 +212,7 @@ first — returns FALSE if blocked or unsafe.
 
 float(vector weird) frik_walkmove =
 {
-	local float safe;
-
-	safe = bot_go(vectoyaw(weird));
-	if (safe < 0)
-	{
-		self.keys = self.keys & 960;	// stop — don't coast on old keys
-		return FALSE;
-	}
-
-	makevectors('0 1 0' * safe);
-	self.keys = (self.keys & 960) | frik_KeysForDir(v_forward);
-	return TRUE;
+	return bot_go(vectoyaw(weird));
 };
 
 
