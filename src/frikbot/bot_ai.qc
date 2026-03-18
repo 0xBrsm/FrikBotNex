@@ -555,7 +555,7 @@ void() bot_debug_metrics =
 	}
 	self._m_was_lava = on_lava;
 
-	if (self.sense_best_dir == -1)
+	if (self._m_move_mode == MM_BEELINE)
 		self._m_nodir = self._m_nodir + 1;
 
 	// report every 10s

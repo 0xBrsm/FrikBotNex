@@ -158,17 +158,20 @@ void() frik_movetogoal =
 		return;
 	}
 
-	// use nav fan's best direction (considers clearance + floor + goal)
-	if (self.sense_best_dir >= 0)
+	local float go_yaw;
+	way_z = 0;
+	go_yaw = bot_go(vectoyaw(way));
+	if (go_yaw >= 0)
 	{
-		makevectors('0 1 0' * self.sense_best_dir);
+		self._m_move_mode = MM_NAV;
+		makevectors('0 1 0' * go_yaw);
 		self.keys = (self.keys & 960) | frik_KeysForDir(v_forward);
 	}
 	else
 	{
-		// no good direction from fan — beeline toward target
-		way = normalize(way);
-		self.keys = (self.keys & 960) | frik_KeysForDir(way);
+		// every direction blocked — stop
+		self._m_move_mode = MM_BEELINE;
+		self.keys = self.keys & 960;
 	}
 
 	// jump logic: step-ups and safe gap crossings
@@ -218,13 +221,14 @@ first — returns FALSE if blocked or unsafe.
 
 float(vector weird) frik_walkmove =
 {
-	local float yaw;
+	local float safe;
 
-	yaw = vectoyaw(weird);
-	if (!sense_walkable(yaw))
+	safe = bot_go(vectoyaw(weird));
+	if (safe < 0)
 		return FALSE;
 
-	self.keys = (self.keys & 960) | frik_KeysForDir(weird);
+	makevectors('0 1 0' * safe);
+	self.keys = (self.keys & 960) | frik_KeysForDir(v_forward);
 	return TRUE;
 };
 

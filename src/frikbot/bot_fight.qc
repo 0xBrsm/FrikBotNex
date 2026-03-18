@@ -473,18 +473,6 @@ void() bot_combat_strafe =
 		&& foedist > 150 && foedist < 500 && self.sense_enemy_wall)
 		ideal = foedist;							// splash angle: hold
 
-	// hazard awareness: don't strafe into lava
-	if (self.b_strafe_dir > 0 && self.sense_hazard_left)
-	{
-		self.b_strafe_dir = -1;
-		self.b_strafe_time = time + strafe_interval;
-	}
-	else if (self.b_strafe_dir < 0 && self.sense_hazard_right)
-	{
-		self.b_strafe_dir = 1;
-		self.b_strafe_time = time + strafe_interval;
-	}
-
 	movedir = right * self.b_strafe_dir;
 	if (foedist + 32 < ideal)
 		movedir = movedir + normalize(self.origin - org) * 0.5;
@@ -492,10 +480,6 @@ void() bot_combat_strafe =
 		movedir = normalize(org - self.origin);
 	else if (foedist - 32 > ideal)
 		movedir = movedir + normalize(org - self.origin) * 0.5;
-
-	// edge awareness: don't run off a ledge
-	if (self.sense_on_edge)
-		movedir = movedir * -1;
 
 	if (!frik_walkmove(movedir))
 	{
@@ -541,15 +525,7 @@ void() bot_retreat =
 		else if (self.b_opp_strafe < -0.3) self.b_strafe_dir = 1;
 	}
 
-	// hazard awareness: don't retreat into lava
-	if (self.b_strafe_dir > 0 && self.sense_hazard_left)
-		self.b_strafe_dir = -1;
-	else if (self.b_strafe_dir < 0 && self.sense_hazard_right)
-		self.b_strafe_dir = 1;
-
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
-	if (self.sense_on_edge)
-		movedir = movedir * -1;
 	if (!frik_walkmove(movedir))
 	{
 		movedir = normalize(away + right * self.b_strafe_dir * -0.7);
