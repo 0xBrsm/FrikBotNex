@@ -501,6 +501,18 @@ float stagger_think;
 .float _m_frames;      // total alive frames
 .float _m_report_time; // next report time
 
+// lava entry diagnosis: what mode was the bot in when it stepped onto lava?
+.float _m_move_mode;   // current movement mode (set before movement)
+.float _m_was_lava;    // was on lava last frame? (for transition detect)
+.float _m_le_nav;      // lava entries while nav-fan guided
+.float _m_le_beeline;  // lava entries while beeline (nodir)
+.float _m_le_combat;   // lava entries while fighting
+.float _m_le_roam;     // lava entries while roaming/other
+float MM_NAV     = 1;
+float MM_BEELINE = 2;
+float MM_COMBAT  = 3;
+float MM_ROAM    = 4;
+
 float _spawn_done;
 void() bot_server_spawn =
 {
@@ -528,8 +540,20 @@ void() bot_debug_metrics =
 	if (vlen(vel) < 10)
 		self._m_stuck = self._m_stuck + 1;
 
-	if (self.sense_ground_type < -3)
+	local float on_lava;
+	on_lava = (self.sense_ground_type < -3);
+	if (on_lava)
 		self._m_lava = self._m_lava + 1;
+
+	// detect lava entry transition and bucket by movement mode
+	if (on_lava && !self._m_was_lava)
+	{
+		if (self._m_move_mode == MM_NAV) self._m_le_nav = self._m_le_nav + 1;
+		else if (self._m_move_mode == MM_BEELINE) self._m_le_beeline = self._m_le_beeline + 1;
+		else if (self._m_move_mode == MM_COMBAT) self._m_le_combat = self._m_le_combat + 1;
+		else self._m_le_roam = self._m_le_roam + 1;
+	}
+	self._m_was_lava = on_lava;
 
 	if (self.sense_best_dir == -1)
 		self._m_nodir = self._m_nodir + 1;
@@ -551,8 +575,11 @@ void() bot_debug_metrics =
 	s = ftos(rint(100 * self._m_nodir / self._m_frames));
 	bprint(s); bprint("% hp=");
 	s = ftos(rint(self.health));
-	bprint(s); bprint(" t:");
-	if (self.target1) bprint(self.target1.classname); else bprint("-");
+	bprint(s); bprint(" le:");
+	s = ftos(self._m_le_nav); bprint(s); bprint("n/");
+	s = ftos(self._m_le_beeline); bprint(s); bprint("b/");
+	s = ftos(self._m_le_combat); bprint(s); bprint("c/");
+	s = ftos(self._m_le_roam); bprint(s); bprint("r");
 	bprint("\n");
 
 	// reset counters
@@ -560,6 +587,10 @@ void() bot_debug_metrics =
 	self._m_lava = 0;
 	self._m_nodir = 0;
 	self._m_frames = 0;
+	self._m_le_nav = 0;
+	self._m_le_beeline = 0;
+	self._m_le_combat = 0;
+	self._m_le_roam = 0;
 };
 
 void() BotAI =
@@ -650,6 +681,7 @@ void() BotAI =
 	// --- act: fight, navigate, or roam ---
 	if (self.enemy)
 	{
+		self._m_move_mode = MM_COMBAT;
 		bot_fight_style();
 	}
 	else
@@ -661,6 +693,7 @@ void() BotAI =
 			{
 				if (self.route_failed)
 				{
+					self._m_move_mode = MM_ROAM;
 					if (waypoint_mode == WM_DYNAMIC)
 						frik_bot_roam();
 					self.route_failed = 0;
@@ -685,6 +718,7 @@ void() BotAI =
 		else
 		{
 			// nothing to do — roam
+			self._m_move_mode = MM_ROAM;
 			frik_bot_roam();
 			if (random() < 0.02)
 				if (self.flags & FL_ONGROUND)
