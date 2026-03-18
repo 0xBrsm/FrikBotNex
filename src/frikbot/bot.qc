@@ -313,6 +313,7 @@ void()				bot_sense_space;
 float(float desired_yaw)	bot_go;		// moves bot safely, returns TRUE/FALSE
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
+void()				BotStepThink;
 void() 				CL_KeyMove;
 
 // ai & misc
@@ -766,6 +767,16 @@ float () BotPreFrame =
 			bot_start_topic(2);
 		self.b_frags = self.frags;
 	}
+	// ensure bot stays MOVETYPE_STEP (PutClientInServer resets to WALK on respawn)
+	if (!self.ishuman)
+	{
+		if (self.movetype == MOVETYPE_WALK)
+		{
+			self.movetype = MOVETYPE_STEP;
+			self.think = BotStepThink;
+			self.nextthink = time + 0.05;
+		}
+	}
 	DynamicWaypoint();
 	return FALSE;
 };
@@ -1100,6 +1111,9 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 	self.ishuman = 2;
 	ClientConnect();
 	PutClientInServer();
+	self.movetype = MOVETYPE_STEP;	// engine handles physics directly
+	self.think = BotStepThink;
+	self.nextthink = time + 0.05;
 
 	active_clients = active_clients | ClientBitFlag(f);
 
@@ -1325,10 +1339,9 @@ void() BotFrame =
 			if (active_clients & ClientBitFlag(num))
 			{
 				CL_KeyMove();
-				if (!self._bot_going)
-					SV_ClientThink();
-				self._bot_going = FALSE;
-				SV_Physics_Client();
+				SV_ClientThink();
+				// no SV_Physics_Client — engine handles
+				// MOVETYPE_STEP directly in its physics loop
 			}
 		}
 		self = nextent(self);

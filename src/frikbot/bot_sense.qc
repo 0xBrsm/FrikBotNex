@@ -160,23 +160,20 @@ void() bot_sense_space =
 
 bot_go — "move me safely roughly thataway"
 
-Takes a desired push yaw. Uses real physics
-(SV_ClientThink) to predict where the bot will
-actually end up, then walkmove-tests that position.
-Scans outward from desired in 45-degree steps.
+Sets movevect for the desired direction. The engine
+moves the bot via MOVETYPE_STEP. BotStepThink checks
+the result and reverts if unsafe.
 
-Sets self.movevect directly (bypasses key quantization).
-Returns TRUE if a safe direction was found, FALSE if not.
+Returns TRUE if direction was set, FALSE if not.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-// build movevect for a world-frame push yaw
-void(float push_yaw) _bot_go_movevect =
+float(float desired_yaw) bot_go =
 {
 	local vector push_dir, view_fwd, view_right;
 
-	makevectors('0 1 0' * push_yaw);
+	makevectors('0 1 0' * desired_yaw);
 	push_dir = v_forward;
 
 	makevectors('0 1 0' * self.v_angle_y);
@@ -186,103 +183,8 @@ void(float push_yaw) _bot_go_movevect =
 	self.movevect_x = (push_dir * view_fwd) * sv_maxspeed;
 	self.movevect_y = (push_dir * view_right) * sv_maxspeed;
 	self.movevect_z = 0;
-};
 
-float(float push_yaw) _bot_go_test =
-{
-	local vector saved_vel, predicted, pre;
-	local float res_yaw, dist, conts, pre_flags;
-
-	// set movevect for this push direction
-	_bot_go_movevect(push_yaw);
-
-	// run real physics to get actual resulting velocity
-	saved_vel = self.velocity;
-	SV_ClientThink();
-	predicted = self.velocity;
-	predicted_z = 0;
-
-	dist = vlen(predicted) * real_frametime;
-	if (dist < 24) dist = 24;
-	res_yaw = vectoyaw(predicted);
-
-	// walkmove-test the predicted destination
-	pre = self.origin;
-	pre_flags = self.flags;
-	self.flags = self.flags | FL_ONGROUND;
-	if (walkmove(res_yaw, dist))
-	{
-		conts = pointcontents(self.origin + '0 0 1' * self.mins_z);
-		if (conts >= -3)
-		{
-			// keep this velocity — it's the real physics result
-			setorigin(self, pre);
-			self.flags = pre_flags;
-			return TRUE;
-		}
-	}
-	// revert everything for next candidate
-	setorigin(self, pre);
-	self.flags = pre_flags;
-	self.velocity = saved_vel;
-	return FALSE;
-};
-
-float(float desired_yaw) bot_go =
-{
-	local vector saved_origin;
-	local float saved_solid, saved_flags;
-	local float offset;
-
-	// save state
-	saved_origin = self.origin;
-	saved_solid = self.solid;
-	saved_flags = self.flags;
-	self.solid = SOLID_NOT;
-
-	// scan outward: 0, ±45, ±90, ±135, 180
-	offset = 0;
-	while (offset <= 180)
-	{
-		if (_bot_go_test(desired_yaw + offset))
-		{
-			desired_yaw = desired_yaw + offset;
-			goto found;
-		}
-		if (offset > 0 && _bot_go_test(desired_yaw - offset))
-		{
-			desired_yaw = desired_yaw - offset;
-			goto found;
-		}
-		offset = offset + 45;
-	}
-
-	// nothing safe — stop
-	setorigin(self, saved_origin);
-	self.solid = saved_solid;
-	self.flags = saved_flags;
-	self.movevect = '0 0 0';
-	self.keys = self.oldkeys;
-	return FALSE;
-
-:found
-	setorigin(self, saved_origin);
-	self.solid = saved_solid;
-	self.flags = saved_flags;
-
-	// set movevect for the winning direction
-	// velocity already set by _bot_go_test's SV_ClientThink
-	_bot_go_movevect(desired_yaw);
 	self.keys = self.oldkeys;	// prevent CL_KeyMove overwrite
-	self._bot_going = TRUE;		// skip next frame's SV_ClientThink
-
-	// debug: save prediction for comparison
-	self._go_yaw = desired_yaw;
-	self._go_vel = self.velocity;
-	local vector pred;
-	pred = self.velocity;
-	pred_z = 0;
-	self._go_predicted = self.origin + pred * real_frametime;
 	return TRUE;
 };
 

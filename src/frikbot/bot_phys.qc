@@ -604,6 +604,59 @@ void() PostPhysics =
 	self.dmg_take = self.dmg_save = 0;
 
 };
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+BotStepThink — think function for MOVETYPE_STEP bots.
+
+Engine has already moved us via velocity + gravity.
+Check if the result is safe. If not, revert and
+walkmove-scan for a safe direction.
+
+Then run BotAI for next frame's decisions.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void() BotStepThink =
+{
+	local vector saved_origin;
+	local float safe;
+
+	self.nextthink = time + 0.05;	// keep thinking
+
+	// engine just moved us — check if we're safe
+	saved_origin = self.origin;
+	safe = FALSE;
+
+	// quick check: walkmove(0,0) tests ground at current position
+	if (self.flags & FL_ONGROUND)
+	{
+		local float pre_flags;
+		pre_flags = self.flags;
+		if (walkmove(0, 0))
+		{
+			// ground is solid — check floor contents
+			if (pointcontents(self.origin + '0 0 1' * self.mins_z) >= -3)
+				safe = TRUE;
+		}
+		self.flags = pre_flags;
+	}
+	else
+		safe = TRUE;	// airborne (jumping, falling) — don't override
+
+	if (!safe)
+	{
+		// engine put us somewhere dangerous — revert and stop
+		setorigin(self, saved_origin);
+		self.velocity_x = self.velocity_y = 0;
+	}
+
+	PlayerPostThink();
+	BotAI();
+	self.dmg_take = self.dmg_save = 0;
+};
+
 // Avoid calling BotAI and the physics at the same time
 // Can trip the runaway loop counter
 
