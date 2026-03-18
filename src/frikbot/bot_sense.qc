@@ -460,6 +460,78 @@ float(float yaw) sense_walkable =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
+bot_go — "give me a safe direction roughly thataway"
+
+Scans outward from desired_yaw in 45-degree steps.
+Each candidate is tested with walkmove (full bbox
+collision against BSP) + pointcontents (floor safety).
+SOLID_NOT suppresses touch functions during the test.
+
+Returns a safe yaw, or -1 if nothing found.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+float(float test_yaw) _bot_go_test =
+{
+	local vector hvel, pre;
+	local float dist, conts;
+
+	// distance: velocity component in test direction, 2 frames, clamped
+	hvel = self.velocity;
+	hvel_z = 0;
+	makevectors('0 1 0' * test_yaw);
+	dist = fabs(hvel * v_forward) * real_frametime * 2;
+	if (dist < 16) dist = 16;
+	if (dist > 64) dist = 64;
+
+	pre = self.origin;
+	if (walkmove(test_yaw, dist))
+	{
+		conts = pointcontents(self.origin - '0 0 24');
+		if (conts >= -3)
+			return TRUE;		// good — caller restores origin
+		setorigin(self, pre);	// bad floor — revert for next test
+	}
+	return FALSE;
+};
+
+float(float desired_yaw) bot_go =
+{
+	local vector saved_origin;
+	local float saved_solid, saved_flags;
+	local float found, offset;
+
+	// save state
+	saved_origin = self.origin;
+	saved_solid = self.solid;
+	saved_flags = self.flags;
+	self.solid = SOLID_NOT;
+
+	// scan outward: 0, ±45, ±90, ±135, 180
+	found = -1;
+	offset = 0;
+	while (offset <= 180 && found == -1)
+	{
+		if (_bot_go_test(desired_yaw + offset))
+			found = desired_yaw + offset;
+		else if (offset > 0 && _bot_go_test(desired_yaw - offset))
+			found = desired_yaw - offset;
+		offset = offset + 45;
+	}
+
+	// restore state
+	setorigin(self, saved_origin);
+	self.solid = saved_solid;
+	self.flags = saved_flags;
+
+	return found;
+};
+
+
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
 bot_sense_visibility
 
 Enemy/target LOS, friendly fire, splash potential.
