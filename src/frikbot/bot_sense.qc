@@ -158,22 +158,38 @@ void() bot_sense_space =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_go — "move me safely roughly thataway"
+bot_go — walkmove the bot safely toward the proxy
 
-Sets movevect for the desired direction. The engine
-moves the bot via MOVETYPE_STEP. BotStepThink checks
-the result and reverts if unsafe.
+Called from BotFrame after the proxy has moved.
+walkmove is the safety gate: SV_movestep does
+bbox collision + SV_CheckBottom.
 
-Returns TRUE if direction was set, FALSE if not.
+If direct path fails, scans adjacent directions.
+Returns TRUE if the bot moved, FALSE if stuck.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-float(float desired_yaw) bot_go =
+/*
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+bot_go — "I want to go this direction"
+
+Single movement API. Does two things:
+1. Reads last frame's proxy result, walkmoves bot there safely
+2. Sets proxy direction for next frame
+
+If walkmove fails, scans adjacent directions.
+If all fail, bot stays put, proxy retries next frame.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+*/
+
+void(float yaw) _set_proxy_direction =
 {
 	local vector push_dir, view_fwd, view_right;
 
-	makevectors('0 1 0' * desired_yaw);
+	makevectors('0 1 0' * yaw);
 	push_dir = v_forward;
 
 	makevectors('0 1 0' * self.v_angle_y);
@@ -183,8 +199,70 @@ float(float desired_yaw) bot_go =
 	self.movevect_x = (push_dir * view_fwd) * sv_maxspeed;
 	self.movevect_y = (push_dir * view_right) * sv_maxspeed;
 	self.movevect_z = 0;
+	self.keys = self.oldkeys;
+};
 
-	self.keys = self.oldkeys;	// prevent CL_KeyMove overwrite
+float(float desired_yaw) bot_go =
+{
+	local vector proxy_dir, pre;
+	local float proxy_dist, pre_flags, offset;
+
+	// --- step 1: follow last frame's proxy result ---
+	if (self.phys_obj)
+	{
+		proxy_dir = self.phys_obj.origin - self.origin;
+		proxy_dir_z = 0;
+		proxy_dist = vlen(proxy_dir);
+
+		if (proxy_dist > 1)
+		{
+			pre = self.origin;
+			pre_flags = self.flags;
+
+			// scan: try proxy direction, then widen
+			offset = 0;
+			while (offset <= 180)
+			{
+				self.flags = pre_flags | FL_ONGROUND;
+				if (walkmove(vectoyaw(proxy_dir) + offset, proxy_dist))
+				{
+					if (pointcontents(self.origin + '0 0 1' * self.mins_z) >= -3)
+					{
+						self.flags = pre_flags;
+						goto moved;
+					}
+					setorigin(self, pre);
+				}
+				if (offset > 0)
+				{
+					self.flags = pre_flags | FL_ONGROUND;
+					if (walkmove(vectoyaw(proxy_dir) - offset, proxy_dist))
+					{
+						if (pointcontents(self.origin + '0 0 1' * self.mins_z) >= -3)
+						{
+							self.flags = pre_flags;
+							goto moved;
+						}
+						setorigin(self, pre);
+					}
+				}
+				offset = offset + 45;
+			}
+
+			// all directions failed — stay put
+			self.flags = pre_flags;
+		}
+	}
+
+:moved
+	// --- step 2: launch proxy in desired direction ---
+	_set_proxy_direction(desired_yaw);
+	CL_KeyMove();
+	SV_ClientThink();
+	if (!(SV_CheckWater()) && (!(self.flags & FL_WATERJUMP)))
+		SV_AddGravity(1);
+	SV_FlyMove();
+	self._bot_going = TRUE;		// tell BotFrame we already did physics
 	return TRUE;
 };
 

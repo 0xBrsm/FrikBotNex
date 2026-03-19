@@ -527,136 +527,19 @@ void(vector dir) BruteForceStep =
 
 void() PostPhysics =
 {
-	local vector obstr, org;
-	local float back, dst,cflags;
+	local vector dir;
+	local float yaw, dist;
 
 	self = self.owner;
 
-	local float _pre_lava, _post_setorigin_lava;
 	self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
-	_pre_lava = (pointcontents(self.origin + '0 0 1' * self.mins_z) < -3);
-	if (self.phys_obj.dest2 == self.origin)
-	{
-		setorigin(self, self.phys_obj.origin);
-		_post_setorigin_lava = (pointcontents(self.origin + '0 0 1' * self.mins_z) < -3);
-		if (!_pre_lava && _post_setorigin_lava)
-		{
-			bprint(self.netname);
-			bprint(" LAVA via setorigin\n");
-		}
-
-		if (self.movetype == MOVETYPE_WALK)
-		{
-
-			if (self.phys_obj.dest1_x || self.phys_obj.dest1_y)
-			{
-				if ((self.flags & FL_ONGROUND) || (self.waterlevel <= 2))
-				{
-					obstr = self.phys_obj.movedir  - self.origin;
-					obstr_z = 0;
-					if (vlen(obstr) > 0.1)
-					{
-						dst = vlen(obstr);
-						back = vectoyaw(obstr);
-						cflags = self.flags;
-						self.flags = self.flags | FL_PARTIALGROUND;
-						org = self.origin;
-						if(walkmove(back, dst))
-						{
-							if (!_post_setorigin_lava && pointcontents(self.origin + '0 0 1' * self.mins_z) < -3)
-							{
-								bprint(self.netname);
-								bprint(" LAVA via walkmove\n");
-							}
-							self.flags = cflags;
-							self.phys_obj.dest1_z = 0;
-							self.velocity = self.velocity + self.phys_obj.dest1 - self.phys_obj.velocity;
-						}
-						else
-						{
-							// wall collision — nav fan handles routing
-
-							org = self.origin;
-							self.flags = cflags;
-							obstr = self.phys_obj.dest1;
-							obstr_x = 0;
-							if (!botCheckForStep(obstr))
-							{
-								obstr = self.phys_obj.dest1;
-								obstr_y = 0;
-								if (!botCheckForStep(obstr))
-								{
-									// if no steps were found, bot is really obstucted
-									BruteForceStep(self.phys_obj.dest1);
-								}
-							}	
-						}
-					}
-				}
-			}
-		}
-	}
 
 	SV_CheckOnGround();
 
 	PlayerPostThink();
 	BotAI();
 	self.dmg_take = self.dmg_save = 0;
-
 };
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-BotStepThink — think function for MOVETYPE_STEP bots.
-
-Engine has already moved us via velocity + gravity.
-Check if the result is safe. If not, revert and
-walkmove-scan for a safe direction.
-
-Then run BotAI for next frame's decisions.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void() BotStepThink =
-{
-	local vector saved_origin;
-	local float safe;
-
-	self.nextthink = time + 0.05;	// keep thinking
-
-	// engine just moved us — check if we're safe
-	saved_origin = self.origin;
-	safe = FALSE;
-
-	// quick check: walkmove(0,0) tests ground at current position
-	if (self.flags & FL_ONGROUND)
-	{
-		local float pre_flags;
-		pre_flags = self.flags;
-		if (walkmove(0, 0))
-		{
-			// ground is solid — check floor contents
-			if (pointcontents(self.origin + '0 0 1' * self.mins_z) >= -3)
-				safe = TRUE;
-		}
-		self.flags = pre_flags;
-	}
-	else
-		safe = TRUE;	// airborne (jumping, falling) — don't override
-
-	if (!safe)
-	{
-		// engine put us somewhere dangerous — revert and stop
-		setorigin(self, saved_origin);
-		self.velocity_x = self.velocity_y = 0;
-	}
-
-	PlayerPostThink();
-	BotAI();
-	self.dmg_take = self.dmg_save = 0;
-};
-
 // Avoid calling BotAI and the physics at the same time
 // Can trip the runaway loop counter
 
@@ -678,8 +561,8 @@ void() SV_FlyMove =
 	}
 
 	setmodel (self.phys_obj, string_null);
-	self.phys_obj.movetype = MOVETYPE_STEP;
-	
+	self.phys_obj.movetype = MOVETYPE_FLY;
+
 	self.phys_obj.solid = SOLID_TRIGGER;
 	self.phys_obj.touch = RemoveThud;
 	setsize(self.phys_obj, self.mins, self.maxs);
@@ -687,7 +570,7 @@ void() SV_FlyMove =
 	self.phys_obj.watertype = 0;
 	self.phys_obj.movedir = self.origin + real_frametime * self.velocity;
 	self.phys_obj.dest1 = self.phys_obj.velocity = self.velocity;
-	self.phys_obj.velocity_z = self.phys_obj.velocity_z + sv_gravity * real_frametime;
+	self.phys_obj.velocity_z = self.phys_obj.velocity_z + sv_gravity * real_frametime;  // undo QC gravity — FLY applies velocity directly
 	self.phys_obj.flags = 0;
 	self.phys_obj.think = PostPhysics;
 	self.phys_obj.nextthink = time;
