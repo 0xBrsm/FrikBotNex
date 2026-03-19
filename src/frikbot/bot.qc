@@ -310,10 +310,13 @@ float(vector sdir)		frik_KeysForDir;
 
 // sense API
 void()				bot_sense_space;
-float(float desired_yaw)	bot_go;		// moves bot safely, returns TRUE/FALSE
+float(float desired_yaw)	bot_go;
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;
+void()				SV_FlyMove;
+float()				SV_CheckWater;
+void(float scale)		SV_AddGravity;
 
 // ai & misc
 string()				PickARandomName;
@@ -1324,11 +1327,16 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				CL_KeyMove();
-				if (!self._bot_going)
+				if (self._bot_going)
+				{
+					self._bot_going = FALSE;
+				}
+				else
+				{
+					CL_KeyMove();
 					SV_ClientThink();
-				self._bot_going = FALSE;
-				SV_Physics_Client();
+					SV_Physics_Client();
+				}
 			}
 		}
 		self = nextent(self);
