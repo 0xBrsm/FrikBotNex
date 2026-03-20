@@ -356,6 +356,7 @@ void(float scope) bot_get;
 void() bot_handle_ai;
 void() bot_server_spawn;
 void() bot_path;
+void() BotAI;
 
 
 // ----------Commands---------
@@ -1322,7 +1323,9 @@ void() BotFrame =
 			{
 				CL_KeyMove();
 				SV_ClientThink();
-				SV_Physics_Client();
+				// engine SV_Physics_Client handles gravity + SV_WalkMove
+				// BotAI runs after engine physics via PostPhysics or think
+				BotAI();
 			}
 		}
 		self = nextent(self);
