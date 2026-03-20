@@ -163,6 +163,52 @@ void(float scale) SV_AddGravity =
 	self.velocity_z = self.velocity_z - (scale * sv_gravity * real_frametime);
 };
 
+float() SV_RunThink =
+{
+	local float thinktime, bkuptime;
+	thinktime = self.nextthink;
+	bkuptime = time;
+	if (thinktime <= 0 || thinktime > (time + real_frametime))
+		return TRUE;
+	if (thinktime < time)
+		thinktime = time;
+	self.nextthink = 0;
+	time = thinktime;
+	other = world;
+	makevectors(self.v_angle);
+	self.think();
+	time = bkuptime;
+	return TRUE;
+};
+
+float() SV_CheckWater =
+{
+	local vector point;
+	local float cont;
+	point_x = self.origin_x;
+	point_y = self.origin_y;
+	self.waterlevel = 0;
+	self.watertype = CONTENT_EMPTY;
+	point_z = self.origin_z + self.mins_z + 1;
+	cont = pointcontents(point);
+	if (cont <= CONTENT_WATER)
+	{
+		self.watertype = cont;
+		self.waterlevel = 1;
+		point_z = self.origin_z + (self.mins_z + self.maxs_z) * 0.5;
+		cont = pointcontents(point);
+		if (cont <= CONTENT_WATER)
+		{
+			self.waterlevel = 2;
+			point_z = self.origin_z + self.view_ofs_z;
+			cont = pointcontents(point);
+			if (cont <= CONTENT_WATER)
+				self.waterlevel = 3;
+		}
+	}
+	return (self.waterlevel > 1);
+};
+
 
 // ---- movement dispatch: water, air, ground ----
 
@@ -314,9 +360,8 @@ void() PostPhysics =
 	local float dist, yaw;
 
 	self = self.owner;
-	// only adjust velocity if proxy actually moved
-	if (self.phys_obj.origin != self.origin)
-		self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
+	// velocity comes from SV_ClientThink — don't readback from proxy
+	// (proxy readback zeros velocity when proxy hits walls)
 
 	// move bot toward proxy result via walkmove (also triggers touches)
 	local float saved_flags;
@@ -375,17 +420,23 @@ void() SV_Physics_Client =
 
 	if (self.movetype == MOVETYPE_NONE)
 	{
+		if (!SV_RunThink())
+			return;
 		PlayerPostThink();
 		BotAI();
 	}
 	else if (self.movetype == MOVETYPE_WALK)
 	{
-		if (!(self.waterlevel > 1) && (!(self.flags & FL_WATERJUMP)))
+		if (!SV_RunThink())
+			return;
+		if (!(SV_CheckWater()) && (!(self.flags & FL_WATERJUMP)))
 			SV_AddGravity(1);
 		SV_FlyMove();
 	}
 	else if (self.movetype == MOVETYPE_NOCLIP)
 	{
+		if (!SV_RunThink())
+			return;
 		self.origin = self.origin + real_frametime * self.velocity;
 		PlayerPostThink();
 		BotAI();
