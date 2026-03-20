@@ -272,10 +272,15 @@ void() SV_AirMove =
 	if (time < self.teleport_time && (self.movevect_x < 0))
 		self.movevect_x = 0;
 	wishvel = v_right * self.movevect_y + v_forward * self.movevect_x;
-	wishvel_z = 0;
+	if (self.movetype != MOVETYPE_WALK)
+		wishvel_z = self.movevect_z;
+	else
+		wishvel_z = 0;
 	if (vlen(wishvel) > sv_maxspeed)
 		wishvel = normalize(wishvel) * sv_maxspeed;
-	if (self.flags & FL_ONGROUND)
+	if (self.movetype == MOVETYPE_NOCLIP)
+		self.velocity = wishvel;
+	else if (self.flags & FL_ONGROUND)
 	{
 		SV_UserFriction();
 		SV_Accelerate(wishvel);
@@ -325,25 +330,48 @@ void() SV_ClientThink =
 void() RemoveThud =
 {
 	local entity oself;
-	if (self.flags & FL_ONGROUND)
-		self.flags = self.flags - FL_ONGROUND;
-	if (other == world || other == self.owner)
-		return;
-	if (self.owner.solid == SOLID_NOT)
-		return;
-	oself = other;
-	other = self.owner;
-	self = oself;
-	if (self.solid == SOLID_BSP)
-		if (self.touch)
-			self.touch();
+	// only clear FL_ONGROUND for world/BSP contacts (finding #3)
+	if (other == world)
+	{
+		if (self.flags & FL_ONGROUND)
+			self.flags = self.flags - FL_ONGROUND;
+	}
+	else
+	{
+		if (other.solid == SOLID_BSP && (self.flags & FL_ONGROUND))
+			self.flags = self.flags - FL_ONGROUND;
+		if (other == self.owner)
+			return;
+		if (self.owner.solid == SOLID_NOT)
+			return;
+		oself = other;
+		other = self.owner;
+		self = oself;
+		if (self.solid == SOLID_BSP)
+			if (self.touch)
+				self.touch();
+	}
 };
 
 void() SV_CheckOnGround =
 {
-	local vector org;
+	local vector org, v;
+	local float currentflags;
 	org = self.origin;
+	currentflags = self.flags;
+	self.flags = self.flags | FL_ONGROUND | FL_PARTIALGROUND;
+	walkmove(0, 0);
+	self.flags = currentflags | FL_ONGROUND;
+	if ((org_x != self.origin_x) || (org_y != self.origin_y))
+		org = self.origin;
+	else
+		self.origin = org;
+	v = org;
+	v_z = self.maxs_z + org_z + 1;
+	traceline(org, v, TRUE, self);
 	if ((self.waterlevel == 3) && (self.movetype == MOVETYPE_WALK))
+		self.flags = self.flags - (self.flags & FL_ONGROUND);
+	else if ((trace_plane_normal_z <= 0.7) && (trace_fraction != 1))
 		self.flags = self.flags - (self.flags & FL_ONGROUND);
 	else if (!droptofloor())
 		self.flags = self.flags - (self.flags & FL_ONGROUND);
@@ -443,7 +471,9 @@ void() SV_Physics_Client =
 	}
 	else
 	{
-		// TOSS/BOUNCE (death gibs) — proxy handles physics
+		// TOSS/BOUNCE/FLY (death gibs, etc.)
+		if (!SV_RunThink())
+			return;
 		if (self.movetype != MOVETYPE_FLY)
 			SV_AddGravity(1);
 		SV_FlyMove();
