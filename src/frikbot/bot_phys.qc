@@ -355,23 +355,9 @@ void() RemoveThud =
 
 void() SV_CheckOnGround =
 {
-	local vector org, v;
-	local float currentflags;
+	local vector org;
 	org = self.origin;
-	currentflags = self.flags;
-	self.flags = self.flags | FL_ONGROUND | FL_PARTIALGROUND;
-	walkmove(0, 0);
-	self.flags = currentflags | FL_ONGROUND;
-	if ((org_x != self.origin_x) || (org_y != self.origin_y))
-		org = self.origin;
-	else
-		self.origin = org;
-	v = org;
-	v_z = self.maxs_z + org_z + 1;
-	traceline(org, v, TRUE, self);
 	if ((self.waterlevel == 3) && (self.movetype == MOVETYPE_WALK))
-		self.flags = self.flags - (self.flags & FL_ONGROUND);
-	else if ((trace_plane_normal_z <= 0.7) && (trace_fraction != 1))
 		self.flags = self.flags - (self.flags & FL_ONGROUND);
 	else if (!droptofloor())
 		self.flags = self.flags - (self.flags & FL_ONGROUND);
@@ -448,23 +434,17 @@ void() SV_Physics_Client =
 
 	if (self.movetype == MOVETYPE_NONE)
 	{
-		if (!SV_RunThink())
-			return;
 		PlayerPostThink();
 		BotAI();
 	}
 	else if (self.movetype == MOVETYPE_WALK)
 	{
-		if (!SV_RunThink())
-			return;
 		if (!(SV_CheckWater()) && (!(self.flags & FL_WATERJUMP)))
 			SV_AddGravity(1);
 		SV_FlyMove();
 	}
 	else if (self.movetype == MOVETYPE_NOCLIP)
 	{
-		if (!SV_RunThink())
-			return;
 		self.origin = self.origin + real_frametime * self.velocity;
 		PlayerPostThink();
 		BotAI();
