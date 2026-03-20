@@ -1320,11 +1320,10 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				CL_KeyMove();
-				SV_ClientThink();
-				// engine SV_Physics_Client handles gravity + SV_WalkMove
-				// BotAI runs after engine physics via PostPhysics or think
-				BotAI();
+				BotAI();			// decide direction → sets movevect
+				CL_KeyMove();		// view angles
+				SV_ClientThink();	// movevect → velocity
+				// engine SV_Physics_Client moves the bot using this velocity
 			}
 		}
 		self = nextent(self);
