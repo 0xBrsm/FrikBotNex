@@ -310,8 +310,28 @@ void() SV_CheckOnGround =
 
 void() PostPhysics =
 {
+	local vector dir;
+	local float dist, yaw;
+
 	self = self.owner;
-	self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
+	// only adjust velocity if proxy actually moved
+	if (self.phys_obj.origin != self.origin)
+		self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
+
+	// move bot toward proxy result via walkmove (safe — won't walk off edges)
+	dir = self.phys_obj.origin - self.origin;
+	dist = vlen(dir);
+	if (dist > 0.1)
+	{
+		dir_z = 0;
+		yaw = vectoyaw(dir);
+		walkmove(yaw, dist);
+	}
+
+	// vertical: if proxy fell (airborne), follow it
+	if (!(self.phys_obj.flags & FL_ONGROUND))
+		self.origin_z = self.phys_obj.origin_z;
+
 	SV_CheckOnGround();
 	PlayerPostThink();
 	BotAI();
@@ -329,16 +349,15 @@ void() SV_FlyMove =
 			if (self.phys_obj == world)
 				error("No physics entity spawned!\nMake sure BotInit was called\n");
 		}
-		// one-time proxy setup
-		setmodel(self.phys_obj, string_null);
-		self.phys_obj.movetype = MOVETYPE_FLY;
-		self.phys_obj.solid = SOLID_TRIGGER;
-		self.phys_obj.touch = RemoveThud;
-		setsize(self.phys_obj, self.mins, self.maxs);
 	}
 
-	// per-frame update
-	self.phys_obj.origin = self.origin;
+	// per-frame setup (engine needs relinking each frame)
+	setmodel(self.phys_obj, string_null);
+	self.phys_obj.movetype = MOVETYPE_STEP;
+	self.phys_obj.solid = SOLID_TRIGGER;
+	self.phys_obj.touch = RemoveThud;
+	setsize(self.phys_obj, self.mins, self.maxs);
+	setorigin(self.phys_obj, self.origin);
 	self.phys_obj.dest1 = self.phys_obj.velocity = self.velocity;
 	self.phys_obj.velocity_z = self.phys_obj.velocity_z + sv_gravity * real_frametime;
 	self.phys_obj.flags = 0;
@@ -371,5 +390,10 @@ void() SV_Physics_Client =
 		BotAI();
 	}
 	else
-		error("SV_Physics_Client: Bad Movetype (BOT)");
+	{
+		// TOSS/BOUNCE (death gibs) — proxy handles physics
+		if (self.movetype != MOVETYPE_FLY)
+			SV_AddGravity(1);
+		SV_FlyMove();
+	}
 };
