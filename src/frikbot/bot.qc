@@ -142,10 +142,6 @@ for all variables in the bot...
 .float	b_menu, b_menu_time, b_menu_value;
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
-.float _bot_going;		// bot_go already ran SV_ClientThink this frame
-.vector _go_predicted;	// where bot_go expected us to be
-.float _go_yaw;		// what direction bot_go chose
-.vector _go_vel;		// velocity at decision time
 .float b_strafe_time, b_strafe_dir;
 .float b_aim_delay, b_aim_offset;
 .float b_ambush_time;
@@ -314,9 +310,6 @@ float(float desired_yaw)	bot_go;
 void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;
-void()				SV_FlyMove;
-float()				SV_CheckWater;
-void(float scale)		SV_AddGravity;
 
 // ai & misc
 string()				PickARandomName;
@@ -1327,16 +1320,9 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				if (self._bot_going)
-				{
-					self._bot_going = FALSE;
-				}
-				else
-				{
-					CL_KeyMove();
-					SV_ClientThink();
-					SV_Physics_Client();
-				}
+				CL_KeyMove();
+				SV_ClientThink();
+				SV_Physics_Client();
 			}
 		}
 		self = nextent(self);

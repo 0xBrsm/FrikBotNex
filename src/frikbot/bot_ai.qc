@@ -554,14 +554,6 @@ void() bot_debug_metrics =
 		else if (self._m_move_mode == MM_COMBAT) self._m_le_combat = self._m_le_combat + 1;
 		else self._m_le_roam = self._m_le_roam + 1;
 
-		// debug: dump prediction vs reality on lava entry
-		bprint("! "); bprint(self.netname);
-		bprint(" LAVA mode="); bprint(ftos(self._m_move_mode));
-		bprint(" go_yaw="); bprint(ftos(rint(self._go_yaw)));
-		bprint(" pred="); bprint(vtos(self._go_predicted));
-		bprint(" actual="); bprint(vtos(self.origin));
-		bprint(" miss="); bprint(ftos(rint(vlen(self._go_predicted - self.origin))));
-		bprint("\n");
 	}
 	self._m_was_lava = on_lava;
 
