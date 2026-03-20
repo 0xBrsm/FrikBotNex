@@ -1,10 +1,12 @@
 /***********************************************
 *                                              *
 *                FrikBot Physics               *
-*        Client movement emulation for bots    *
+*        Velocity computation for bots         *
 *                                              *
-*         Special Thanks to: Asdf, Frog        *
-*             Alan "Strider" Kivlin            *
+*  Engine handles actual movement via patched   *
+*  SV_Physics_Client (SV_WalkMove, gravity,    *
+*  water, step-ups, collision). This file just  *
+*  computes velocity from bot input.            *
 *                                              *
 ***********************************************/
 
@@ -12,7 +14,7 @@
 This program is in the Public Domain.
 */
 
-// ---- input: keys/movevect → view angles ----
+// ---- input: view angles from bot AI ----
 
 void() CL_KeyMove =
 {
@@ -68,20 +70,7 @@ void() CL_KeyMove =
 };
 
 
-// ---- velocity: friction, acceleration, clamping ----
-
-void() SV_CheckVelocity =
-{
-	if (self.velocity_x != self.velocity_x) self.velocity_x = 0;
-	if (self.velocity_y != self.velocity_y) self.velocity_y = 0;
-	if (self.velocity_z != self.velocity_z) self.velocity_z = 0;
-	if (self.velocity_x > 2000) self.velocity_x = 2000;
-	if (self.velocity_x < -2000) self.velocity_x = -2000;
-	if (self.velocity_y > 2000) self.velocity_y = 2000;
-	if (self.velocity_y < -2000) self.velocity_y = -2000;
-	if (self.velocity_z > 2000) self.velocity_z = 2000;
-	if (self.velocity_z < -2000) self.velocity_z = -2000;
-};
+// ---- velocity: friction + acceleration ----
 
 void() SV_UserFriction =
 {
@@ -158,59 +147,8 @@ void(vector wishvel) SV_Accelerate =
 	self.velocity = self.velocity + accelspeed * wishvel;
 };
 
-void(float scale) SV_AddGravity =
-{
-	self.velocity_z = self.velocity_z - (scale * sv_gravity * real_frametime);
-};
 
-float() SV_RunThink =
-{
-	local float thinktime, bkuptime;
-	thinktime = self.nextthink;
-	bkuptime = time;
-	if (thinktime <= 0 || thinktime > (time + real_frametime))
-		return TRUE;
-	if (thinktime < time)
-		thinktime = time;
-	self.nextthink = 0;
-	time = thinktime;
-	other = world;
-	makevectors(self.v_angle);
-	self.think();
-	time = bkuptime;
-	return TRUE;
-};
-
-float() SV_CheckWater =
-{
-	local vector point;
-	local float cont;
-	point_x = self.origin_x;
-	point_y = self.origin_y;
-	self.waterlevel = 0;
-	self.watertype = CONTENT_EMPTY;
-	point_z = self.origin_z + self.mins_z + 1;
-	cont = pointcontents(point);
-	if (cont <= CONTENT_WATER)
-	{
-		self.watertype = cont;
-		self.waterlevel = 1;
-		point_z = self.origin_z + (self.mins_z + self.maxs_z) * 0.5;
-		cont = pointcontents(point);
-		if (cont <= CONTENT_WATER)
-		{
-			self.waterlevel = 2;
-			point_z = self.origin_z + self.view_ofs_z;
-			cont = pointcontents(point);
-			if (cont <= CONTENT_WATER)
-				self.waterlevel = 3;
-		}
-	}
-	return (self.waterlevel > 1);
-};
-
-
-// ---- movement dispatch: water, air, ground ----
+// ---- movement dispatch ----
 
 void() SV_WaterJump =
 {
@@ -287,7 +225,6 @@ void() SV_AirMove =
 	}
 	else
 		SV_AirAccelerate(wishvel);
-	SV_CheckVelocity();
 };
 
 void() SV_ClientThink =
@@ -322,140 +259,4 @@ void() SV_ClientThink =
 		return;
 	}
 	SV_AirMove();
-};
-
-
-// ---- proxy: engine physics bridge ----
-
-void() RemoveThud =
-{
-	local entity oself;
-	// only clear FL_ONGROUND for world/BSP contacts (finding #3)
-	if (other == world)
-	{
-		if (self.flags & FL_ONGROUND)
-			self.flags = self.flags - FL_ONGROUND;
-	}
-	else
-	{
-		if (other.solid == SOLID_BSP && (self.flags & FL_ONGROUND))
-			self.flags = self.flags - FL_ONGROUND;
-		if (other == self.owner)
-			return;
-		if (self.owner.solid == SOLID_NOT)
-			return;
-		oself = other;
-		other = self.owner;
-		self = oself;
-		if (self.solid == SOLID_BSP)
-			if (self.touch)
-				self.touch();
-	}
-};
-
-void() SV_CheckOnGround =
-{
-	local vector org;
-	org = self.origin;
-	if ((self.waterlevel == 3) && (self.movetype == MOVETYPE_WALK))
-		self.flags = self.flags - (self.flags & FL_ONGROUND);
-	else if (!droptofloor())
-		self.flags = self.flags - (self.flags & FL_ONGROUND);
-	else if (org_z - self.origin_z < 2)
-		self.flags = self.flags | FL_ONGROUND;
-	else
-		self.flags = self.flags - (self.flags & FL_ONGROUND);
-	setorigin(self, org);
-};
-
-void() PostPhysics =
-{
-	local vector dir;
-	local float dist, yaw;
-
-	self = self.owner;
-	// velocity comes from SV_ClientThink — don't readback from proxy
-	// (proxy readback zeros velocity when proxy hits walls)
-
-	// move bot toward proxy result via walkmove (also triggers touches)
-	local float saved_flags;
-	saved_flags = self.flags;
-	self.flags = self.flags | FL_PARTIALGROUND;
-	dir = self.phys_obj.origin - self.origin;
-	dir_z = 0;
-	dist = vlen(dir);
-	yaw = vectoyaw(dir);
-	walkmove(yaw, dist);
-	self.flags = saved_flags;
-
-	// vertical: if proxy fell (airborne), follow it
-	if (!(self.phys_obj.flags & FL_ONGROUND))
-		self.origin_z = self.phys_obj.origin_z;
-
-	SV_CheckOnGround();
-	PlayerPostThink();
-	BotAI();
-	self.dmg_take = self.dmg_save = 0;
-};
-
-void() SV_FlyMove =
-{
-	if (self.phys_obj == world)
-	{
-		self.phys_obj = find(world, classname, "phys_obj");
-		while (self.phys_obj.owner != self)
-		{
-			self.phys_obj = find(self.phys_obj, classname, "phys_obj");
-			if (self.phys_obj == world)
-				error("No physics entity spawned!\nMake sure BotInit was called\n");
-		}
-	}
-
-	// per-frame setup (engine needs relinking each frame)
-	setmodel(self.phys_obj, string_null);
-	self.phys_obj.movetype = MOVETYPE_STEP;
-	self.phys_obj.solid = SOLID_TRIGGER;
-	self.phys_obj.touch = RemoveThud;
-	setsize(self.phys_obj, self.mins, self.maxs);
-	setorigin(self.phys_obj, self.origin);
-	self.phys_obj.dest1 = self.phys_obj.velocity = self.velocity;
-	self.phys_obj.velocity_z = self.phys_obj.velocity_z + sv_gravity * real_frametime;
-	self.phys_obj.flags = 0;
-	self.phys_obj.think = PostPhysics;
-	self.phys_obj.nextthink = time;
-};
-
-
-// ---- main dispatch ----
-
-void() SV_Physics_Client =
-{
-	PlayerPreThink();
-
-	if (self.movetype == MOVETYPE_NONE)
-	{
-		PlayerPostThink();
-		BotAI();
-	}
-	else if (self.movetype == MOVETYPE_WALK)
-	{
-		if (!(SV_CheckWater()) && (!(self.flags & FL_WATERJUMP)))
-			SV_AddGravity(1);
-		SV_FlyMove();
-	}
-	else if (self.movetype == MOVETYPE_NOCLIP)
-	{
-		self.origin = self.origin + real_frametime * self.velocity;
-		PlayerPostThink();
-		BotAI();
-	}
-	else
-	{
-		// TOSS/BOUNCE/FLY (death gibs, etc.)
-		if (!SV_RunThink())
-			return;
-		if (self.movetype != MOVETYPE_FLY)
-			SV_AddGravity(1);
-		SV_FlyMove();
-	}
 };

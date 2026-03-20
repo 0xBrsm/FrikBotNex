@@ -307,7 +307,6 @@ float(vector sdir)		frik_KeysForDir;
 // sense API
 void()				bot_sense_space;
 float(float desired_yaw)	bot_go;
-void()				SV_Physics_Client;
 void()				SV_ClientThink;
 void() 				CL_KeyMove;
 
