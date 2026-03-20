@@ -495,7 +495,8 @@ from bot_phys.qc. One question per frame:
 float stagger_think;
 
 // debug: per-bot movement metrics (accumulated, printed every 10s)
-.float _m_stuck;       // frames with vel < 10 while alive
+.float _m_stuck;       // frames where position didn't change
+.vector _m_last_origin; // previous frame position for stuck detection
 .float _m_lava;        // frames on lava/slime
 .float _m_nodir;       // frames with sense_best_dir == -1
 .float _m_frames;      // total alive frames
@@ -536,10 +537,12 @@ void() bot_debug_metrics =
 
 	self._m_frames = self._m_frames + 1;
 
-	vel = self.velocity;
+	// stuck = didn't move since last frame (position-based, not velocity)
+	vel = self.origin - self._m_last_origin;
 	vel_z = 0;
-	if (vlen(vel) < 10)
+	if (vlen(vel) < 1)
 		self._m_stuck = self._m_stuck + 1;
+	self._m_last_origin = self.origin;
 
 	local float on_lava;
 	on_lava = (self.sense_ground_type < -3);

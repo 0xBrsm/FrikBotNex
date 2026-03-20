@@ -318,15 +318,16 @@ void() PostPhysics =
 	if (self.phys_obj.origin != self.origin)
 		self.velocity = self.velocity - self.phys_obj.dest1 + self.phys_obj.velocity;
 
-	// move bot toward proxy result via walkmove (safe — won't walk off edges)
+	// move bot toward proxy result via walkmove (also triggers touches)
+	local float saved_flags;
+	saved_flags = self.flags;
+	self.flags = self.flags | FL_PARTIALGROUND;
 	dir = self.phys_obj.origin - self.origin;
+	dir_z = 0;
 	dist = vlen(dir);
-	if (dist > 0.1)
-	{
-		dir_z = 0;
-		yaw = vectoyaw(dir);
-		walkmove(yaw, dist);
-	}
+	yaw = vectoyaw(dir);
+	walkmove(yaw, dist);
+	self.flags = saved_flags;
 
 	// vertical: if proxy fell (airborne), follow it
 	if (!(self.phys_obj.flags & FL_ONGROUND))
