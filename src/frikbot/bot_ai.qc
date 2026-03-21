@@ -138,7 +138,7 @@ void() bot_handle_ai =
 			if (bot_can_rj(self))
 			{
 				bot_jump();
-				self.v_angle_x = self.b_angle_x = 80;
+				self.b_angle_x = 80;
 				self.button0 = TRUE;
 			}
 			else
@@ -371,14 +371,8 @@ void() bot_angle_set =
 		if (self.missile_speed == 0)
 			self.missile_speed = 10000;
 
-		// track how long we've been aiming at this enemy
-		// only reset offset on truly new target (not brief LOS flicker)
 		if (self.b_aim_delay == 0)
-		{
 			self.b_aim_delay = time;
-			if (self.b_aim_offset < 1)
-				self.b_aim_offset = 25 - self.b_skill * 7;
-		}
 
 		if (self.enemy.solid == SOLID_BSP)
 		{
@@ -426,32 +420,12 @@ void() bot_angle_set =
 		view = vectoangles(view);
 		view_x = view_x * -1;
 
-		// 3-parameter aim: convergence + floor + noise
-		aim_speed = 0.7 + self.b_skill * 1.5;
-		aim_floor = 6 - self.b_skill * 1.7;
-		if (aim_floor < 0.3)
-			aim_floor = 0.3;
-
-		decay = real_frametime * aim_speed;
-		if (decay > 0.95)
-			decay = 0.95;
-		self.b_aim_offset = self.b_aim_offset * (1 - decay);
-		if (self.b_aim_offset < aim_floor)
-			self.b_aim_offset = aim_floor;
-		if (self.b_aim_offset > 30)
-			self.b_aim_offset = 30;
-
-		// apply noise
-		view_y = view_y + (random() - 0.5) * self.b_aim_offset;
-		view_x = view_x + (random() - 0.5) * self.b_aim_offset * 0.5;
-
 		self.b_angle = view;
 	}
 	else if (self.target1)
 	{
 		// no enemy -- reset aim tracking
 		self.b_aim_delay = 0;
-		self.b_aim_offset = 0;
 
 		view = realorigin(self.target1);
 		if (self.target1.flags & FL_ITEM)
@@ -460,20 +434,42 @@ void() bot_angle_set =
 		view = vectoangles(view);
 		view_x = view_x * -1;
 
-		view_y = view_y + (random() - 0.5) * 3;
-
 		self.b_angle = view;
 	}
 	else
 	{
 		self.b_aim_delay = 0;
-		self.b_aim_offset = 0;
 		self.b_angle_x = 0;
 	}
 
-	// --- apply view angles: direct set, aim math handles skill scaling ---
+	// --- apply view angles with turn speed limit ---
+	// degrees/sec by skill (at sys_ticrate 0.05 = 20hz):
+	// skill 0: 60°/s (3°/tick), skill 1: 120°/s (6°/tick)
+	// skill 2: 180°/s (9°/tick), skill 3: 300°/s (15°/tick)
+	local float max_turn, dyaw, dpitch, scale;
+	max_turn = (60 + self.b_skill * 80) * cvar("sys_ticrate");
+
 	self.keys = self.keys & 63;
-	self.v_angle = self.b_angle;
+
+	dyaw = self.b_angle_y - self.v_angle_y;
+	while (dyaw > 180) dyaw = dyaw - 360;
+	while (dyaw < -180) dyaw = dyaw + 360;
+	dpitch = self.b_angle_x - self.v_angle_x;
+	while (dpitch > 180) dpitch = dpitch - 360;
+	while (dpitch < -180) dpitch = dpitch + 360;
+
+	// clamp turn to max_turn per frame
+	scale = fabs(dyaw);
+	if (fabs(dpitch) > scale)
+		scale = fabs(dpitch);
+	if (scale > max_turn)
+	{
+		scale = max_turn / scale;
+		dyaw = dyaw * scale;
+		dpitch = dpitch * scale;
+	}
+	self.v_angle_y = self.v_angle_y + dyaw;
+	self.v_angle_x = self.v_angle_x + dpitch;
 	while (self.v_angle_x < -180)
 		self.v_angle_x = self.v_angle_x + 360;
 	while (self.v_angle_x > 180)
@@ -611,7 +607,6 @@ void() BotAI =
 		self.target1 = self.target2 = self.target3 = self.target4 = self.enemy = world;
 		self.last_way = world;
 		self.b_aim_delay = 0;
-		self.b_aim_offset = 0;
 		self.b_strafe_dir = 0;
 		self.b_ambush_time = 0;
 		self.b_combat_time = 0;

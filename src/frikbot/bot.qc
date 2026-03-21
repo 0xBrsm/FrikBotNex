@@ -143,7 +143,7 @@ for all variables in the bot...
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
 .float b_strafe_time, b_strafe_dir;
-.float b_aim_delay, b_aim_offset;
+.float b_aim_delay;
 .float b_ambush_time;
 .float b_wepswitch_time;
 .float b_react_time;		// delay before engaging newly detected enemy
@@ -181,7 +181,7 @@ for all variables in the bot...
 float CSTATE_NONE	= 0;	// not in combat
 float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
 float CSTATE_RETREAT	= 2;	// outgunned, falling back
-.entity	temp_way, last_way, phys_obj;
+.entity	temp_way, last_way;
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
 .entity	current_way;
@@ -265,7 +265,7 @@ float		sv_accelerate, sv_maxspeed, sv_stopspeed;
 entity	fixer;
 entity	route_table;
 entity	b_temp1, b_temp2, b_temp3;
-entity 	player_head, phys_head, way_head;
+entity 	player_head, way_head;
 float		busy_waypoints;
 float		saved_bots, saved_skills1, saved_skills2, current_bots;
 
@@ -549,7 +549,19 @@ float() botcam =
 {
 	if (self.classname != "botcam")
 		return FALSE;
+	if (!self.enemy || self.enemy == world)
+	{
+		// target gone — exit botcam
+		msg_entity = self;
+		WriteByte (MSG_ONE, 5);
+		WriteEntity (MSG_ONE, self);
+		PutClientInServer();
+		return TRUE;
+	}
+	// PVS: keep spectator near target so world renders correctly
 	setorigin(self, self.enemy.origin);
+
+	// HUD state
 	self.items = self.enemy.items;
 	self.weapon = self.enemy.weapon;
 	self.weaponmodel = self.enemy.weaponmodel;
@@ -562,51 +574,49 @@ float() botcam =
 	self.view_ofs = self.enemy.view_ofs;
 	self.health = self.enemy.health;
 	self.armorvalue = self.enemy.armorvalue;
-	self.dmg_take = self.enemy.dmg_take;
-	self.dmg_save = self.enemy.dmg_save;
-	self.dmg_inflictor = self.enemy.dmg_inflictor;
-	self.punchangle = self.enemy.punchangle;
 	self.deadflag = self.enemy.deadflag;
-	msg_entity = self;
-	WriteByte (MSG_ONE,5);
-	WriteEntity (MSG_ONE, self.enemy); 
-	WriteByte (MSG_ONE, 10);
-     	WriteAngle (MSG_ONE,self.enemy.v_angle_x);
-     	WriteAngle (MSG_ONE,self.enemy.v_angle_y);
-     	WriteAngle (MSG_ONE,self.enemy.v_angle_z);
+
+	// zero these — engine sends them to our client separately
+	self.punchangle = '0 0 0';
+	self.dmg_take = 0;
+	self.dmg_save = 0;
+
+	// angles: use fixangle for smooth engine-native sync
+	// (no WriteAngle quantization jitter)
+	self.v_angle = self.enemy.v_angle;
+	self.angles = self.enemy.v_angle;
+	self.fixangle = TRUE;
+
 	self.modelindex = 0;
-	
-	self.impulse = 0;	
-	return TRUE;	
+	self.impulse = 0;
+	return TRUE;
 };
 
-void() botcam_u = 
+void() botcam_u =
 {
-	// sloppy cycling code
+	local entity start;
+
+	// cycle to next trackable bot (skip self and other botcams)
 	if (self.classname != "botcam")
-	{
 		self.enemy = player_head;
-	}
 	else
 	{
-		do
-		{
-			self.enemy = self.enemy._next;
-			if (!self.enemy)
-				self.enemy = player_head;
-		}
-		while (self.enemy.classname == "botcam" && self.enemy != self);
+		self.enemy = self.enemy._next;
+		if (!self.enemy)
+			self.enemy = player_head;
 	}
-	if (self.enemy == self)
+	start = self.enemy;
+	while (self.enemy == self || self.enemy.classname == "botcam")
 	{
-		do
-		{
-			self.enemy = self.enemy._next;
-			if (!self.enemy)
-				self.enemy = player_head;
-		}
-		while (self.enemy.classname == "botcam" && self.enemy != self);
+		self.enemy = self.enemy._next;
+		if (!self.enemy)
+			self.enemy = player_head;
+		if (self.enemy == start)
+			break; // looped all the way around
 	}
+	// if we only found self/botcams, no valid target
+	if (self.enemy == self || self.enemy.classname == "botcam")
+		self.enemy = world;
 	self.classname = "botcam";
 	self.solid = SOLID_NOT;
 	self.movetype = MOVETYPE_NONE;
@@ -626,6 +636,10 @@ void() botcam_u =
 		self.enemy.dmg_take = 0;
 		self.enemy.dmg_save = 0;
 	}
+	// set viewport to target (persists until changed)
+	msg_entity = self;
+	WriteByte (MSG_ONE, 5);
+	WriteEntity (MSG_ONE, self.enemy);
 	sprint(self, "Now tracking ");
 	sprint(self, self.enemy.netname);
 	sprint(self, "\n");
@@ -697,14 +711,6 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
-	if (!self.phys_obj)
-	{
-		b_temp2 = phys_head;
-		while (b_temp2 != world && b_temp2.owner != self)
-			b_temp2 = b_temp2._next;
-		self.phys_obj = b_temp2;
-	}
-
 	if (self.ishuman == 2)
 	{
 		self.ishuman = FALSE;
@@ -719,6 +725,13 @@ void() ClientInRankings =
 
 void() ClientDisconnected =
 {
+	// exit botcam cleanly before disconnect
+	if (self.classname == "botcam")
+	{
+		self.classname = "player";
+		self.enemy = world;
+	}
+
 	if (player_head == self)
 		player_head = self._next;
 	if (self._next)
@@ -846,13 +859,11 @@ BotInit
 
 void() BotInit =
 {
-	local entity ent, fisent;
-	local float numents;
-	
-	// spawn entities for the physics
+	local entity ent;
+
+	// count client slots
 	ent = nextent(world);
 	max_clients = 0;
-
 	while(ent != world)
 	{
 		max_clients = max_clients + 1;
@@ -861,26 +872,8 @@ void() BotInit =
 	if (max_clients > 16)
 		max_clients = 16;
 
-	ent = nextent(world);
-	fisent = world;
-	while (numents < max_clients)
-	{
-
-		phys_head = spawn();
-		if (fisent)
-			fisent._next = phys_head;
-		phys_head._last = fisent;
-		fisent = phys_head;
-		ent.phys_obj = phys_head;
-		phys_head.classname = "phys_obj";
-		phys_head.owner = ent;
-		numents = numents + 1;
-		ent = nextent(ent);
-	}
 	precache_model("progs/s_light.spr");
 	precache_model("progs/s_bubble.spr");
-
-
 };
 
 /*
@@ -1321,8 +1314,7 @@ void() BotFrame =
 			if (active_clients & ClientBitFlag(num))
 			{
 				BotAI();			// decide direction → sets keys + b_angle
-				// view angles: direct from bot_angle_set
-				self.v_angle = self.b_angle;
+				// view angles: bot_angle_set applies turn speed limit
 				if (self.v_angle_x > 80) self.v_angle_x = 80;
 				else if (self.v_angle_x < -70) self.v_angle_x = -70;
 				self.v_angle_z = 0;

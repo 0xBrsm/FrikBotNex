@@ -380,7 +380,6 @@ void() bot_find_enemy =
 		v = vectoangles(normalize(org));
 		v_x = v_x * -1;
 		self.b_angle = v;
-		if (self.b_skill >= 1) self.v_angle = v;
 		bot_weapon_switch(vlen(org));
 		bot_shoot();
 		self.b_ambush_time = 0;
