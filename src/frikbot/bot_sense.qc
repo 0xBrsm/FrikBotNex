@@ -166,10 +166,8 @@ relative to the bot's facing direction.
 
 float(float desired_yaw) bot_go =
 {
-	local vector dir;
 	makevectors('0 1 0' * desired_yaw);
-	dir = v_forward;
-	self.keys = (self.keys & 960) | frik_KeysForDir(dir);
+	self.b_wishdir = v_forward;
 	return TRUE;
 };
 

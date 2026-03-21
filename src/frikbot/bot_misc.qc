@@ -218,7 +218,10 @@ void() bot_chat =
 	if (self.b_chattime > time)
 	{
 		if (self.b_skill < 2)
-			self.keys = self.button0 = self.button2 = 0;
+		{
+			self.b_wishdir = '0 0 0';
+			self.button0 = self.button2 = 0;
+		}
 		return;
 	}
 	else if (self.b_chattime)

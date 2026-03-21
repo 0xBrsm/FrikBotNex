@@ -81,15 +81,15 @@ float(float flag) frik_recognize_plat =
 	{
 		if (flag)
 		{
-			if (self.keys & KEY_MOVEUP)
+			if (self.b_wishdir_z > 0)
 			{
 				if (plat_ent.velocity_z > 0)
-					self.keys = self.keys & 960;
+					self.b_wishdir = '0 0 0';
 			}
-			else if (self.keys & KEY_MOVEDOWN)
+			else if (self.b_wishdir_z < 0)
 			{
 				if (plat_ent.velocity_z < 0)
-					self.keys = self.keys & 960;
+					self.b_wishdir = '0 0 0';
 			}
 		}
 		return TRUE;
@@ -98,30 +98,6 @@ float(float flag) frik_recognize_plat =
 		return FALSE;
 };
 
-float(vector sdir) frik_KeysForDir =
-{
-	local vector keydir;
-	local float outkeys, tang;
-	outkeys = 0;
-	if (sdir_x || sdir_y)
-	{
- 		keydir = vectoangles(sdir);
-		tang = angcomp(keydir_y, self.v_angle_y);
-		if ((tang <= 150) && (tang >= 30))
-			outkeys = outkeys + KEY_MOVELEFT;
-		else if ((tang >= -150) && (tang <= -30))
-			outkeys = outkeys + KEY_MOVERIGHT;
-		if (fabs(tang) <= 60)
-			outkeys = outkeys + KEY_MOVEFORWARD;
-		else if (fabs(tang) >= 120)
-			outkeys = outkeys + KEY_MOVEBACK;
-	}
-	if (sdir_z > 0)
-		outkeys = outkeys + KEY_MOVEUP;
-	else if (sdir_z < 0)
-		outkeys = outkeys + KEY_MOVEDOWN;
-	return outkeys;
-};
 
 
 
@@ -154,8 +130,7 @@ void() frik_movetogoal =
 	way = realorigin(self.target1) - self.origin;
 	if (vlen(way) < 25)
 	{
-		self.movevect = '0 0 0';
-		self.keys = self.oldkeys;
+		self.b_wishdir = '0 0 0';
 		return;
 	}
 
@@ -191,10 +166,10 @@ void() frik_movetogoal =
 	{
 		g = angcomp(self.v_angle_x, self.b_angle_x);
 		if (fabs(g) > 10)
-			self.keys = self.keys & 960;
+			self.b_wishdir = '0 0 0';
 		g = angcomp(self.v_angle_y, self.b_angle_y);
 		if (fabs(g) > 10)
-			self.keys = self.keys & 960;
+			self.b_wishdir = '0 0 0';
 	}
 };
 

@@ -46,7 +46,7 @@ this notice in its entirety.
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
 Priority pipeline: one brain, one decision per frame.
-Each tier either claims self.keys (returns TRUE) or
+Each tier either claims self.b_wishdir (returns TRUE) or
 passes down. Only one tier writes movement per frame.
 
 P1: Survival  -- lava, void, drowning. NOT optional.
@@ -77,7 +77,7 @@ void() bot_handle_ai =
 
 	// AI_WAIT: stop moving, keep looking pretty
 	if (self.b_aiflags & AI_WAIT)
-		self.keys = self.keys & 960;
+		self.b_wishdir = '0 0 0';
 
 	// AI_DOORFLAG: door was here when waypoint spawned
 	if (self.b_aiflags & AI_DOORFLAG)
@@ -92,7 +92,7 @@ void() bot_handle_ai =
 			if (self.b_aiflags & AI_DOOR_NO_OPEN)
 			{
 				if (newt.nextthink)
-					self.keys = self.keys & 960;
+					self.b_wishdir = '0 0 0';
 				else
 					bot_lost(self.last_way, FALSE);
 			}
@@ -151,7 +151,7 @@ void() bot_handle_ai =
 	{
 		if (self.waterlevel > 2)
 		{
-			self.keys = KEY_MOVEUP;
+			self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
 		}
 		else
@@ -170,7 +170,7 @@ void() bot_handle_ai =
 		if (!frik_recognize_plat(FALSE))
 		{
 			self = b_temp3;
-			self.keys = self.keys & 960;
+			self.b_wishdir = '0 0 0';
 		}
 		else
 		{
@@ -180,11 +180,11 @@ void() bot_handle_ai =
 				v = realorigin(trace_ent) + trace_ent.origin - self.origin;
 				v_z = 0;
 				if (vlen(v) < 24)
-					self.keys = self.keys & 960;
+					self.b_wishdir = '0 0 0';
 				else
 				{
 					self.b_aiflags = self.b_aiflags | AI_PRECISION;
-					self.keys = frik_KeysForDir(v);
+					self.b_wishdir = normalize(v);
 				}
 			}
 		}
@@ -201,7 +201,7 @@ void() bot_handle_ai =
 			v = self.origin - realorigin(newt);
 			v_z = 0;
 			if (vlen(v) > 96)
-				self.keys = self.keys & 960;
+				self.b_wishdir = '0 0 0';
 			else
 				frik_walkmove(v);
 		}
@@ -269,7 +269,7 @@ void() bot_path =
 	bot_check_lost(self.target1);
 	if (!self.target1)
 	{
-		self.keys = 0;
+		self.b_wishdir = '0 0 0';
 		return;
 	}
 	if (target_onstack(self.last_way))
@@ -454,8 +454,6 @@ void() bot_angle_set =
 	accel = 0.10 + self.b_skill * 0.15;
 	max_turn = (100 + self.b_skill * 250) * dt;
 
-	self.keys = self.keys & 63;
-
 	dyaw = self.b_angle_y - self.v_angle_y;
 	while (dyaw > 180) dyaw = dyaw - 360;
 	while (dyaw < -180) dyaw = dyaw + 360;
@@ -612,7 +610,7 @@ void() BotAI =
 	{
 		self.button0 = floor(random() * 2);
 		self.button2 = 0;
-		self.keys = 0;
+		self.b_wishdir = '0 0 0';
 		self.b_aiflags = 0;
 		ClearMyRoute();
 		self.target1 = self.target2 = self.target3 = self.target4 = self.enemy = world;
@@ -660,7 +658,7 @@ void() BotAI =
 			if (waypoint_mode < WM_EDITOR)
 				bot_get(TRUE);
 		self.b_aiflags = 0;
-		self.keys = 0;
+		self.b_wishdir = '0 0 0';
 		bot_angle_set();
 		return;
 	}
@@ -671,7 +669,7 @@ void() BotAI =
 		traceline(self.origin, self.origin + '0 0 6800', TRUE, self);
 		if (trace_inopen)
 		{
-			self.keys = KEY_MOVEUP;
+			self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
 			bot_angle_set();
 			return;
@@ -715,7 +713,7 @@ void() BotAI =
 			else
 			{
 				self.b_aiflags = AI_WAIT;
-				self.keys = 0;
+				self.b_wishdir = '0 0 0';
 			}
 		}
 

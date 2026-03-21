@@ -134,7 +134,7 @@ for all variables in the bot...
 */
 
 // ----- entity fields ---
-.float	wallhug, keys, oldkeys, ishuman;
+.float	wallhug, keys, ishuman;
 .float	b_frags, b_clientno, b_shirt, b_pants; 
 .float	ai_time, b_sound, missile_speed;
 .float	portal_time, b_skill, switch_wallhug;
@@ -185,26 +185,15 @@ float CSTATE_RETREAT	= 2;	// outgunned, falling back
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
 .entity	current_way;
-.vector	b_angle, b_dest, mouse_emu, obs_dir;
-.vector	movevect, b_dir;
+.vector	b_angle, mouse_emu, b_dir;
+.vector	movevect;
+.vector	b_wishdir;	// desired world-frame movement direction (unit vector or '0 0 0')
 .vector dyn_dest;
 
 // --------defines-----
 float SVC_UPDATENAME	= 13;
 float SVC_UPDATEFRAGS	= 14;
 float SVC_UPDATECOLORS	= 17;
-
-// used for the physics & movement AI
-float KEY_MOVEUP 		= 1;
-float KEY_MOVEDOWN 	= 2;
-float KEY_MOVELEFT 	= 4;
-float KEY_MOVERIGHT 	= 8;
-float KEY_MOVEFORWARD	= 16;
-float KEY_MOVEBACK	= 32;
-float KEY_LOOKUP		= 64;
-float KEY_LOOKDOWN	= 128;
-float KEY_LOOKLEFT	= 256;
-float KEY_LOOKRIGHT	= 512;
 
 // these are aiflags for waypoints
 // some overlap to the bot
@@ -302,12 +291,11 @@ void()				frik_bot_roam;
 float(vector weird)		frik_walkmove;
 void()				frik_movetogoal;
 float(float flag)			frik_recognize_plat;
-float(vector sdir)		frik_KeysForDir;
 
 // sense API
 void()				bot_sense_space;
 float(float desired_yaw)	bot_go;
-void()				CL_KeyMove;
+void()				bot_build_movevect;
 void()				SV_ClientThink;
 
 // ai & misc
@@ -1312,7 +1300,7 @@ void() BotFrame =
 				else if (self.v_angle_x < -70) self.v_angle_x = -70;
 				self.v_angle_z = 0;
 				self.v_angle_y = frik_anglemod(self.v_angle_y);
-				CL_KeyMove();		// keys → movevect
+				bot_build_movevect();	// b_wishdir → movevect
 				SV_ClientThink();	// movevect → velocity
 				// engine SV_Physics_Client moves the bot
 			}

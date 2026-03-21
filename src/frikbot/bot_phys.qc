@@ -14,19 +14,32 @@
 This program is in the Public Domain.
 */
 
-// ---- input: keys → movevect ----
+// ---- input: b_wishdir → movevect ----
+// Converts world-frame desired direction to view-relative movevect.
+// Checks AI flags for stop/precision. SV_ClientThink clamps to sv_maxspeed.
 
-void() CL_KeyMove =
+void() bot_build_movevect =
 {
+	local vector vang;
+	local float spd;
+
 	self.movevect = '0 0 0';
-	self.movevect_y = self.movevect_y + (350 * ((self.keys & KEY_MOVERIGHT) > 0));
-	self.movevect_y = self.movevect_y - (350 * ((self.keys & KEY_MOVELEFT) > 0));
-	self.movevect_x = self.movevect_x + (200 * ((self.keys & KEY_MOVEFORWARD) > 0));
-	self.movevect_x = self.movevect_x - (200 * ((self.keys & KEY_MOVEBACK) > 0));
-	self.movevect_z = self.movevect_z + (200 * ((self.keys & KEY_MOVEUP) > 0));
-	self.movevect_z = self.movevect_z - (200 * ((self.keys & KEY_MOVEDOWN) > 0));
-	if (!(self.b_aiflags & AI_PRECISION))
-		self.movevect = self.movevect * 2;
+
+	if (self.b_wishdir == '0 0 0')
+		return;
+
+	// project world direction onto view axes (yaw only, matching SV_ClientThink)
+	vang = self.v_angle;
+	vang_x = vang_z = 0;
+	makevectors(vang);
+
+	spd = sv_maxspeed;
+	if (self.b_aiflags & AI_PRECISION)
+		spd = spd * 0.5;
+
+	self.movevect_x = (self.b_wishdir * v_forward) * spd;
+	self.movevect_y = (self.b_wishdir * v_right) * spd;
+	self.movevect_z = self.b_wishdir_z * spd;
 };
 
 
@@ -36,7 +49,7 @@ void() CL_KeyMove =
 SV_ClientThink — compute velocity from movevect
 
 Called once per bot per frame from BotFrame.
-Reads self.movevect (set by CL_KeyMove) and
+Reads self.movevect (set by bot_build_movevect) and
 self.v_angle (set by bot_angle_set), applies
 Quake friction + acceleration to self.velocity.
 
