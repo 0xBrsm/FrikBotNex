@@ -442,12 +442,17 @@ void() bot_angle_set =
 		self.b_angle_x = 0;
 	}
 
-	// --- apply view angles with turn speed limit ---
-	// degrees/sec by skill (at sys_ticrate 0.05 = 20hz):
-	// skill 0: 60°/s (3°/tick), skill 1: 120°/s (6°/tick)
-	// skill 2: 180°/s (9°/tick), skill 3: 300°/s (15°/tick)
-	local float max_turn, dyaw, dpitch, scale;
-	max_turn = (60 + self.b_skill * 80) * cvar("sys_ticrate");
+	// --- apply view angles: proportional + velocity smoothing ---
+	// mouse_emu stores angular velocity (y=yaw, x=pitch).
+	// Proportional step sets the desired velocity (natural decel),
+	// but actual velocity blends toward it (smooth accel, no overshoot).
+	local float smooth, accel, max_turn, dt;
+	local float dyaw, dpitch, want_y, want_p, step_len;
+
+	dt = cvar("sys_ticrate");
+	smooth = 0.03 + self.b_skill * 0.15;
+	accel = 0.10 + self.b_skill * 0.15;
+	max_turn = (100 + self.b_skill * 250) * dt;
 
 	self.keys = self.keys & 63;
 
@@ -458,18 +463,24 @@ void() bot_angle_set =
 	while (dpitch > 180) dpitch = dpitch - 360;
 	while (dpitch < -180) dpitch = dpitch + 360;
 
-	// clamp turn to max_turn per frame
-	scale = fabs(dyaw);
-	if (fabs(dpitch) > scale)
-		scale = fabs(dpitch);
-	if (scale > max_turn)
+	// desired velocity from proportional error
+	want_y = dyaw * smooth;
+	want_p = dpitch * smooth;
+
+	// blend actual velocity toward desired (smooth accel)
+	self.mouse_emu_y = self.mouse_emu_y + (want_y - self.mouse_emu_y) * accel;
+	self.mouse_emu_x = self.mouse_emu_x + (want_p - self.mouse_emu_x) * accel;
+
+	// cap velocity
+	step_len = vlen(self.mouse_emu_y * '1 0 0' + self.mouse_emu_x * '0 1 0');
+	if (step_len > max_turn)
 	{
-		scale = max_turn / scale;
-		dyaw = dyaw * scale;
-		dpitch = dpitch * scale;
+		self.mouse_emu_y = self.mouse_emu_y * (max_turn / step_len);
+		self.mouse_emu_x = self.mouse_emu_x * (max_turn / step_len);
 	}
-	self.v_angle_y = self.v_angle_y + dyaw;
-	self.v_angle_x = self.v_angle_x + dpitch;
+
+	self.v_angle_y = self.v_angle_y + self.mouse_emu_y;
+	self.v_angle_x = self.v_angle_x + self.mouse_emu_x;
 	while (self.v_angle_x < -180)
 		self.v_angle_x = self.v_angle_x + 360;
 	while (self.v_angle_x > 180)

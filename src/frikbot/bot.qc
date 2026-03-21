@@ -616,21 +616,14 @@ void() botcam_u =
 	}
 	// if we only found self/botcams, no valid target
 	if (self.enemy == self || self.enemy.classname == "botcam")
-		self.enemy = world;
+	{
+		sprint(self, "No one left to track!\n");
+		return;
+	}
 	self.classname = "botcam";
 	self.solid = SOLID_NOT;
 	self.movetype = MOVETYPE_NONE;
 	self.takedamage = DAMAGE_NO;
-
-	if (!self.enemy)
-	{
-		sprint(self, "No one left to track!\n");
-		msg_entity = self;
-		WriteByte (MSG_ONE,5);
-		WriteEntity (MSG_ONE, self);
-		PutClientInServer();
-		return;
-	}
 	if (!self.enemy.ishuman)
 	{
 		self.enemy.dmg_take = 0;
