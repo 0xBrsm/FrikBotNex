@@ -250,7 +250,7 @@ float		bot_count, b_options;
 float		waypoint_mode, dump_mode; 
 float		waypoints, direct_route;
 float		sv_friction, sv_gravity;
-float		sv_accelerate, sv_maxspeed, sv_stopspeed;
+float		sv_accelerate, sv_maxspeed, sv_stopspeed, sv_ticrate;
 entity	fixer;
 entity	route_table;
 entity	b_temp1, b_temp2, b_temp3;
@@ -1285,6 +1285,7 @@ void() BotFrame =
 	sv_friction = cvar("sv_friction");
 	sv_accelerate = cvar("sv_accelerate");
 	sv_stopspeed = cvar("sv_stopspeed");
+	sv_ticrate = cvar("sys_ticrate");
 	real_frametime = frametime; // in NQ this is alright
 	
 	self = nextent(world);

@@ -241,8 +241,7 @@ void() bot_handle_ai =
 		{
 			if (self.last_way.target1 && self.last_way.target1.classname == "waypoint")
 			{
-				v = normalize(self.last_way.target1.origin - self.origin);
-				v = vectoangles(v);
+				v = vectoangles(self.last_way.target1.origin - self.origin);
 				v_x = v_x * -1;
 				self.b_angle = v;
 			}
@@ -415,7 +414,7 @@ void() bot_angle_set =
 				view = trace_endpos;
 				levels = levels - 1;
 			}
-			view = normalize(view - self.origin);
+			view = view - self.origin;
 		}
 		view = vectoangles(view);
 		view_x = view_x * -1;
@@ -446,13 +445,12 @@ void() bot_angle_set =
 	// mouse_emu stores angular velocity (y=yaw, x=pitch).
 	// Proportional step sets the desired velocity (natural decel),
 	// but actual velocity blends toward it (smooth accel, no overshoot).
-	local float smooth, accel, max_turn, dt;
+	local float smooth, accel, max_turn;
 	local float dyaw, dpitch, want_y, want_p, step_len;
 
-	dt = cvar("sys_ticrate");
 	smooth = 0.03 + self.b_skill * 0.15;
 	accel = 0.10 + self.b_skill * 0.15;
-	max_turn = (100 + self.b_skill * 250) * dt;
+	max_turn = (100 + self.b_skill * 250) * sv_ticrate;
 
 	dyaw = self.b_angle_y - self.v_angle_y;
 	while (dyaw > 180) dyaw = dyaw - 360;
@@ -616,6 +614,7 @@ void() BotAI =
 		self.target1 = self.target2 = self.target3 = self.target4 = self.enemy = world;
 		self.last_way = world;
 		self.b_aim_delay = 0;
+		self.mouse_emu = '0 0 0';
 		self.b_strafe_dir = 0;
 		self.b_ambush_time = 0;
 		self.b_combat_time = 0;
