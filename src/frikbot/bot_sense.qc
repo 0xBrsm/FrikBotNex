@@ -158,28 +158,18 @@ void() bot_sense_space =
 
 bot_go — "I want to go this direction"
 
-Sets movevect for the desired world-frame yaw.
-The normal physics pipeline (CL_KeyMove →
-SV_ClientThink → proxy) handles actual movement.
+Converts a world-frame yaw to movement keys
+relative to the bot's facing direction.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
 float(float desired_yaw) bot_go =
 {
-	local vector push_dir, view_fwd, view_right;
-
+	local vector dir;
 	makevectors('0 1 0' * desired_yaw);
-	push_dir = v_forward;
-
-	makevectors('0 1 0' * self.v_angle_y);
-	view_fwd = v_forward;
-	view_right = v_right;
-
-	self.movevect_x = (push_dir * view_fwd) * sv_maxspeed;
-	self.movevect_y = (push_dir * view_right) * sv_maxspeed;
-	self.movevect_z = 0;
-	self.keys = self.oldkeys;
+	dir = v_forward;
+	self.keys = (self.keys & 960) | frik_KeysForDir(dir);
 	return TRUE;
 };
 

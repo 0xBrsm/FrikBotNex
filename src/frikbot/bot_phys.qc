@@ -14,13 +14,29 @@
 This program is in the Public Domain.
 */
 
+// ---- input: keys → movevect ----
+
+void() CL_KeyMove =
+{
+	self.movevect = '0 0 0';
+	self.movevect_y = self.movevect_y + (350 * ((self.keys & KEY_MOVERIGHT) > 0));
+	self.movevect_y = self.movevect_y - (350 * ((self.keys & KEY_MOVELEFT) > 0));
+	self.movevect_x = self.movevect_x + (200 * ((self.keys & KEY_MOVEFORWARD) > 0));
+	self.movevect_x = self.movevect_x - (200 * ((self.keys & KEY_MOVEBACK) > 0));
+	self.movevect_z = self.movevect_z + (200 * ((self.keys & KEY_MOVEUP) > 0));
+	self.movevect_z = self.movevect_z - (200 * ((self.keys & KEY_MOVEDOWN) > 0));
+	if (!(self.b_aiflags & AI_PRECISION))
+		self.movevect = self.movevect * 2;
+};
+
+
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
 SV_ClientThink — compute velocity from movevect
 
 Called once per bot per frame from BotFrame.
-Reads self.movevect (set by bot_go) and
+Reads self.movevect (set by CL_KeyMove) and
 self.v_angle (set by bot_angle_set), applies
 Quake friction + acceleration to self.velocity.
 
