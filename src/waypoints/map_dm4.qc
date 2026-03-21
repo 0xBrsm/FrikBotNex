@@ -7,6 +7,7 @@ void(vector org, vector bit1, float bit4, float flargs) make_way;
 
 void() map_dm4 =
 {
+	return; // disabled for testing
 	make_way('776.0 -808.0 -210.0', '33 34 47', 0, 2);
 	make_way('272.0 -952.0  46.0', '18 17 0', 0, 0);
 	make_way('112.0 -1136.0 -82.0', '57 16 8', 0, 0);

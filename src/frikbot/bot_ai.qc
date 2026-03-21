@@ -682,11 +682,11 @@ void() BotAI =
 	// validate current enemy
 	if (self.enemy)
 	{
-		if (self.enemy.health <= 0 || !self.enemy.takedamage)
+		if (self.enemy.health <= 0 || !self.enemy.takedamage || cvar("scratch1"))
 			self.enemy = world;
 	}
-	// only scan when we don't have one
-	if (!self.enemy)
+	// only scan when we don't have one (scratch1 disables combat)
+	if (!self.enemy && !cvar("scratch1"))
 		bot_find_enemy();
 
 	// --- act: fight, navigate, or roam ---
