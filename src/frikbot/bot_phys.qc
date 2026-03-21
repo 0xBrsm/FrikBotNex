@@ -15,57 +15,17 @@ This program is in the Public Domain.
 */
 
 // ---- input: view angles from bot AI ----
+// bot_angle_set writes self.b_angle with skill-based aim.
+// We just apply it directly, like a real mouse client would.
 
 void() CL_KeyMove =
 {
-	local float anglespeed;
-	local vector view;
-	if (self.keys != self.oldkeys)
-	{
-		self.movevect = '0 0 0';
-		self.movevect_y = self.movevect_y + (350 * ((self.keys & KEY_MOVERIGHT) > 0));
-		self.movevect_y = self.movevect_y - (350 * ((self.keys & KEY_MOVELEFT) > 0));
-		self.movevect_x = self.movevect_x + (200 * ((self.keys & KEY_MOVEFORWARD) > 0));
-		self.movevect_x = self.movevect_x - (200 * ((self.keys & KEY_MOVEBACK) > 0));
-		self.movevect_z = self.movevect_z + (200 * ((self.keys & KEY_MOVEUP) > 0));
-		self.movevect_z = self.movevect_z - (200 * ((self.keys & KEY_MOVEDOWN) > 0));
-		if (!(self.b_aiflags & AI_PRECISION))
-			self.movevect = self.movevect * 2;
-	}
-	self.oldkeys = self.keys;
-
-	if (self.b_skill != 2)
-	{
-		anglespeed = 1.5 * real_frametime;
-		self.v_angle_y = self.v_angle_y + anglespeed * ((self.keys & KEY_LOOKLEFT) > 0) * 140;
-		self.v_angle_y = self.v_angle_y - anglespeed * ((self.keys & KEY_LOOKRIGHT) > 0) * 140;
-		self.v_angle_x = self.v_angle_x - anglespeed * ((self.keys & KEY_LOOKUP) > 0) * 150;
-		self.v_angle_x = self.v_angle_x + anglespeed * ((self.keys & KEY_LOOKDOWN) > 0) * 150;
-	}
-	else
-	{
-		view_x = angcomp(self.b_angle_x, self.v_angle_x);
-		view_y = angcomp(self.b_angle_y, self.v_angle_y);
-		if (vlen(view) > 30)
-		{
-			self.mouse_emu = self.mouse_emu + (view * 30);
-			if (vlen(self.mouse_emu) > 180)
-				self.mouse_emu = normalize(self.mouse_emu) * 180;
-		}
-		else if (real_frametime > 0.0001)
-			self.mouse_emu = view * (1 / real_frametime);
-		else
-			self.mouse_emu = view;
-		self.v_angle = self.v_angle + self.mouse_emu * real_frametime;
-	}
+	self.v_angle = self.b_angle;
 	if (self.v_angle_x > 80)
 		self.v_angle_x = 80;
 	else if (self.v_angle_x < -70)
 		self.v_angle_x = -70;
-	if (self.v_angle_z > 50)
-		self.v_angle_z = 50;
-	else if (self.v_angle_z < -50)
-		self.v_angle_z = -50;
+	self.v_angle_z = 0;
 	self.v_angle_y = frik_anglemod(self.v_angle_y);
 };
 
