@@ -296,7 +296,6 @@ float(float flag)			frik_recognize_plat;
 void()				bot_sense_space;
 float(float desired_yaw)	bot_go;
 void()				bot_build_movevect;
-void()				SV_ClientThink;
 
 // ai & misc
 string()				PickARandomName;
@@ -353,6 +352,7 @@ void(entity client, string s)	frik_sprint = #24;
 vector(entity e, float sped)	frik_aim = #44;	
 void(entity client, string s)	frik_centerprint = #73;
 void(entity e)			frik_setspawnparms = #78;
+float(entity e)			botclient = #79;
 void(float to, float f)		frik_WriteByte = #52;
 void(float to, float f)		frik_WriteChar = #53;
 void(float to, float f)		frik_WriteShort = #54;
@@ -1038,6 +1038,7 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 	bot_count = bot_count + 1;
 	self = GetClientEntity(f);
+	botclient(self);	// activate client_t in engine
 	if (!saved_bots)
 		bot_start_topic(1);
 	self.b_clientno = f;
@@ -1294,15 +1295,14 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				BotAI();			// decide direction → sets keys + b_angle
+				BotAI();			// decide direction → b_wishdir + b_angle
 				// view angles: bot_angle_set applies turn speed limit
 				if (self.v_angle_x > 80) self.v_angle_x = 80;
 				else if (self.v_angle_x < -70) self.v_angle_x = -70;
 				self.v_angle_z = 0;
 				self.v_angle_y = frik_anglemod(self.v_angle_y);
 				bot_build_movevect();	// b_wishdir → movevect
-				SV_ClientThink();	// movevect → velocity
-				// engine SV_Physics_Client moves the bot
+				// engine reads movevect in SV_RunClients → SV_ClientThink
 			}
 		}
 		self = nextent(self);
