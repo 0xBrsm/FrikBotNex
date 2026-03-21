@@ -308,7 +308,6 @@ float(vector sdir)		frik_KeysForDir;
 void()				bot_sense_space;
 float(float desired_yaw)	bot_go;
 void()				SV_ClientThink;
-void() 				CL_KeyMove;
 
 // ai & misc
 string()				PickARandomName;
@@ -1320,10 +1319,15 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				BotAI();			// decide direction → sets movevect
-				CL_KeyMove();		// view angles
+				BotAI();			// decide direction → sets movevect + b_angle
+				// apply view angles directly (like a real mouse client)
+				self.v_angle = self.b_angle;
+				if (self.v_angle_x > 80) self.v_angle_x = 80;
+				else if (self.v_angle_x < -70) self.v_angle_x = -70;
+				self.v_angle_z = 0;
+				self.v_angle_y = frik_anglemod(self.v_angle_y);
 				SV_ClientThink();	// movevect → velocity
-				// engine SV_Physics_Client moves the bot using this velocity
+				// engine SV_Physics_Client moves the bot
 			}
 		}
 		self = nextent(self);
