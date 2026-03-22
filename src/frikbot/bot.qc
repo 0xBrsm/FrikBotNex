@@ -260,7 +260,8 @@ float		saved_bots, saved_skills1, saved_skills2, current_bots;
 // pending bot connection queue (set by BotConnect, consumed by ClientConnected)
 // pending bot connection
 float		_bot_pending_skill;
-float		_bot_pending_count;		// how many bots awaiting ClientConnect
+float		_bot_pending_count;
+float		_spawn_done;		// how many bots awaiting ClientConnect
 float		_bot_colors_pants, _bot_colors_shirt;
 
 // -------ProtoTypes------
@@ -697,9 +698,24 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
+	if (active_clients & ClientBitFlag(cno))
+	{
+		// reconnecting bot (map change) — reconfigure wiped entity
+		self.ishuman = FALSE;
+		self.netname = PickARandomName();
+		self.b_pants = _bot_colors_pants;
+		self.b_shirt = _bot_colors_shirt;
+		self.b_skill = cvar("skill");
+		self.b_clientno = cno;
+		self.colormap = cno + 1;
+		self.team = self.b_pants + 1;
+		act_normal();
+		UpdateClient(self);
+		return;
+	}
 	if (self.ishuman == 2 || _bot_pending_count > 0)
 	{
-		// bot connection — pick name/colors, apply config
+		// new bot connection
 		self.ishuman = FALSE;
 		self.netname = PickARandomName();
 		self.b_pants = _bot_colors_pants;
@@ -859,6 +875,12 @@ BotInit
 void() BotInit =
 {
 	local entity ent;
+
+	// on changelevel, bots are already connected — don't re-queue
+	// on first load, _spawn_done is 0 (global init) so bots will spawn
+	if (bot_count > 0)
+		_spawn_done = TRUE;
+	_bot_pending_count = 0;
 
 	// count client slots
 	ent = nextent(world);

@@ -518,7 +518,6 @@ float MM_BEELINE = 2;
 float MM_COMBAT  = 3;
 float MM_ROAM    = 4;
 
-float _spawn_done;
 void() bot_server_spawn =
 {
 	local float n;
