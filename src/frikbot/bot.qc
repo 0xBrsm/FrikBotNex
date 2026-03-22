@@ -798,9 +798,9 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 	_bot_pending_profiles = _bot_pending_profiles | ClientBitFlag(whatbot - 1);
 
-	// queue engine-side connection
+	// queue engine-side connection by name
 	localcmd("addbot ");
-	localcmd(ftos(whatbot));
+	localcmd(BotName(whatbot));
 	localcmd(" ");
 	localcmd(ftos(whatskill));
 	localcmd("\n");
