@@ -76,7 +76,8 @@ void() SetChangeParms =
 	parm7 = self.ammo_cells;
 	parm8 = self.weapon;
 	parm9 = self.armortype * 100;
-	parm10 = self.b_skill;	// persist bot skill across maps
+	parm10 = self.b_skill;
+	parm11 = (self.ishuman == FALSE);	// 1 = bot, 0 = human
 };
 
 void() SetNewParms =
@@ -109,6 +110,9 @@ void() DecodeLevelParms =
 	self.ammo_cells = parm7;
 	self.weapon = parm8;
 	self.armortype = parm9 * 0.01;
+	self.b_skill = parm10;
+	if (parm11)
+		self.ishuman = FALSE;
 };
 
 /*

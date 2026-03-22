@@ -257,8 +257,7 @@ float		saved_bots, saved_skills1, saved_skills2, current_bots;
 // pending bot connection queue (set by BotConnect, consumed by ClientConnected)
 // pending bot connection
 float		_bot_pending_skill;
-float		_bot_pending_count;
-float		_spawn_done;		// how many bots awaiting ClientConnect
+float		_bot_pending_count;		// how many bots awaiting ClientConnect
 float		_bot_colors_pants, _bot_colors_shirt;
 
 // -------ProtoTypes------
@@ -533,33 +532,33 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
-	if (active_clients & ClientBitFlag(cno))
+	// detect bot vs human:
+	// - reconnecting bot: ishuman=FALSE (set by DecodeLevelParms via parm11)
+	// - new bot: _bot_pending_count > 0
+	// - human: neither
+	if (self.ishuman == FALSE && _bot_pending_count > 0)
 	{
-		// reconnecting bot (map change) — engine restored name/colors
-		// from client_t, skill from spawn parms (parm10)
-		self.ishuman = FALSE;
-		self.b_skill = parm10;
+		// new bot — first connection
 		self.b_clientno = cno;
-		act_normal();
-		return;
-	}
-	if (self.ishuman == 2 || _bot_pending_count > 0)
-	{
-		// new bot connection
-		self.ishuman = FALSE;
 		self.netname = PickARandomName();
 		self.b_pants = _bot_colors_pants;
 		self.b_shirt = _bot_colors_shirt;
 		self.b_skill = _bot_pending_skill;
-		self.b_clientno = cno;
-		self.colormap = cno + 1;
-		self.team = self.b_pants + 1;
-		act_normal();
 		bot_count = bot_count + 1;
 		active_clients = active_clients | ClientBitFlag(cno);
 		_bot_pending_count = _bot_pending_count - 1;
 		return;
 	}
+	if (self.ishuman == FALSE)
+	{
+		// reconnecting bot (changelevel) — engine restored name/colors
+		// from client_t, DecodeLevelParms restored skill from parm10
+		self.b_clientno = cno;
+		bot_count = bot_count + 1;
+		active_clients = active_clients | ClientBitFlag(cno);
+		return;
+	}
+	// human player
 	active_clients = active_clients | ClientBitFlag(cno);
 	self.b_clientno = cno;
 	self.ishuman = TRUE;
@@ -705,11 +704,6 @@ void() BotInit =
 {
 	local entity ent;
 
-	// on changelevel, bots are already connected — don't re-queue
-	// on first load, _spawn_done is 0 (global init) so bots will spawn
-	if (bot_count > 0)
-		_spawn_done = TRUE;
-	_bot_pending_count = 0;
 
 	// count client slots
 	ent = nextent(world);

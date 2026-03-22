@@ -521,12 +521,13 @@ float MM_ROAM    = 4;
 void() bot_server_spawn =
 {
 	local float n;
-	if (_spawn_done) return;
+	// bot_spawned cvar persists across map changes (not in autoexec)
+	// prevents re-queuing bots that are already connected via the driver
+	if (cvar("bot_spawned")) return;
 	n = cvar("temp1");
 	if (n <= 0) return;
-	_spawn_done = TRUE;
+	cvar_set("bot_spawned", "1");
 	while (n > 0) { BotConnect(0, 0, cvar("skill")); n = n - 1; }
-	localcmd("temp1 0\n");
 };
 
 void() bot_debug_metrics =
