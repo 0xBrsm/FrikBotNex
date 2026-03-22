@@ -137,9 +137,8 @@ for all variables in the bot...
 .float	keys, ishuman;
 .float	b_frags, b_clientno, b_shirt, b_pants; 
 .float	ai_time, b_sound, missile_speed;
-.float	portal_time, b_skill, switch_wallhug;
+.float	portal_time, b_skill;
 .float	b_aiflags, b_num, b_chattime;
-.float	b_menu, b_menu_time, b_menu_value;
 .float route_failed, dyn_flags, dyn_time;
 .float dyn_plat;
 .float b_strafe_time, b_strafe_dir;
@@ -214,10 +213,8 @@ float AI_DIFFICULT	= 65536; // route test
 float AI_TRACE_TEST	= 131072; // route test
 
 // these are flags for bots/players (dynamic/editor flags)
-float AI_OBSTRUCTED	= 1;
 float AI_HOLD_SELECT	= 2;
 float AI_WAIT		= 4;
-float AI_DANGER		= 8;
 
 
 // addition masks
@@ -247,12 +244,12 @@ float		bot_count, b_options;
 float		waypoint_mode;
 float		waypoints, direct_route;
 float		sv_gravity, sv_maxspeed, sv_ticrate;
+float		bot_nocombat;	// scratch1 cvar: 1=pacifist mode
 entity	fixer;
 entity	route_table;
 entity	b_temp1, b_temp2, b_temp3;
 entity 	player_head, way_head;
 float		busy_waypoints;
-float		saved_bots, saved_skills1, saved_skills2, current_bots;
 
 // pending bot connection queue (set by BotConnect, consumed by ClientConnected)
 // pending bot connection
@@ -268,7 +265,6 @@ void()				SetNewParms;
 
 // rankings
 float(float clientno)		ClientBitFlag;
-float()				ClientNextAvailable;
 void(float whichteam, float whatbot, float whatskill) BotConnect;
 void(entity bot)			BotDisconnect;
 void(float clientno)		BotInvalidClientNo;
@@ -490,12 +486,6 @@ it just links the bot into the mod
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-void() ClientFixRankings =
-{
-	// engine handles client updates natively now
-	self.switch_wallhug = 0;
-};
-		
 void() ClientInRankings =
 {
 	local float cno;
@@ -562,7 +552,6 @@ void() ClientInRankings =
 	active_clients = active_clients | ClientBitFlag(cno);
 	self.b_clientno = cno;
 	self.ishuman = TRUE;
-	self.switch_wallhug = time + 1;
 };
 
 
@@ -598,8 +587,6 @@ float () BotPreFrame =
 		return TRUE;
 	if (self.ishuman)
 	{
-		if (self.switch_wallhug)
-			ClientFixRankings();
 		if (self.classname == "botcam")
 			return TRUE;
 	}
@@ -771,22 +758,6 @@ float(float clientno) ClientBitFlag =
 	return 0;
 };
 
-float() ClientNextAvailable =
-{
-	local float clientno;
-
-	clientno = max_clients;
-	while(clientno > 0)
-	{
-		clientno = clientno - 1;
-
-		if(!(active_clients & ClientBitFlag(clientno)))
-			return clientno;
-	}
-
-	return -1;
-};
-
 
 void(entity e1, entity e2, float flag) DeveloperLightning =
 {
@@ -805,51 +776,6 @@ void(entity e1, entity e2, float flag) DeveloperLightning =
 	WriteCoord (MSG_BROADCAST, e2.origin_z); 
 };
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-Find Another Color
-
-Team finding code
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float(float tcolor) FindAnotherColor =
-{
-	local float bestbet, scolor, pcount, bestp;
-	bestbet = -1;
-	bestp = 16;
-	while(scolor < 14)
-	{
-		if (scolor != tcolor)
-		{
-			b_temp2 = player_head;
-			pcount = 0;
-			while(b_temp2 != world)
-			{
-				if (b_temp2.team == scolor + 1)
-					pcount = pcount + 1;
-				b_temp2 = b_temp2._next;
-			}
-			if ((pcount < bestp) && pcount)
-			{
-				bestbet = scolor;
-				bestp = pcount;
-			}
-		}
-		scolor = scolor + 1;
-	}
-	if (bestbet < 0)
-	{
-		bestbet = tcolor;
-		while (bestbet == tcolor)
-		{
-			bestbet = floor(random() * 13);
-		}
-	}
-	return bestbet;
-};
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -888,16 +814,11 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 
 void(entity bot) BotDisconnect =
 {
-	local string h;
 	local entity uself;
 	uself = self;
 	self = bot;
 
 	bot_count = bot_count - 1;
-	current_bots = current_bots - (current_bots & ClientBitFlag(self.b_num - 1));
-	h = ftos(current_bots);
-	cvar_set("scratch1", h);
-
 
 	ClientDisconnect();
 
@@ -975,35 +896,6 @@ void() LoadWaypoint =
 	tep.b_frags = cvar("scratch4");
 };
 
-void() bot_return =
-{
-	if (time > 2)
-	{
-		if ((waypoint_mode == WM_DYNAMIC) || (waypoint_mode == WM_LOADED))
-		{
-			// minor precaution
-
-			if (saved_bots & 1) BotConnect(0, 1, saved_skills1 & 3);
-			if (saved_bots & 2) BotConnect(0, 2, (saved_skills1 & 12) / 4);
-			if (saved_bots & 4) BotConnect(0, 3, (saved_skills1 & 48) / 16);
-			if (saved_bots & 8) BotConnect(0, 4, (saved_skills1 & 192) / 64);
-			if (saved_bots & 16) BotConnect(0, 5, (saved_skills1 & 768) / 256);
-			if (saved_bots & 32) BotConnect(0, 6, (saved_skills1 & 3072) / 1024);
-			if (saved_bots & 64) BotConnect(0, 7, (saved_skills1 & 12288) / 4096);
-			if (saved_bots & 128) BotConnect(0, 8, (saved_skills1 & 49152) / 16384);
-			if (saved_bots & 256) BotConnect(0, 9, saved_skills2 & 3);
-			if (saved_bots & 512) BotConnect(0, 10, (saved_skills2 & 12) / 4);
-			if (saved_bots & 1024) BotConnect(0, 11, (saved_skills2& 48) / 16);
-			if (saved_bots & 2048) BotConnect(0, 12, (saved_skills2 & 192) / 64);
-			if (saved_bots & 4096) BotConnect(0, 13, (saved_skills2 & 768) / 256);
-			if (saved_bots & 8192) BotConnect(0, 14, (saved_skills2 & 3072) / 1024);
-			if (saved_bots & 16384) BotConnect(0, 15, (saved_skills2 & 12288) / 4096);
-			if (saved_bots & 32768) BotConnect(0, 16, (saved_skills2 & 49152) / 16384);
-			saved_bots = 0;
-		}
-	}
-};
-
 
 void() WaypointWatch =
 {
@@ -1038,14 +930,7 @@ void() WaypointWatch =
 	}
 	else
 	{
-		// the bots return!
 		b_options = cvar("saved1");
-		if (coop || (b_options & OPT_SAVEBOTS))
-		{
-			saved_bots = cvar("scratch1");
-			saved_skills1 = cvar("scratch2");
-			saved_skills2 = cvar("scratch3");
-		}
 		cvar_set ("saved4", "0");
 		if (max_clients > 1)
 		{
@@ -1069,6 +954,7 @@ void() BotFrame =
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
 	sv_ticrate = cvar("sys_ticrate");
+	bot_nocombat = cvar("scratch1");
 	
 	self = nextent(world);
 	num = 0;
@@ -1092,9 +978,6 @@ void() BotFrame =
 		num = num + 1;
 	}
 	WaypointWatch();
-
-	if (saved_bots)
-		bot_return();
 };
 
 /*

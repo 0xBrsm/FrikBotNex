@@ -32,7 +32,6 @@ Spatial awareness:
 .vector sense_fwd_normal;       // wall surface normal
 
 // --- Target/enemy visibility cache ---
-.float sense_target_vis;
 .float sense_enemy_vis;
 .float sense_enemy_dist;
 .float sense_enemy_wall;
@@ -215,18 +214,6 @@ void() bot_sense_visibility =
 	local vector spot1, org, dir, v;
 
 	spot1 = self.origin + self.view_ofs;
-
-	if (self.target1 && self.target1 != world)
-	{
-		org = realorigin(self.target1);
-		traceline(spot1, org, TRUE, self);
-		if (trace_ent == self.target1 || trace_fraction == 1)
-			self.sense_target_vis = TRUE;
-		else
-			self.sense_target_vis = FALSE;
-	}
-	else
-		self.sense_target_vis = FALSE;
 
 	if (self.enemy && self.enemy != world)
 	{
