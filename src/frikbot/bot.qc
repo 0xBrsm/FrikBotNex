@@ -407,25 +407,8 @@ void(entity	client, string s) stuffcmd =
 
 void(entity	e) setspawnparms =
 {
-	local float n;
-	if (e.ishuman == 1)
-		frik_setspawnparms(e);
-	else
-	{
-		b_temp1 = player_head;
-		n = 0;
-		while(b_temp1 && n < max_clients)
-		{
-			if (b_temp1.ishuman)
-			{
-				frik_setspawnparms(b_temp1);
-				return;
-			}
-			b_temp1 = b_temp1._next;
-			n = n + 1;
-		}
-		SetNewParms();
-	}
+	// bots are real clients — engine handles spawn parms normally
+	frik_setspawnparms(e);
 };
 void(entity	client, string s) sprint =
 {
@@ -700,17 +683,12 @@ void() ClientInRankings =
 
 	if (active_clients & ClientBitFlag(cno))
 	{
-		// reconnecting bot (map change) — reconfigure wiped entity
+		// reconnecting bot (map change) — engine restored name/colors
+		// from client_t, skill from spawn parms (parm10)
 		self.ishuman = FALSE;
-		self.netname = PickARandomName();
-		self.b_pants = _bot_colors_pants;
-		self.b_shirt = _bot_colors_shirt;
-		self.b_skill = cvar("skill");
+		self.b_skill = parm10;
 		self.b_clientno = cno;
-		self.colormap = cno + 1;
-		self.team = self.b_pants + 1;
 		act_normal();
-		UpdateClient(self);
 		return;
 	}
 	if (self.ishuman == 2 || _bot_pending_count > 0)

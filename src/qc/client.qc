@@ -76,6 +76,7 @@ void() SetChangeParms =
 	parm7 = self.ammo_cells;
 	parm8 = self.weapon;
 	parm9 = self.armortype * 100;
+	parm10 = self.b_skill;	// persist bot skill across maps
 };
 
 void() SetNewParms =
