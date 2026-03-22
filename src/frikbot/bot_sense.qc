@@ -171,6 +171,33 @@ float(float desired_yaw) bot_go =
 	return TRUE;
 };
 
+// ---- b_wishdir → movevect ----
+// Converts world-frame desired direction to view-relative movevect.
+// Engine's SV_ClientThink reads movevect for friction + acceleration.
+
+void() bot_build_movevect =
+{
+	local vector vang;
+	local float spd;
+
+	self.movevect = '0 0 0';
+
+	if (self.b_wishdir == '0 0 0')
+		return;
+
+	vang = self.v_angle;
+	vang_x = vang_z = 0;
+	makevectors(vang);
+
+	spd = sv_maxspeed * 2;
+	if (self.b_aiflags & AI_PRECISION)
+		spd = sv_maxspeed * 0.5;
+
+	self.movevect_x = (self.b_wishdir * v_forward) * spd;
+	self.movevect_y = (self.b_wishdir * v_right) * spd;
+	self.movevect_z = self.b_wishdir_z * spd;
+};
+
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=

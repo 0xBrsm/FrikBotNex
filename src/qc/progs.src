@@ -19,7 +19,6 @@ defs.qc
 ../frikbot/bot_goal.qc
 ../frikbot/bot_ai.qc
 ../frikbot/bot_misc.qc
-../frikbot/bot_phys.qc
 ../frikbot/bot_move.qc
 
 subs.qc
