@@ -112,7 +112,7 @@ void(entity targ, float success) bot_lost =
 
 	target_drop(targ);
 	if (targ.classname == "waypoint")
-		targ.b_sound = targ.b_sound - (targ.b_sound & ClientBitFlag(self.b_clientno));
+		targ.b_sound = targ.b_sound - (targ.b_sound & ClientBitFlag(self.colormap - 1));
 
 	if (!success)
 	{

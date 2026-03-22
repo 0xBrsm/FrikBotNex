@@ -135,7 +135,7 @@ for all variables in the bot...
 
 // ----- entity fields ---
 .float	keys, ishuman;
-.float	b_frags, b_clientno, b_shirt, b_pants; 
+.float	b_frags, b_shirt, b_pants;
 .float	ai_time, b_sound, missile_speed;
 .float	portal_time, b_skill;
 .float	b_aiflags, b_num, b_chattime;
@@ -529,8 +529,7 @@ void() ClientInRankings =
 	if (self.ishuman == FALSE && _bot_pending_count > 0)
 	{
 		// new bot — first connection
-		self.b_clientno = cno;
-		self.netname = PickARandomName();
+				self.netname = PickARandomName();
 		self.b_pants = _bot_colors_pants;
 		self.b_shirt = _bot_colors_shirt;
 		self.b_skill = _bot_pending_skill;
@@ -543,15 +542,13 @@ void() ClientInRankings =
 	{
 		// reconnecting bot (changelevel) — engine restored name/colors
 		// from client_t, DecodeLevelParms restored skill from parm10
-		self.b_clientno = cno;
-		bot_count = bot_count + 1;
+				bot_count = bot_count + 1;
 		active_clients = active_clients | ClientBitFlag(cno);
 		return;
 	}
 	// human player
 	active_clients = active_clients | ClientBitFlag(cno);
-	self.b_clientno = cno;
-	self.ishuman = TRUE;
+		self.ishuman = TRUE;
 };
 
 
@@ -571,7 +568,7 @@ void() ClientDisconnected =
 	if (self._last)
 		self._last._next = self._next;
 
-	active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
+	active_clients = active_clients - (active_clients & ClientBitFlag(self.colormap - 1));
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -583,7 +580,7 @@ bot easier to install
 */
 float () BotPreFrame =
 {
-	if (self.b_clientno == -1)
+	if (self.colormap < 1)
 		return TRUE;
 	if (self.ishuman)
 	{
@@ -610,7 +607,7 @@ float () BotPreFrame =
 };
 float () BotPostFrame =
 {
-	if (self.b_clientno == -1)
+	if (self.colormap < 1)
 		return TRUE;
 	if (self.ishuman)
 	{
@@ -819,27 +816,10 @@ void(entity bot) BotDisconnect =
 	self = bot;
 
 	bot_count = bot_count - 1;
-
+	active_clients = active_clients - (active_clients & ClientBitFlag(self.colormap - 1));
+	self.colormap = 0;
 	ClientDisconnect();
 
-	if (self.b_clientno != -1)
-	{
-      	// the bot's client number is not in use by a real player so we
-		// must remove it's entry in the rankings
-		// Quake engine sets all fields to 0, can only do the most important here
-		self.b_frags = self.frags = 0;
-		self.netname = "";
-		self.classname = "";
-		self.health = 0;
-		self.items = 0;
-		self.armorvalue = 0;
-		self.weaponmodel = "";
-		self.b_pants = 0;
-		self.b_shirt = 0;
-		self.ammo_shells = self.ammo_nails = self.ammo_rockets = self.ammo_cells = 0;
-		active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
-	      self.b_clientno = -1;
-   	}
 	self = uself;
 };
 /*
@@ -858,11 +838,11 @@ void(float clientno) BotInvalidClientNo =
 	bot = GetClientEntity(clientno);
 	if(bot != self && !bot.ishuman && (active_clients & ClientBitFlag(clientno)))
 	{
-		if (active_clients & ClientBitFlag(self.b_clientno))
+		if (active_clients & ClientBitFlag(self.colormap - 1))
 		{
-			bot.b_clientno = -1;
+			bot.colormap = 0;
 			BotDisconnect(bot);
-			active_clients = active_clients | ClientBitFlag(self.b_clientno);
+			active_clients = active_clients | ClientBitFlag(self.colormap - 1);
 			BotConnect(0, bot.b_num, bot.b_skill); 
 			return;
 		}

@@ -628,7 +628,7 @@ entity(entity lastone) FindRoute =
 	// kinda like FindWaypoint, only of this bots route though
 	local entity t, best;
 	local float dst, tdst, flag;
-	flag = ClientBitFlag(self.b_clientno);
+	flag = ClientBitFlag(self.colormap - 1);
 	
 	if (lastone)
 	{
@@ -685,7 +685,7 @@ void() ClearMyRoute =
 	local float flag;
 	local entity t;
 
-	flag = ClientBitFlag(self.b_clientno);
+	flag = ClientBitFlag(self.colormap - 1);
 
 	t = way_head;
 	while (t)
@@ -732,7 +732,7 @@ void(entity this) mark_path =
 		return;
 	}
 
-	flag = ClientBitFlag(self.b_clientno);
+	flag = ClientBitFlag(self.colormap - 1);
 
 	while(t)
 	{
@@ -874,7 +874,7 @@ float() begin_route =
 	{
 		if (!route_table.ishuman)
 		{
-			if (route_table.b_clientno != -1)
+			if (route_table.colormap >= 1)
 				return FALSE;
 		}
 	}
