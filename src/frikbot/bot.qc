@@ -258,6 +258,12 @@ entity 	player_head, way_head;
 float		busy_waypoints;
 float		saved_bots, saved_skills1, saved_skills2, current_bots;
 
+// pending bot connection queue (set by BotConnect, consumed by ClientConnected)
+float		_bot_pending_skill;
+float		_bot_pending_team;
+float		_bot_pending_botnum;
+string		_bot_pending_name;
+
 // -------ProtoTypes------
 // external
 void()				ClientConnect;
@@ -352,7 +358,6 @@ void(entity client, string s)	frik_sprint = #24;
 vector(entity e, float sped)	frik_aim = #44;	
 void(entity client, string s)	frik_centerprint = #73;
 void(entity e)			frik_setspawnparms = #78;
-float(entity e)			botclient = #79;
 void(float to, float f)		frik_WriteByte = #52;
 void(float to, float f)		frik_WriteChar = #53;
 void(float to, float f)		frik_WriteShort = #54;
@@ -662,8 +667,9 @@ void() ClientInRankings =
 	local float cno;
 	local entity t;
 
-   	cno = self.colormap - 1;
-	BotInvalidClientNo (cno);
+	cno = self.colormap - 1;
+	if (cno >= 0 && cno < max_clients)
+		BotInvalidClientNo (cno);
 
 	// guard against double-insertion — if already in list, remove first
 	t = player_head;
@@ -692,9 +698,22 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
-	if (self.ishuman == 2)
+	if (self.ishuman == 2 || _bot_pending_name != "")
 	{
+		// bot connection — apply queued config
 		self.ishuman = FALSE;
+		if (_bot_pending_name != "")
+		{
+			self.netname = _bot_pending_name;
+			self.b_skill = _bot_pending_skill;
+			self.b_clientno = cno;
+			self.colormap = cno + 1;
+			act_normal();
+			bot_count = bot_count + 1;
+			active_clients = active_clients | ClientBitFlag(cno);
+			UpdateClient(self);
+			_bot_pending_name = "";
+		}
 		return;
 	}
 	active_clients = active_clients | ClientBitFlag(cno);
@@ -1022,81 +1041,24 @@ entity(float num) GetClientEntity =
 
 void(float whichteam, float whatbot, float whatskill) BotConnect =
 {
-	local float f;
-	local string h;
-	local entity uself;
-	
-	f = ClientNextAvailable();
-	uself = self;
-	if(f == -1)
-	{
-		bprint("Unable to connect a bot, server is full.\n");
-		return;
-	}
-	
-	// chat thing
+	local float pending;
 
-	bot_count = bot_count + 1;
-	self = GetClientEntity(f);
-	botclient(self);	// activate client_t in engine
-	if (!saved_bots)
-		bot_start_topic(1);
-	self.b_clientno = f;
-	self.colormap = f + 1;
-	if (whatbot)
-		self.netname = BotName(whatbot);
-	else
-		self.netname = PickARandomName();
-	// players can set skill all weird, so leave these checks in
+	// queue bot config for ClientConnected to apply
 	whatskill = rint(whatskill);
-	if (whatskill > 3)
-		whatskill = 3;
-	else if (whatskill < 0)
-		whatskill = 0;
-	self.b_skill = whatskill;
-	act_normal();
+	if (whatskill > 3) whatskill = 3;
+	else if (whatskill < 0) whatskill = 0;
 
-	if (teamplay && !coop)
-	{
-		if (whichteam)
-			self.b_pants = FindAnotherColor(uself.team - 1);
-		else
-			self.b_pants = uself.team - 1;
-		self.b_shirt = self.b_pants;
-	}
-
-	self.team = self.b_pants + 1;
-	UpdateClient(self);
-	SetNewParms();
-	self.ishuman = 2;
-	ClientConnect();
-	PutClientInServer();
-
-	active_clients = active_clients | ClientBitFlag(f);
-
-
-	// this is risky... could corrupt .way files if done wrong
-	// If you're not the gambling type, comment this out
-
-	f = ClientBitFlag(self.b_num - 1);
-	current_bots = current_bots | f;
-
-	if (self.b_num <= 8)
-		saved_skills1 = (saved_skills1 & (65536 - (3 * f)) | (self.b_skill * f));
+	_bot_pending_skill = whatskill;
+	_bot_pending_team = whichteam;
+	_bot_pending_botnum = whatbot;
+	if (whatbot)
+		_bot_pending_name = BotName(whatbot);
 	else
-	{
-		f = ClientBitFlag(self.b_num - 9);
-		saved_skills2 = (saved_skills2 & (65536 - (3 * f)) | (self.b_skill * f));
-	}
+		_bot_pending_name = PickARandomName();
 
-	h = ftos(current_bots);
-	cvar_set("scratch1", h);
-	h = ftos(saved_skills1);
-	cvar_set("scratch2", h);
-	h = ftos(saved_skills2);
-	cvar_set("scratch3", h);
-	self = uself;
-
+	// trigger engine connection via bot net driver
+	pending = cvar("bot_pending");
+	cvar_set("bot_pending", ftos(pending + 1));
 };
 
 void(entity bot) BotDisconnect =
@@ -1149,7 +1111,7 @@ void(float clientno) BotInvalidClientNo =
 	local entity bot;
 
 	bot = GetClientEntity(clientno);
-	if(bot.b_clientno >= 0)
+	if(bot != self && !bot.ishuman && (active_clients & ClientBitFlag(clientno)))
 	{
 		if (active_clients & ClientBitFlag(self.b_clientno))
 		{
