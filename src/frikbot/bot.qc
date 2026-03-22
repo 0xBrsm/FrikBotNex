@@ -251,10 +251,8 @@ entity	b_temp1, b_temp2, b_temp3;
 entity 	player_head, way_head;
 float		busy_waypoints;
 
-// pending bot connection queue (set by BotConnect, consumed by ClientConnected)
-// pending bot connection
-float		_bot_pending_skill;
-float		_bot_pending_count;		// how many bots awaiting ClientConnect
+// reserved bot profiles queued for an engine-side connection
+float		_bot_pending_profiles;
 float		_bot_colors_pants, _bot_colors_shirt;
 
 // -------ProtoTypes------
@@ -295,6 +293,7 @@ float(float desired_yaw)	bot_go;
 void()				bot_build_movevect;
 
 // ai & misc
+float()				PickARandomBotProfile;
 string()				PickARandomName;
 float(entity targ)		fov;
 float(float y1, float y2)	angcomp;
@@ -522,33 +521,26 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
-	// detect bot vs human:
-	// - reconnecting bot: ishuman=FALSE (set by DecodeLevelParms via parm11)
-	// - new bot: _bot_pending_count > 0
-	// - human: neither
-	if (self.ishuman == FALSE && _bot_pending_count > 0)
+	if (parm11)
 	{
-		// new bot — first connection
-				self.netname = PickARandomName();
+		self.ishuman = FALSE;
+		self.b_skill = parm10;
+		self.b_num = parm12;
+		if (self.b_num < 1 || self.b_num > 16)
+			self.b_num = 13;
+		self.netname = BotName(self.b_num);
 		self.b_pants = _bot_colors_pants;
 		self.b_shirt = _bot_colors_shirt;
-		self.b_skill = _bot_pending_skill;
+		_bot_pending_profiles = _bot_pending_profiles
+			- (_bot_pending_profiles & ClientBitFlag(self.b_num - 1));
 		bot_count = bot_count + 1;
 		active_clients = active_clients | ClientBitFlag(cno);
-		_bot_pending_count = _bot_pending_count - 1;
 		return;
 	}
-	if (self.ishuman == FALSE)
-	{
-		// reconnecting bot (changelevel) — engine restored name/colors
-		// from client_t, DecodeLevelParms restored skill from parm10
-				bot_count = bot_count + 1;
-		active_clients = active_clients | ClientBitFlag(cno);
-		return;
-	}
+
 	// human player
 	active_clients = active_clients | ClientBitFlag(cno);
-		self.ishuman = TRUE;
+	self.ishuman = TRUE;
 };
 
 
@@ -796,17 +788,22 @@ entity(float num) GetClientEntity =
 
 void(float whichteam, float whatbot, float whatskill) BotConnect =
 {
-	local float pending;
-
 	whatskill = rint(whatskill);
 	if (whatskill > 3) whatskill = 3;
 	else if (whatskill < 0) whatskill = 0;
-	_bot_pending_skill = whatskill;
-	_bot_pending_count = _bot_pending_count + 1;
 
-	// trigger engine connection via bot net driver
-	pending = cvar("bot_pending");
-	cvar_set("bot_pending", ftos(pending + 1));
+	whatbot = rint(whatbot);
+	if (whatbot < 1 || whatbot > 16)
+		whatbot = PickARandomBotProfile();
+
+	_bot_pending_profiles = _bot_pending_profiles | ClientBitFlag(whatbot - 1);
+
+	// queue an engine-side simulated client connect
+	localcmd("bot_connect " );
+	localcmd(ftos(whatbot));
+	localcmd(" " );
+	localcmd(ftos(whatskill));
+	localcmd("\n");
 };
 
 void(entity bot) BotDisconnect =
@@ -840,7 +837,6 @@ void(float clientno) BotInvalidClientNo =
 	{
 		if (active_clients & ClientBitFlag(self.colormap - 1))
 		{
-			bot.colormap = 0;
 			BotDisconnect(bot);
 			active_clients = active_clients | ClientBitFlag(self.colormap - 1);
 			BotConnect(0, bot.b_num, bot.b_skill); 

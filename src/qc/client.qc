@@ -78,6 +78,7 @@ void() SetChangeParms =
 	parm9 = self.armortype * 100;
 	parm10 = self.b_skill;
 	parm11 = (self.ishuman == FALSE);	// 1 = bot, 0 = human
+	parm12 = self.b_num;
 };
 
 void() SetNewParms =
@@ -91,6 +92,13 @@ void() SetNewParms =
 	parm7 = 0;
 	parm8 = 1;
 	parm9 = 0;
+	parm10 = 0;
+	parm11 = 0;
+	parm12 = 0;
+	parm13 = 0;
+	parm14 = 0;
+	parm15 = 0;
+	parm16 = 0;
 };
 
 void() DecodeLevelParms =
@@ -111,6 +119,8 @@ void() DecodeLevelParms =
 	self.weapon = parm8;
 	self.armortype = parm9 * 0.01;
 	self.b_skill = parm10;
+	self.b_num = parm12;
+	self.ishuman = TRUE;
 	if (parm11)
 		self.ishuman = FALSE;
 };

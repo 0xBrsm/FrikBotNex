@@ -72,24 +72,44 @@ string(float r) BotName =
 	_bot_colors_pants = 0; _bot_colors_shirt = 0;
 	return "FrikBot";
 };
-string () PickARandomName =
+float () PickARandomBotProfile =
 {
-	if (bot_count > 16)
-		return "player";
-
-	local float y, test;
+	local float scan, test;
 	local string h;
 	local entity t;
-	y = TRUE;
-	while(y)
+
+	scan = 0;
+	while (scan < 16)
 	{
-		test = ceil(random() * 16);
-		h = BotName(test);
-		t = find(world, netname, h);
-		if (t == world)
-			y = FALSE;
+		test = 1 + floor(random() * 16);
+		if ((_bot_pending_profiles & ClientBitFlag(test - 1)) == 0)
+		{
+			h = BotName(test);
+			t = find(world, netname, h);
+			if (t == world)
+				return test;
+		}
+		scan = scan + 1;
 	}
-	return h;
+
+	test = 1;
+	while (test <= 16)
+	{
+		if ((_bot_pending_profiles & ClientBitFlag(test - 1)) == 0)
+		{
+			h = BotName(test);
+			t = find(world, netname, h);
+			if (t == world)
+				return test;
+		}
+		test = test + 1;
+	}
+
+	return 13;
+};
+string () PickARandomName =
+{
+	return BotName(PickARandomBotProfile());
 };
 
 
