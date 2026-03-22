@@ -54,7 +54,7 @@ Directional safety is handled on-demand by bot_go.
 
 void() bot_sense_space =
 {
-	local vector ang, start, stop, side, check;
+	local vector ang, start, stop, side;
 	local float conts, hgt, test;
 
 	if (self.sense_space_time == time)

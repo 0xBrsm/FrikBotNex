@@ -134,7 +134,7 @@ for all variables in the bot...
 */
 
 // ----- entity fields ---
-.float	wallhug, keys, ishuman;
+.float	keys, ishuman;
 .float	b_frags, b_clientno, b_shirt, b_pants; 
 .float	ai_time, b_sound, missile_speed;
 .float	portal_time, b_skill, switch_wallhug;
@@ -245,12 +245,11 @@ entity	item_head;		// head of item registry linked list
 float	item_reg_time;		// last time registry was rebuilt
 
 float 	active_clients;
-float		max_clients, real_frametime;
+float		max_clients;
 float		bot_count, b_options;
-float		waypoint_mode, dump_mode; 
+float		waypoint_mode;
 float		waypoints, direct_route;
-float		sv_friction, sv_gravity;
-float		sv_accelerate, sv_maxspeed, sv_stopspeed, sv_ticrate;
+float		sv_gravity, sv_maxspeed, sv_ticrate;
 entity	fixer;
 entity	route_table;
 entity	b_temp1, b_temp2, b_temp3;
@@ -1234,14 +1233,10 @@ void() BotFrame =
 	local float num;
 
 	bot_server_spawn();
-	// for the sake of speed
+	// cache cvars used by bot AI/sense
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
-	sv_friction = cvar("sv_friction");
-	sv_accelerate = cvar("sv_accelerate");
-	sv_stopspeed = cvar("sv_stopspeed");
 	sv_ticrate = cvar("sys_ticrate");
-	real_frametime = frametime; // in NQ this is alright
 	
 	self = nextent(world);
 	num = 0;
