@@ -259,10 +259,10 @@ float		busy_waypoints;
 float		saved_bots, saved_skills1, saved_skills2, current_bots;
 
 // pending bot connection queue (set by BotConnect, consumed by ClientConnected)
+// pending bot connection
 float		_bot_pending_skill;
-float		_bot_pending_team;
-float		_bot_pending_botnum;
-string		_bot_pending_name;
+float		_bot_pending_count;		// how many bots awaiting ClientConnect
+float		_bot_colors_pants, _bot_colors_shirt;
 
 // -------ProtoTypes------
 // external
@@ -698,22 +698,22 @@ void() ClientInRankings =
 	self._last = world;
 	player_head = self;
 
-	if (self.ishuman == 2 || _bot_pending_name != "")
+	if (self.ishuman == 2 || _bot_pending_count > 0)
 	{
-		// bot connection — apply queued config
+		// bot connection — pick name/colors, apply config
 		self.ishuman = FALSE;
-		if (_bot_pending_name != "")
-		{
-			self.netname = _bot_pending_name;
-			self.b_skill = _bot_pending_skill;
-			self.b_clientno = cno;
-			self.colormap = cno + 1;
-			act_normal();
-			bot_count = bot_count + 1;
-			active_clients = active_clients | ClientBitFlag(cno);
-			UpdateClient(self);
-			_bot_pending_name = "";
-		}
+		self.netname = PickARandomName();
+		self.b_pants = _bot_colors_pants;
+		self.b_shirt = _bot_colors_shirt;
+		self.b_skill = _bot_pending_skill;
+		self.b_clientno = cno;
+		self.colormap = cno + 1;
+		self.team = self.b_pants + 1;
+		act_normal();
+		bot_count = bot_count + 1;
+		active_clients = active_clients | ClientBitFlag(cno);
+		UpdateClient(self);
+		_bot_pending_count = _bot_pending_count - 1;
 		return;
 	}
 	active_clients = active_clients | ClientBitFlag(cno);
@@ -1043,18 +1043,11 @@ void(float whichteam, float whatbot, float whatskill) BotConnect =
 {
 	local float pending;
 
-	// queue bot config for ClientConnected to apply
 	whatskill = rint(whatskill);
 	if (whatskill > 3) whatskill = 3;
 	else if (whatskill < 0) whatskill = 0;
-
 	_bot_pending_skill = whatskill;
-	_bot_pending_team = whichteam;
-	_bot_pending_botnum = whatbot;
-	if (whatbot)
-		_bot_pending_name = BotName(whatbot);
-	else
-		_bot_pending_name = PickARandomName();
+	_bot_pending_count = _bot_pending_count + 1;
 
 	// trigger engine connection via bot net driver
 	pending = cvar("bot_pending");
