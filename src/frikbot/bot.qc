@@ -191,9 +191,6 @@ float CSTATE_RETREAT	= 2;	// outgunned, falling back
 .vector dyn_dest;
 
 // --------defines-----
-float SVC_UPDATENAME	= 13;
-float SVC_UPDATEFRAGS	= 14;
-float SVC_UPDATECOLORS	= 17;
 
 // these are aiflags for waypoints
 // some overlap to the bot
@@ -276,7 +273,6 @@ float()				ClientNextAvailable;
 void(float whichteam, float whatbot, float whatskill) BotConnect;
 void(entity bot)			BotDisconnect;
 void(float clientno)		BotInvalidClientNo;
-void(entity who)			UpdateClient;
 
 // waypointing
 void()				DynamicWaypoint;
@@ -352,166 +348,36 @@ void() BotAI;
 
 
 // ----------Commands---------
+// aliases for builtins overridden by bot.qc
 void(entity e, float chan, string samp, float vol, float atten) frik_sound = #8;
-void(entity client, string s)	frik_stuffcmd = #21;
-void(entity client, string s)	frik_sprint = #24;
-vector(entity e, float sped)	frik_aim = #44;	
-void(entity client, string s)	frik_centerprint = #73;
-void(entity e)			frik_setspawnparms = #78;
-void(float to, float f)		frik_WriteByte = #52;
-void(float to, float f)		frik_WriteChar = #53;
-void(float to, float f)		frik_WriteShort = #54;
-void(float to, float f)		frik_WriteLong = #55;
-void(float to, float f)		frik_WriteCoord = #56;
-void(float to, float f)		frik_WriteAngle = #57;
-void(float to, string s)	frik_WriteString	= #58;
-void(float to, entity s)	frik_WriteEntity	= #59;
-
-void(entity client, string s1, string s2, string s3, string s4, string s5, string s6, string s7)
-frik_big_centerprint = #73;
+vector(entity e, float sped)	frik_aim = #44;
 
 //----------------------------------------------------------------------------
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-Function redclarations. These allow function 
-designed to work for clients (sprint, so forth)
-to mainly not complain when working with a bot
-
-Although these shouldn't be needed anymore,
-as the bots truly are clients now, if you don't
-stop the SZ_ buffer from filling up by disabling
-direct messages to the bots, it crashes quake :-(
+Function overrides. Bots are real engine clients
+now — most wrappers just call the builtin directly.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
-void(entity	client, string s) stuffcmd =
-{
-	local float n;
-	if (client.ishuman == 1)
-		frik_stuffcmd(client, s);
-	b_temp1 = player_head;
-	n = 0;
-	while(b_temp1 && n < max_clients)
-	{
-		if (b_temp1.classname == "botcam")
-		{
-			if ((b_temp1.enemy == client) && b_temp1.ishuman)
-				frik_stuffcmd(b_temp1, s);
-		}
-		b_temp1 = b_temp1._next;
-		n = n + 1;
-	}
-};
-
-void(entity	e) setspawnparms =
-{
-	// bots are real clients — engine handles spawn parms normally
-	frik_setspawnparms(e);
-};
-void(entity	client, string s) sprint =
-{
-	local float n;
-	if (client.ishuman == 1)
-		frik_sprint(client, s);
-	b_temp1 = player_head;
-	n = 0;
-	while(b_temp1 && n < max_clients)
-	{
-		if (b_temp1.classname == "botcam")
-		{
-			if ((b_temp1.enemy == client) && b_temp1.ishuman)
-				frik_sprint(b_temp1, s);
-		}
-		b_temp1 = b_temp1._next;
-		n = n + 1;
-	}
-};
-void(entity	client, string s) centerprint =
-{
-	local float n;
-	if (client.ishuman == 1)
-		frik_centerprint(client, s);
-	b_temp1 = player_head;
-	n = 0;
-	while(b_temp1 && n < max_clients)
-	{
-		if (b_temp1.classname == "botcam")
-		{
-			if ((b_temp1.enemy == client) && b_temp1.ishuman)
-				frik_centerprint(b_temp1, s);
-		}
-		b_temp1 = b_temp1._next;
-		n = n + 1;
-	}
-};
-
 vector(entity e, float sped) aim =
 {
 	e.missile_speed = sped;
 	return frik_aim(e, sped);
 };
 
-void(entity e, float chan, string samp, float vol, float atten) sound = 
+void(entity e, float chan, string samp, float vol, float atten) sound =
 {
-
 	frik_sound(e, chan, samp, vol, atten);
-	if (samp == "items/inv3.wav")
-		return;
-	else if (e.classname == "player")
-		e.b_sound = time + 1;
-	else if (other.classname == "player")
-		other.b_sound = time + 1;
-
-};
-void(float to, float f) WriteByte =
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteByte(to, f);
-};
-void(float to, float f) WriteChar =		
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteChar(to, f);
-};
-void(float to, float f) WriteShort =	
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteShort(to, f);
-};
-void(float to, float f) WriteLong = 
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteLong(to, f);
-};
-void(float to, float f) WriteCoord = 
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteCoord(to, f);
-};
-void(float to, float f) WriteAngle = 
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteAngle(to, f);
-};
-void(float to, string s) WriteString = 
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteString(to, s);
-};
-void(float to, entity s) WriteEntity = 
-{
-	if ((to == MSG_ONE) && (msg_entity.ishuman != TRUE))
-		return;
-	frik_WriteEntity(to, s);
+	if (samp != "items/inv3.wav")
+	{
+		if (e.classname == "player")
+			e.b_sound = time + 1;
+		else if (other.classname == "player")
+			other.b_sound = time + 1;
+	}
 };
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -627,22 +493,8 @@ it just links the bot into the mod
 
 void() ClientFixRankings =
 {
-	local float cno;
-
-	if (self.switch_wallhug > time)
-		return;
+	// engine handles client updates natively now
 	self.switch_wallhug = 0;
-
-	b_temp2 = nextent(world);
-	cno = 0;
-
-	while (cno < max_clients)
-	{
-		if ((!b_temp2.ishuman) && (active_clients & ClientBitFlag(cno)))
-			UpdateClient(b_temp2);
-		cno = cno + 1;
-		b_temp2 = nextent(b_temp2);
-	}
 };
 		
 void() ClientInRankings =
@@ -705,7 +557,6 @@ void() ClientInRankings =
 		act_normal();
 		bot_count = bot_count + 1;
 		active_clients = active_clients | ClientBitFlag(cno);
-		UpdateClient(self);
 		_bot_pending_count = _bot_pending_count - 1;
 		return;
 	}
@@ -752,11 +603,10 @@ float () BotPreFrame =
 			ClientFixRankings();
 		if (self.classname == "botcam")
 			return TRUE;
-		
 	}
+	// track frag changes for chat
 	if (self.b_frags != self.frags)
 	{
-		
 		if (self.b_frags > self.frags)
 		{
 			if (pointcontents(self.origin) == CONTENT_LAVA)
@@ -769,6 +619,7 @@ float () BotPreFrame =
 		self.b_frags = self.frags;
 	}
 	DynamicWaypoint();
+	// return FALSE — let PlayerPreThink run for bots (water, powerups, etc.)
 	return FALSE;
 };
 float () BotPostFrame =
@@ -887,18 +738,6 @@ signs on to the server.
 */
 
 
-void(entity who) UpdateClient =
-{
-	WriteByte (MSG_ALL, SVC_UPDATENAME);
-	WriteByte (MSG_ALL, who.b_clientno);
-	WriteString (MSG_ALL, who.netname);
-	WriteByte (MSG_ALL, SVC_UPDATECOLORS);
-	WriteByte (MSG_ALL, who.b_clientno);
-	WriteByte (MSG_ALL, who.b_shirt * 16 + who.b_pants);
-	WriteByte (MSG_ALL, SVC_UPDATEFRAGS);
-	WriteByte (MSG_ALL, who.b_clientno);
-	WriteShort (MSG_ALL, who.frags);
-};
 
 float(float clientno) ClientBitFlag =
 {
@@ -1083,7 +922,6 @@ void(entity bot) BotDisconnect =
 		self.b_pants = 0;
 		self.b_shirt = 0;
 		self.ammo_shells = self.ammo_nails = self.ammo_rockets = self.ammo_cells = 0;
-		UpdateClient(self);
 		active_clients = active_clients - (active_clients & ClientBitFlag(self.b_clientno));
 	      self.b_clientno = -1;
    	}

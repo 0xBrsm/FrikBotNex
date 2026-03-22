@@ -586,6 +586,7 @@ void(entity e, vector min, vector max) setsize = #4;
 void() break						= #6;
 float() random						= #7;		// returns 0 - 1
 // FrikBot: commented out - overridden by bot.qc
+// FrikBot: overridden in bot.qc (adds b_sound tracking for AI)
 //void(entity e, float chan, string samp, float vol, float atten) sound = #8;
 vector(vector v) normalize			= #9;
 void(string e) error				= #10;
@@ -607,11 +608,11 @@ entity(entity start, .string fld, string match) find = #18;
 string(string s) precache_sound		= #19;
 string(string s) precache_model		= #20;
 // FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s)stuffcmd = #21;
+void(entity client, string s)stuffcmd = #21;
 entity(vector org, float rad) findradius = #22;
 void(string s) bprint				= #23;
 // FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s) sprint = #24;
+void(entity client, string s) sprint = #24;
 void(string s) dprint				= #25;
 string(float f) ftos				= #26;
 string(vector v) vtos				= #27;
@@ -645,15 +646,14 @@ vector(vector v) vectoangles			= #51;
 //
 // direct client message generation
 //
-// FrikBot: commented out - overridden by bot.qc
-//void(float to, float f) WriteByte		= #52;
-//void(float to, float f) WriteChar		= #53;
-//void(float to, float f) WriteShort		= #54;
-//void(float to, float f) WriteLong		= #55;
-//void(float to, float f) WriteCoord		= #56;
-//void(float to, float f) WriteAngle		= #57;
-//void(float to, string s) WriteString	= #58;
-//void(float to, entity s) WriteEntity	= #59;
+void(float to, float f) WriteByte		= #52;
+void(float to, float f) WriteChar		= #53;
+void(float to, float f) WriteShort		= #54;
+void(float to, float f) WriteLong		= #55;
+void(float to, float f) WriteCoord		= #56;
+void(float to, float f) WriteAngle		= #57;
+void(float to, string s) WriteString	= #58;
+void(float to, entity s) WriteEntity	= #59;
 
 //
 // broadcast client message generation
@@ -679,7 +679,7 @@ void(string s) changelevel = #70;
 void(string var, string val) cvar_set = #72;	// sets cvar.value
 
 // FrikBot: commented out - overridden by bot.qc
-//void(entity client, string s) centerprint = #73;	// sprint, but in middle
+void(entity client, string s) centerprint = #73;	// sprint, but in middle
 
 void(vector pos, string samp, float vol, float atten) ambientsound = #74;
 
@@ -688,7 +688,7 @@ string(string s) precache_sound2	= #76;		// registered version only
 string(string s) precache_file2		= #77;		// registered version only
 
 // FrikBot: commented out - overridden by bot.qc
-//void(entity e) setspawnparms		= #78;		// set parm1... to the
+void(entity e) setspawnparms		= #78;		// set parm1... to the
 												// values at level start
 												// for coop respawn
 
