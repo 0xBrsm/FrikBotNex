@@ -72,44 +72,42 @@ string(float r) BotName =
 	_bot_colors_pants = 0; _bot_colors_shirt = 0;
 	return "FrikBot";
 };
-float () PickARandomBotProfile =
+// check if a profile number is already in use by a connected bot
+float(float num) BotProfileInUse =
+{
+	local entity t;
+	t = player_head;
+	while (t)
+	{
+		if (!t.ishuman && t.b_num == num)
+			return TRUE;
+		t = t._next;
+	}
+	return FALSE;
+};
+
+float() PickARandomBotProfile =
 {
 	local float scan, test;
-	local string h;
-	local entity t;
 
+	// random pass
 	scan = 0;
 	while (scan < 16)
 	{
 		test = 1 + floor(random() * 16);
-		if ((_bot_pending_profiles & ClientBitFlag(test - 1)) == 0)
-		{
-			h = BotName(test);
-			t = find(world, netname, h);
-			if (t == world)
-				return test;
-		}
+		if (!BotProfileInUse(test))
+			return test;
 		scan = scan + 1;
 	}
-
+	// sequential fallback
 	test = 1;
 	while (test <= 16)
 	{
-		if ((_bot_pending_profiles & ClientBitFlag(test - 1)) == 0)
-		{
-			h = BotName(test);
-			t = find(world, netname, h);
-			if (t == world)
-				return test;
-		}
+		if (!BotProfileInUse(test))
+			return test;
 		test = test + 1;
 	}
-
 	return 13;
-};
-string () PickARandomName =
-{
-	return BotName(PickARandomBotProfile());
 };
 
 
