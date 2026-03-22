@@ -650,13 +650,22 @@ void() BotAI =
 	// route table editing (waypoint system housekeeping)
 	if (route_table == self)
 	{
-		if (busy_waypoints <= 0)
-			if (waypoint_mode < WM_EDITOR)
-				bot_get(TRUE);
-		self.b_aiflags = 0;
-		self.b_wishdir = '0 0 0';
-		bot_angle_set();
-		return;
+		if (self.health < 1 || self.search_time < time - 5)
+		{
+			// dead or stalled — release route table
+			route_table = world;
+			busy_waypoints = 0;
+		}
+		else
+		{
+			if (busy_waypoints <= 0)
+				if (waypoint_mode < WM_EDITOR)
+					bot_get(TRUE);
+			self.b_aiflags = 0;
+			self.b_wishdir = '0 0 0';
+			bot_angle_set();
+			return;
+		}
 	}
 
 	// --- survive: emergency escape from drowning/lava ---
