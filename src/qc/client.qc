@@ -46,11 +46,19 @@ void() info_intermission = {};
 
 
 
+void() SetClientIdentityParms =
+{
+	parm10 = self.b_skill;
+	parm11 = (self.ishuman == FALSE);	// 1 = bot, 0 = human
+	parm12 = self.b_num;
+};
+
 void() SetChangeParms =
 {
 	if (self.health <= 0)
 	{
 		SetNewParms ();
+		SetClientIdentityParms ();
 		return;
 	}
 
@@ -76,6 +84,7 @@ void() SetChangeParms =
 	parm7 = self.ammo_cells;
 	parm8 = self.weapon;
 	parm9 = self.armortype * 100;
+	SetClientIdentityParms ();
 };
 
 void() SetNewParms =
@@ -89,14 +98,34 @@ void() SetNewParms =
 	parm7 = 0;
 	parm8 = 1;
 	parm9 = 0;
+	parm10 = 0;
+	parm11 = 0;
+	parm12 = 0;
+	parm13 = 0;
+	parm14 = 0;
+	parm15 = 0;
+	parm16 = 0;
 };
 
 void() DecodeLevelParms =
 {
+	local float saved_b_skill;
+	local float saved_is_bot;
+	local float saved_b_num;
+
 	if (serverflags)
 	{
+		saved_b_skill = parm10;
+		saved_is_bot = parm11;
+		saved_b_num = parm12;
+
 		if (world.model == "maps/start.bsp")
+		{
 			SetNewParms ();		// take away all stuff on starting new episode
+			parm10 = saved_b_skill;
+			parm11 = saved_is_bot;
+			parm12 = saved_b_num;
+		}
 	}
 
 	self.items = parm1;
@@ -108,6 +137,11 @@ void() DecodeLevelParms =
 	self.ammo_cells = parm7;
 	self.weapon = parm8;
 	self.armortype = parm9 * 0.01;
+	self.b_skill = parm10;
+	self.b_num = parm12;
+	self.ishuman = TRUE;
+	if (parm11)
+		self.ishuman = FALSE;
 };
 
 /*
@@ -384,6 +418,7 @@ void() respawn =
 		CopyToBodyQue (self);
 		// set default spawn parms
 		SetNewParms ();
+		SetClientIdentityParms ();
 		// respawn
 		PutClientInServer ();
 	}

@@ -15,14 +15,11 @@ defs.qc
 ../frikbot/bot.qc
 ../frikbot/bot_sense.qc
 ../frikbot/bot_way.qc
-../frikbot/bot_think.qc
-../frikbot/bot_shoot.qc
 ../frikbot/bot_fight.qc
+../frikbot/bot_goal.qc
 ../frikbot/bot_ai.qc
 ../frikbot/bot_misc.qc
-../frikbot/bot_phys.qc
 ../frikbot/bot_move.qc
-../frikbot/bot_ed.qc
 
 subs.qc
 fight.qc
