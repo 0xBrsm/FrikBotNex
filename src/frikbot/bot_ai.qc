@@ -711,9 +711,6 @@ void() BotAI =
 				else if (!begin_route())
 					bot_get(FALSE);
 			}
-			// keep moving while searching for a goal
-			if (!self.target1)
-				bot_go(self.v_angle_y);
 		}
 
 		if (self.target1)
@@ -728,9 +725,6 @@ void() BotAI =
 			// no target — roam to find something
 			self._m_move_mode = MM_ROAM;
 			frik_bot_roam();
-			// if roam didn't produce a target, walk forward anyway
-			if (!self.target1)
-				bot_go(self.v_angle_y);
 			if (random() < 0.02)
 				if (self.flags & FL_ONGROUND)
 					self.button2 = TRUE;
