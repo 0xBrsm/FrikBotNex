@@ -650,22 +650,18 @@ void() BotAI =
 	// route table editing (waypoint system housekeeping)
 	if (route_table == self)
 	{
-		if (self.health < 1 || self.search_time < time - 5)
+		if (busy_waypoints <= 0)
 		{
-			// dead or stalled — release route table
+			if (waypoint_mode < WM_EDITOR)
+				bot_get(TRUE);
+			route_table = world;
+		}
+		else if (self.health < 1)
+		{
 			route_table = world;
 			busy_waypoints = 0;
 		}
-		else
-		{
-			if (busy_waypoints <= 0)
-				if (waypoint_mode < WM_EDITOR)
-					bot_get(TRUE);
-			self.b_aiflags = 0;
-			self.b_wishdir = '0 0 0';
-			bot_angle_set();
-			return;
-		}
+		// don't freeze — keep moving while routing
 	}
 
 	// --- survive: emergency escape from drowning/lava ---
@@ -715,11 +711,9 @@ void() BotAI =
 				else if (!begin_route())
 					bot_get(FALSE);
 			}
-			else
-			{
-				self.b_aiflags = AI_WAIT;
-				self.b_wishdir = '0 0 0';
-			}
+			// keep moving while searching for a goal
+			if (!self.target1)
+				bot_go(self.v_angle_y);
 		}
 
 		if (self.target1)
@@ -731,9 +725,12 @@ void() BotAI =
 		}
 		else
 		{
-			// nothing to do — roam
+			// no target — roam to find something
 			self._m_move_mode = MM_ROAM;
 			frik_bot_roam();
+			// if roam didn't produce a target, walk forward anyway
+			if (!self.target1)
+				bot_go(self.v_angle_y);
 			if (random() < 0.02)
 				if (self.flags & FL_ONGROUND)
 					self.button2 = TRUE;

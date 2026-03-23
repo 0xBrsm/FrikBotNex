@@ -940,14 +940,12 @@ void() BotFrame =
 		{
 			if (active_clients & ClientBitFlag(num))
 			{
-				BotAI();			// decide direction → b_wishdir + b_angle
-				// view angles: bot_angle_set applies turn speed limit
+				BotAI();
 				if (self.v_angle_x > 80) self.v_angle_x = 80;
 				else if (self.v_angle_x < -70) self.v_angle_x = -70;
 				self.v_angle_z = 0;
 				self.v_angle_y = frik_anglemod(self.v_angle_y);
-				bot_build_movevect();	// b_wishdir → movevect
-				// engine reads movevect in SV_RunClients → SV_ClientThink
+				bot_build_movevect();
 			}
 		}
 		self = nextent(self);
