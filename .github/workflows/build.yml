@@ -1,0 +1,41 @@
+name: Build Server
+run-name: "${{ inputs.commit_message || 'Manual build' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_message:
+        description: "Run title"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-server:
+    name: Build nqserver (ARM64)
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ make patch
+
+      - name: Build server
+        run: |
+          bash src/build/build-server.sh
+          ls -lh src/build/tmp/bin/nqserver
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nqserver-arm64.zip
+          path: src/build/tmp/bin/nqserver
+          retention-days: 7
