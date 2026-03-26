@@ -7,3 +7,5 @@ fteqcc.log
 !/progs.dat
 scripts/
 .claude/
+.subagent-worktrees/
+src/build/tmp/

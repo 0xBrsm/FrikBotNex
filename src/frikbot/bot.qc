@@ -1,304 +1,99 @@
+// FrikBotNex — evolved from FrikBot X (v0.10.2) by Ryan "FrikaC" Smith
+// Original FrikBot code is public domain. See LICENSE for details.
 
-/*
-======================================
-FrikBot X (Version 0.10.2)
-======================================
-
-This program is in the Public Domain. My crack legal
-team would like to add:
-
-RYAN "FRIKAC" SMITH IS PROVIDING THIS SOFTWARE "AS IS"
-AND MAKES NO WARRANTY, EXPRESS OR IMPLIED, AS TO THE
-ACCURACY, CAPABILITY, EFFICIENCY, MERCHANTABILITY, OR
-FUNCTIONING OF THIS SOFTWARE AND/OR DOCUMENTATION. IN
-NO EVENT WILL RYAN "FRIKAC" SMITH BE LIABLE FOR ANY
-GENERAL, CONSEQUENTIAL, INDIRECT, INCIDENTAL,
-EXEMPLARY, OR SPECIAL DAMAGES, EVEN IF RYAN "FRIKAC"
-SMITH HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
-DAMAGES, IRRESPECTIVE OF THE CAUSE OF SUCH DAMAGES. 
-
-You accept this software on the condition that you
-indemnify and hold harmless Ryan "FrikaC" Smith from
-any and all liability or damages to third parties,
-including attorney fees, court costs, and other
-related costs and expenses, arising out of your use
-of this software irrespective of the cause of said
-liability. 
-
-The export from the United States or the subsequent
-reexport of this software is subject to compliance
-with United States export control and munitions
-control restrictions. You agree that in the event you
-seek to export this software, you assume full
-responsibility for obtaining all necessary export
-licenses and approvals and for assuring compliance
-with applicable reexport restrictions. 
-
-Any reproduction of this software must contain
-this notice in its entirety. 
-
-======================================
-These installation instructions only apply to Normal Quake (as does this
-entire file). For QuakeWorld, please refer to bot_qw.qc
-
---------------------------------------
-To install on a new mod, do all this:
---------------------------------------
-Place all included bot*.qc files in the subdirectory "frikbot"
-in your source folder, then...
-
-* Add the following lines to progs.src right after the defs.qc line
-frikbot/bot.qc
-frikbot/bot_way.qc
-frikbot/bot_think.qc
-frikbot/bot_shoot.qc
-frikbot/bot_fight.qc
-frikbot/bot_ai.qc
-frikbot/bot_misc.qc
-frikbot/bot_phys.qc
-frikbot/bot_move.qc
-frikbot/bot_ed.qc
-
---------------------------------------
-* Comment out the following functions in defs.qc
-sound, stuffcmd, sprint, aim, centerprint, setspawnparms
-WriteByte, WriteChar, WriteShort, WriteLong, WriteCoord
-WriteAngle, WriteString, WriteEntity
---------------------------------------
-* Add this to worldspawn() in world.qc, right at the very top, before InitBodyQue();
-BotInit();  // FrikBot
---------------------------------------
-* Add this line to StartFrame() in world.qc, at the very top
-BotFrame(); // FrikBot
---------------------------------------
-* Add these two lines to PlayerPreThink in client.qc at the very top
-if (BotPreFrame()) // FrikBot
-	return;
---------------------------------------
-* Add this line to PlayerPostThink in client.qc at the very top
-if (BotPostFrame()) // FrikBot
-	return;
---------------------------------------
-* Add the following line to the very top of Client Connect in client.qc
-ClientInRankings(); // FrikBot
---------------------------------------
-* Add these lines to the very top of ClientDisconnect in client.qc
-ClientDisconnected(); // FrikBot
---------------------------------------
-
-To install the waypoints:
-
-add
-
-waypoints/map_dm1.qc
-waypoints/map_dm2.qc
-waypoints/map_dm3.qc
-waypoints/map_dm4.qc
-waypoints/map_dm5.qc
-waypoints/map_dm6.qc
-
-To progs.src, immediately after defs.qc
-
-To remove these waypoints:
-
-Delete the code in bot_map_load, located below.
-*/
-
-void() bot_map_load =
-{
-	// place your qc loaded waypoints here
-
-	if (mapname == "dm1")
-		map_dm1();
-	else if (mapname == "dm2")
-		map_dm2();
-	else if (mapname == "dm3")
-		map_dm3();
-	else if (mapname == "dm4")
-		map_dm4();
-	else if (mapname == "dm5")
-		map_dm5();
-	else if (mapname == "dm6")
-		map_dm6();
-};
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-Variables and shtuff
-
-bot.qc has become pretty much a header file
-for all variables in the bot...
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-// ----- entity fields ---
-.float	keys, ishuman;
+// ----- entity fields -----
+.float	ishuman;
 .float	b_frags, b_shirt, b_pants;
 .float	ai_time, b_sound, missile_speed;
 .float	portal_time, b_skill;
-.float	b_aiflags, b_num, b_chattime;
-.float route_failed, dyn_flags, dyn_time;
-.float dyn_plat;
+.float	b_num, b_chattime;
 .float b_strafe_time, b_strafe_dir;
 .float b_aim_delay;
 .float b_ambush_time;
 .float b_wepswitch_time;
-.float b_react_time;		// delay before engaging newly detected enemy
-.float b_wep_commit_time;	// locked into current weapon until this time
-
-// combat state machine
+.float b_react_time;
+.float b_wep_commit_time;
 .float b_combat_state;
-.float b_combat_time;		// when we entered current state
+.float b_combat_time;
+.float _m_goals_reached;
 
-// reward profile (per-bot weights, set at spawn)
-.float w_survival;
-.float w_combat;
-.float w_scavenge;
-.float w_quad;
-.float w_pent;
-.float w_ring;
+// goal weights (set by act_normal at spawn)
+.float w_survival, w_combat, w_scavenge;
+.float w_quad, w_pent, w_ring;
 
-// item registry (cached on item entities at map load)
-.float item_res;		// resource type: RES_HEALTH, RES_ARMOR, etc.
-.float item_pool;		// which pool: POOL_SHELLS, POOL_NAILS, etc.
-.float item_mag;		// magnitude: what this gives / pool capacity (0-1)
-.float item_respawn_dur;	// seconds to respawn
-.float item_respawn_at;		// time when this item returns (0 = available)
-.entity _item_next;		// item registry linked list
+// item registry (cached on item entities)
+.float item_res, item_pool, item_mag;
+.float item_respawn_dur, item_respawn_at;
+.entity _item_next;
 
-// opponent modeling (skill 2+)
-.entity b_opp_ent;		// which enemy we're tracking
-.float b_opp_weapon;		// enemy's current weapon
-.float b_opp_aggro;		// aggression estimate (0.0 = passive, 1.0 = rush)
-.float b_opp_strafe;		// enemy strafe tendency (-1 to +1)
-.float b_opp_dist;		// enemy preferred distance
-.float b_opp_track_time;	// last opponent model update
+// opponent modeling
+.entity b_opp_ent;
+.float b_opp_weapon, b_opp_aggro, b_opp_strafe;
+.float b_opp_dist, b_opp_track_time;
 
-// combat states (state machine)
-float CSTATE_NONE	= 0;	// not in combat
-float CSTATE_FIGHT	= 1;	// standard engage (strafe + shoot)
-float CSTATE_RETREAT	= 2;	// outgunned, falling back
-.entity	temp_way, last_way;
+// combat states
+float CSTATE_NONE    = 0;
+float CSTATE_FIGHT   = 1;
+float CSTATE_RETREAT = 2;
+
 .entity	target1, target2, target3, target4;
 .entity	_next, _last;
-.entity	current_way;
-.vector	b_angle, mouse_emu, b_dir;
+.vector	b_angle, mouse_emu;
 .vector	movevect;
-.vector	b_wishdir;	// desired world-frame movement direction (unit vector or '0 0 0')
-.vector dyn_dest;
+.vector	b_wishdir;
 
-// --------defines-----
+// movement modes (for metrics)
+.float _m_move_mode;
+float MM_NAV     = 1;
+float MM_BEELINE = 2;
+float MM_COMBAT  = 3;
+float MM_ROAM    = 4;
 
-// these are aiflags for waypoints
-// some overlap to the bot
-float AI_TELELINK_1	= 1; // link type
-float AI_TELELINK_2	= 2; // link type
-float AI_TELELINK_3	= 4; // link type
-float AI_TELELINK_4	= 8; // link type
-float AI_DOORFLAG		= 16; // read ahead
-float AI_PRECISION	= 32; // read ahead + point
-float AI_SURFACE		= 64; // point 
-float AI_BLIND		= 128; // read ahead + point
-float AI_JUMP		= 256; // point + ignore
-float AI_DIRECTIONAL	= 512; // read ahead + ignore
-float AI_PLAT_BOTTOM	= 1024; // read ahead 
-float AI_RIDE_TRAIN	= 2048; // read ahead 
-float AI_SUPER_JUMP	= 4096; // point + ignore + route test
-float AI_SNIPER		= 8192; // point type 
-float AI_AMBUSH		= 16384; // point type
-float AI_DOOR_NO_OPEN	= 32768; // read ahead
-float AI_DIFFICULT	= 65536; // route test
-float AI_TRACE_TEST	= 131072; // route test
+.float _botcam_hud_time;	// throttle for botcam debug overlay
+.float _botcam_beam_time;	// faster refresh for botcam beam temp ents
+.float _stuck_count;		// forward decl (defined in bot_move.qc)
 
-// these are flags for bots/players (dynamic/editor flags)
-float AI_HOLD_SELECT	= 2;
-float AI_WAIT		= 4;
-
-
-// addition masks
-float AI_POINT_TYPES 	= 29152;
-float AI_READAHEAD_TYPES	= 36528;
-float AI_IGNORE_TYPES	= 4864;
-
-float WM_UNINIT		= 0;
-float WM_DYNAMIC		= 1;
-float WM_LOADING		= 2;
-float WM_LOADED		= 3;
-float WM_EDITOR		= 4;
-float WM_EDITOR_DYNAMIC	= 5;
-float WM_EDITOR_DYNLINK	= 6;
-
-
-float OPT_SAVEBOTS	= 1;
-float OPT_NOCHAT	= 2;
-
-// -------globals-----
-entity	item_head;		// head of item registry linked list
-float	item_reg_time;		// last time registry was rebuilt
-
-float 	active_clients;
-float		max_clients;
-float		bot_count, b_options;
-float		waypoint_mode;
-float		waypoints, direct_route;
-float		sv_gravity, sv_maxspeed, sv_ticrate;
-float		bot_nocombat;	// scratch1 cvar: 1=pacifist mode
-entity	fixer;
-entity	route_table;
+// ---- globals ----
+entity	item_head;
+float	item_reg_time;
+float	active_clients;
+float	max_clients;
+float	bot_count;
+float	sv_gravity, sv_maxspeed, sv_ticrate;
+float	bot_nocombat;
 entity	b_temp1, b_temp2, b_temp3;
-entity 	player_head, way_head;
-float		busy_waypoints;
+entity	player_head;
+float	_bot_pending_profiles;
+float	_bot_colors_pants, _bot_colors_shirt;
 
-// reserved bot profiles queued for an engine-side connection
-float		_bot_pending_profiles;
-float		_bot_colors_pants, _bot_colors_shirt;
-
-// -------ProtoTypes------
-// external
+// ---- prototypes ----
 void()				ClientConnect;
 void()				ClientDisconnect;
 void()				SetNewParms;
-
-// rankings
 float(float clientno)		ClientBitFlag;
 void(float whichteam, float whatbot, float whatskill) BotConnect;
-void(entity bot)			BotDisconnect;
+void(entity bot)		BotDisconnect;
 void(float clientno)		BotInvalidClientNo;
-
-// waypointing
-void()				DynamicWaypoint;
-entity(vector org)		make_waypoint;
-void()				ClearAllWays;
-void()				FixWaypoints;
-float()				begin_route;
-void()				bot_path;
-void()				bot_handle_ai;
-void(entity this, float direct)			bot_get_path;
-void()				WaypointThink;
-entity(entity start)				FindWayPoint;
-
-// physics & movement
-float(entity e)			bot_can_rj;
-void()				bot_jump;
-void()				frik_bot_roam;
 float(vector weird)		frik_walkmove;
 void()				frik_movetogoal;
-float(float flag)			frik_recognize_plat;
-
-// sense API
-void()				bot_sense_space;
-float(float desired_yaw)	bot_go;
 void()				bot_build_movevect;
+
+// navmesh builtins (Detour pathfinding)
+float()					nav_ready = #80;
+vector(vector pos, vector target)	nav_move = #81;
+float(vector goal)			nav_path_start = #82;
+float(vector start, vector goal)	nav_route_cost = #83;
+vector(vector pos)			nav_path_steer = #84;
+vector(entity bot, float index)	nav_path_debug = #85;
+float		nav_booted;
+
+.entity _nav_goal_ent;	// entity we last computed a path to
 
 // ai & misc
 float()				PickARandomBotProfile;
 string()				PickARandomName;
 float(entity targ)		fov;
 float(float y1, float y2)	angcomp;
-float(entity targ1, entity targ2)		wisible;
-float(entity targ)		sisible;
 float(entity targ)		fisible;
 vector(entity ent)		realorigin;
 void(entity ent)			target_drop;
@@ -337,7 +132,6 @@ void(float scope) bot_get;
 // bot_ai.qc — main AI loop
 void() bot_handle_ai;
 void() bot_server_spawn;
-void() bot_path;
 void() BotAI;
 
 
@@ -425,6 +219,33 @@ float() botcam =
 
 	self.modelindex = 0;
 	self.impulse = 0;
+
+	// --- botcam debug HUD ---
+	if (time > self._botcam_hud_time)
+	{
+		local entity b;
+		local string mode, s1;
+		local vector info;
+
+		b = self.enemy;
+		self._botcam_hud_time = time + 1;
+
+		if (b._m_move_mode == MM_NAV) mode = "NAV";
+		else if (b._m_move_mode == MM_BEELINE) mode = "NOPATH";
+		else if (b._m_move_mode == MM_COMBAT) mode = "COMBAT";
+		else mode = "IDLE";
+
+		info = nav_path_debug(b, -1);
+
+		if (b.target1 && b.target1 != world)
+		{
+			s1 = ftos(rint(vlen(realorigin(b.target1) - b.origin)));
+			centerprint(self, mode, " ", b.target1.classname, " d:", s1);
+		}
+		else
+			centerprint(self, mode, " no target");
+	}
+
 	return TRUE;
 };
 
@@ -535,6 +356,7 @@ void() ClientInRankings =
 			- (_bot_pending_profiles & ClientBitFlag(self.b_num - 1));
 		bot_count = bot_count + 1;
 		active_clients = active_clients | ClientBitFlag(cno);
+		act_normal();	// initialize goal weights
 		return;
 	}
 
@@ -593,7 +415,6 @@ float () BotPreFrame =
 			bot_start_topic(2);
 		self.b_frags = self.frags;
 	}
-	DynamicWaypoint();
 	// return FALSE — let PlayerPreThink run for bots (water, powerups, etc.)
 	return FALSE;
 };
@@ -694,6 +515,7 @@ void() BotInit =
 
 	precache_model("progs/s_light.spr");
 	precache_model("progs/s_bubble.spr");
+
 };
 
 /*
@@ -745,24 +567,6 @@ float(float clientno) ClientBitFlag =
 	else if (clientno == 15)
 		return 32768;
 	return 0;
-};
-
-
-void(entity e1, entity e2, float flag) DeveloperLightning =
-{
-	// used to show waypoint links for debugging
-	WriteByte (MSG_BROADCAST, 23);
-	if (flag)
-		WriteByte (MSG_BROADCAST, 6);
-	else
-		WriteByte (MSG_BROADCAST, 13);
-	WriteEntity (MSG_BROADCAST, e2);
-	WriteCoord (MSG_BROADCAST, e1.origin_x);
-	WriteCoord (MSG_BROADCAST, e1.origin_y);
-	WriteCoord (MSG_BROADCAST, e1.origin_z);
-	WriteCoord (MSG_BROADCAST, e2.origin_x);
-	WriteCoord (MSG_BROADCAST, e2.origin_y);
-	WriteCoord (MSG_BROADCAST, e2.origin_z); 
 };
 
 
@@ -845,82 +649,6 @@ void(float clientno) BotInvalidClientNo =
 	}
 };
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-Waypoint Loading from file
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-void() LoadWaypoint = 
-{
-	local vector org;
-	local entity tep;
-	local float r;
-	org_x = cvar("saved1");
-	org_y = cvar("saved2");
-	org_z = cvar("saved3");
-	
-	tep = make_waypoint(org);
-
-	r = cvar("saved4");
-
-	tep.b_aiflags = floor(r / 4);
-	tep.b_pants = cvar("scratch1");
-	tep.b_skill = cvar("scratch2");
-	tep.b_shirt = cvar("scratch3");
-	tep.b_frags = cvar("scratch4");
-};
-
-
-void() WaypointWatch =
-{
-	// Waypoint Baywatch
-	local float bigboobs;
-	local string h;
-	if (framecount < 4)
-		return;
-	if (max_clients < 2)
-		return;
-	if (waypoint_mode != WM_UNINIT)
-	{
-		bigboobs = cvar("saved4");
-		if (bigboobs != 0)
-		{
-			if ((bigboobs & 3) == 1)
-				ClearAllWays();
-			else if ((bigboobs & 3) == 3)
-			{
-				FixWaypoints();
-				h = ftos(b_options);
-				cvar_set("saved1", h);
-				cvar_set("saved4", "0");
-				cvar_set("scratch1", "0");
-				waypoint_mode = WM_LOADED;
-				return;
-			}
-			LoadWaypoint();
-			waypoint_mode = WM_LOADING;
-			cvar_set("saved4", "0");
-		}
-	}
-	else
-	{
-		b_options = cvar("saved1");
-		cvar_set ("saved4", "0");
-		if (max_clients > 1)
-		{
-			localcmd("exec maps/");
-			localcmd(mapname);
-			localcmd(".way\n");
-			waypoint_mode = WM_DYNAMIC;
-			bot_map_load();
-		}
-		else
-			waypoint_mode = WM_LOADED;
-	}
-};
-
 void() BotFrame =
 {
 	local float num;
@@ -930,7 +658,13 @@ void() BotFrame =
 	sv_maxspeed = cvar("sv_maxspeed");
 	sv_gravity = cvar("sv_gravity");
 	sv_ticrate = cvar("sys_ticrate");
-	bot_nocombat = cvar("scratch1");
+	bot_nocombat = cvar("bot_nocombat");
+	// trigger navmesh build on first frame (all entities spawned by now)
+	if (!nav_booted)
+	{
+		nav_ready();
+		nav_booted = TRUE;
+	}
 	
 	self = nextent(world);
 	num = 0;
@@ -951,7 +685,6 @@ void() BotFrame =
 		self = nextent(self);
 		num = num + 1;
 	}
-	WaypointWatch();
 };
 
 /*

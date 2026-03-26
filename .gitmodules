@@ -1,0 +1,6 @@
+[submodule "src/vendor/recastnavigation"]
+	path = vendor/recastnavigation
+	url = https://github.com/recastnavigation/recastnavigation.git
+[submodule "vendor/NexQuake"]
+	path = vendor/NexQuake
+	url = https://github.com/0xBrsm/NexQuake.git

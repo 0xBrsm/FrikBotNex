@@ -1,0 +1,10 @@
+--- pr_cmds.c
++++ pr_cmds.c
+@@ -273,6 +273,7 @@
+ {
+ 	char		*s;
+
+ 	s = PF_VarString(0);
++	Sys_Printf ("QC_BPRINT: %s", s);
+ 	SV_BroadcastPrintf ("%s", s);
+ }

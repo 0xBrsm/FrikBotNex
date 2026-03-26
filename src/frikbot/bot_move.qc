@@ -1,7 +1,6 @@
 /***********************************************
 *                                              *
-*            FrikBot Movement AI               *
-*     "The slightly better movement AI"        *
+*      FrikBot Movement + Spatial Awareness    *
 *                                              *
 ***********************************************/
 
@@ -42,203 +41,353 @@ this notice in its entirety.
 
 */
 
-void() bot_jump =
+// ---- Stuck recovery ----
+.float _stuck_count;
+.vector _stuck_origin;
+.float _nav_diag_time;	// next nav diagnostic print time
+
+// ---- Sense fields ----
+
+.float sense_time;
+.float sense_space_time;
+.float sense_ground_type;
+.float sense_enemy_vis;
+.float sense_enemy_dist;
+.float sense_enemy_wall;
+.float sense_my_size;
+.float sense_enemy_size;
+.float sense_friendly_block;
+
+// ---- Spatial awareness ----
+
+void() bot_sense_space =
 {
-	self.button2 = TRUE;
-};
+	if (self.sense_space_time == time)
+		return;
+	self.sense_space_time = time;
 
-float(entity e) bot_can_rj =
-{
-	if (e.b_skill == 0)
-		return FALSE;
-	if (e.items & IT_QUAD)
-		return FALSE;
-	if (!((e.items & IT_ROCKET_LAUNCHER) && (e.ammo_rockets > 0)))
-		return FALSE;
-	if (e.items & IT_INVULNERABILITY)
-		return TRUE;
-	if (e.health > 50)
-		return TRUE;
-	return FALSE;
-};
-
-float(float flag) frik_recognize_plat =
-{
-	local entity plat_ent;
-
-	if ((self.classname != "waypoint") && !(self.flags & FL_ONGROUND))
-		return FALSE;
-
-	if (self.classname == "waypoint")
-	{
-		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-		plat_ent = trace_ent;
-	}
+	// ground state (1 trace — used by hazard escape + debug metrics)
+	traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+	if (trace_fraction < 1)
+		self.sense_ground_type = pointcontents(trace_endpos + '0 0 4');
 	else
-		plat_ent = self.sense_ground_ent;
+		self.sense_ground_type = CONTENT_EMPTY;
+};
 
-	if (plat_ent != world)
+// ---- Enemy visibility ----
+
+void() bot_sense_visibility =
+{
+	local vector spot1, org, dir, v;
+
+	spot1 = self.origin + self.view_ofs;
+
+	if (self.enemy && self.enemy != world)
 	{
-		if (flag)
+		org = realorigin(self.enemy);
+		self.sense_enemy_dist = vlen(org - self.origin);
+
+		traceline(spot1, org, TRUE, self);
+		if (trace_ent == self.enemy || trace_fraction == 1)
+			self.sense_enemy_vis = TRUE;
+		else
 		{
-			if (self.b_wishdir_z > 0)
+			if (self.enemy.classname == "player")
 			{
-				if (plat_ent.velocity_z > 0)
-					self.b_wishdir = '0 0 0';
+				traceline(spot1, org + self.enemy.maxs, TRUE, self);
+				if (trace_ent == self.enemy || trace_fraction == 1)
+					self.sense_enemy_vis = TRUE;
+				else
+				{
+					traceline(spot1, org + self.enemy.mins, TRUE, self);
+					if (trace_ent == self.enemy || trace_fraction == 1)
+						self.sense_enemy_vis = TRUE;
+					else
+						self.sense_enemy_vis = FALSE;
+				}
 			}
-			else if (self.b_wishdir_z < 0)
-			{
-				if (plat_ent.velocity_z < 0)
-					self.b_wishdir = '0 0 0';
-			}
+			else
+				self.sense_enemy_vis = FALSE;
 		}
-		return TRUE;
+
+		if (self.sense_enemy_vis)
+		{
+			dir = normalize(org - self.origin);
+			traceline(org, org + dir * 100, TRUE, self.enemy);
+			self.sense_enemy_wall = (trace_fraction < 1);
+		}
+		else
+			self.sense_enemy_wall = FALSE;
+
+		if (self.sense_enemy_vis && (teamplay || coop))
+		{
+			makevectors(self.v_angle);
+			v = weapon_range(self.weapon);
+			traceline(spot1, spot1 + v_forward * v_z, FALSE, self);
+			if (trace_ent.classname == "player")
+			{
+				if ((trace_ent.team == self.team && teamplay) || coop)
+				{
+					if (vlen(trace_endpos - spot1) < self.sense_enemy_dist)
+						self.sense_friendly_block = TRUE;
+					else
+						self.sense_friendly_block = FALSE;
+				}
+				else
+					self.sense_friendly_block = FALSE;
+			}
+			else
+				self.sense_friendly_block = FALSE;
+		}
+		else
+			self.sense_friendly_block = FALSE;
 	}
 	else
-		return FALSE;
+	{
+		self.sense_enemy_vis = FALSE;
+		self.sense_enemy_dist = 0;
+		self.sense_enemy_wall = FALSE;
+		self.sense_friendly_block = FALSE;
+	}
 };
 
+// ---- Main sense entry point ----
 
+void() bot_sense =
+{
+	if (self.sense_time == time)
+		return;
+	self.sense_time = time;
 
+	self.sense_my_size = bot_size_player(self);
+	if (self.enemy && self.enemy != world)
+		self.sense_enemy_size = bot_size_player(self.enemy);
+	else
+		self.sense_enemy_size = 0;
 
+	bot_sense_space();
+	bot_sense_visibility();
+};
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+// ---- b_wishdir → movevect ----
 
-frik_movetogoal
+void() bot_build_movevect =
+{
+	local vector vang;
+	local float spd;
 
-Navigate toward target using the nav fan.
-sense_best_dir picks the best walkable
-direction toward the goal. No reactive
-wall dodging needed.
+	self.movevect = '0 0 0';
+	if (self.b_wishdir == '0 0 0')
+		return;
 
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
+	vang = self.v_angle;
+	vang_x = vang_z = 0;
+	makevectors(vang);
+
+	spd = sv_maxspeed * 2;
+	self.movevect_x = (self.b_wishdir * v_forward) * spd;
+	self.movevect_y = (self.b_wishdir * v_right) * spd;
+};
+
+// ---- Navigation ----
 
 void() frik_movetogoal =
 {
-	local vector way;
-	local float g, hgt, gap;
+	local vector steer, goal_pos, diff;
+	local float step_height, path_result;
+	local string reason;
+
+	reason = string_null;
 
 	if (self.target1 == world)
 	{
-		makevectors(self.v_angle);
-		frik_walkmove(v_forward);
+		self.b_wishdir = '0 0 0';
+		reason = "no_target";
+
+		if (time > self._nav_diag_time)
+		{
+			self._nav_diag_time = time + 3;
+			bprint("["); bprint(self.netname); bprint("] NAV: ");
+			bprint(reason);
+			bprint(" pos="); bprint(vtos(self.origin));
+			bprint("\n");
+		}
 		return;
 	}
 
-	way = realorigin(self.target1) - self.origin;
-	if (vlen(way) < 25)
+	goal_pos = realorigin(self.target1);
+	// brush triggers have center high above floor — use floor Z
+	if (self.target1.solid == SOLID_TRIGGER)
+		goal_pos_z = self.target1.absmin_z;
+
+	if (vlen(goal_pos - self.origin) < 25)
 	{
 		self.b_wishdir = '0 0 0';
+		return;  // close enough — bot_check_lost handles success
+	}
+
+	// compute path when goal entity changes
+	if (self._nav_goal_ent != self.target1)
+	{
+		path_result = nav_path_start(goal_pos);
+		if (path_result > 0)
+			self._nav_goal_ent = self.target1;
+		else
+		{
+			reason = "path_fail";
+
+			if (time > self._nav_diag_time)
+			{
+				self._nav_diag_time = time + 3;
+				bprint("["); bprint(self.netname); bprint("] NAV: ");
+				bprint(reason);
+				bprint(" tgt="); bprint(self.target1.classname);
+				bprint(" pos="); bprint(vtos(self.origin));
+				bprint(" goal="); bprint(vtos(goal_pos));
+				bprint(" dist="); bprint(ftos(rint(vlen(goal_pos - self.origin))));
+				bprint("\n");
+			}
+
+			bot_lost(self.target1, FALSE);
+			return;
+		}
+	}
+
+	// get cached steer direction
+	steer = nav_path_steer(self.origin);
+	if (steer == '0 0 0')
+	{
+		self._nav_goal_ent = world;
+		self.b_wishdir = '0 0 0';
+		self._m_move_mode = MM_BEELINE;
+
+		if (vlen(goal_pos - self.origin) > 64)
+		{
+			reason = "stale";
+
+			if (time > self._nav_diag_time)
+			{
+				self._nav_diag_time = time + 3;
+				bprint("["); bprint(self.netname); bprint("] NAV: ");
+				bprint(reason);
+				bprint(" tgt="); bprint(self.target1.classname);
+				bprint(" pos="); bprint(vtos(self.origin));
+				bprint(" goal="); bprint(vtos(goal_pos));
+				bprint(" dist="); bprint(ftos(rint(vlen(goal_pos - self.origin))));
+				bprint("\n");
+			}
+
+			bot_lost(self.target1, FALSE);
+		}
 		return;
 	}
 
-	way_z = 0;
-	if (bot_go(vectoyaw(way)))
-		self._m_move_mode = MM_NAV;
-	else
-		self._m_move_mode = MM_BEELINE;
+	// Z encodes either height delta or link type (1000 + AI_*)
+	step_height = steer_z;
+	steer_z = 0;
+	self.b_wishdir = steer;
+	self._m_move_mode = MM_NAV;
 
-	// jump logic: step-ups and safe gap crossings
-	if (self.flags & FL_ONGROUND)
+	// off-mesh link traversal (steer_z = 1000 + AI_* link type)
+	if (step_height >= 1000)
 	{
-		hgt = self.sense_fwd_height;
-		gap = self.sense_fwd_gap_width;
+		local float link_type;
+		link_type = step_height - 1000;
 
-		if (hgt > 18)
+		if (link_type == 2) // AI_JUMP: press jump
 		{
-			// step up — only jump if landing is safe
-			if (self.sense_fwd_ground_type >= -3)
-				bot_jump();
+			if (self.flags & FL_ONGROUND)
+				self.button2 = TRUE;
 		}
-		else if (gap > 0 && hgt < -18 && self.sense_fwd_jumpable)
+		else if (link_type == 7) // AI_SUPER_JUMP: rocket jump
 		{
-			// gap — only jump if other side isn't lava
-			if (self.sense_fwd_ground_type >= -3)
-				bot_jump();
-		}
-	}
-
-	frik_recognize_plat(TRUE);
-
-	if (self.b_aiflags & AI_PRECISION)
-	{
-		g = angcomp(self.v_angle_x, self.b_angle_x);
-		if (fabs(g) > 10)
-			self.b_wishdir = '0 0 0';
-		g = angcomp(self.v_angle_y, self.b_angle_y);
-		if (fabs(g) > 10)
-			self.b_wishdir = '0 0 0';
-	}
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-frik_walkmove
-
-Try to move in a direction. Checks sense API
-first — returns FALSE if blocked or unsafe.
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float(vector weird) frik_walkmove =
-{
-	return bot_go(vectoyaw(weird));
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-frik_bot_roam — hook navigation for roaming
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void() frik_bot_roam =
-{
-	local vector org, ang, org1;
-	local float loopcount, flag, dist;
-
-	loopcount = 26;
-	flag = FALSE;
-	while((loopcount > 0) && !flag)
-	{
-		loopcount = loopcount - 1;
-		org = self.origin + self.view_ofs;
-		ang = self.angles;
-		ang_y = frik_anglemod(ang_y - 90 + (random() * 180));
-		ang_x = 0;
-		makevectors(ang);
-		traceline(org, org + v_forward * 2300, TRUE, self);
-		if (trace_fraction != 1)
-		{
-			org1 = trace_endpos;
-			ang = normalize(trace_plane_normal);
-			ang_z = 0;
-			traceline(org1, org1 + (ang * 2300), TRUE, self);
-			if ((trace_fraction != 1) && (vlen(trace_endpos - org1) >= 64))
+			if (self.weapon != 32) // IT_ROCKET_LAUNCHER
+				self.impulse = 7; // select RL
+			else if (self.flags & FL_ONGROUND)
 			{
-				org = trace_endpos;
-				traceline(org, self.origin + self.view_ofs, TRUE, self);
-				if (trace_fraction != 1)
-				{
-					dist = vlen(org1 - org) /2;
-					org = org1 + (ang * dist);
-					traceline(org, org - '0 0 48', TRUE, self);
-					if (trace_fraction != 1)
-					{
-						SpawnTempWaypoint(org);
-						flag = TRUE;
-					}
-				}
+				self.button2 = TRUE; // jump
+				self.v_angle_x = self.b_angle_x = 80; // aim down
+				self.button0 = TRUE; // fire
 			}
 		}
+		else if (link_type == 8) // AI_SURFACE: swim up
+		{
+			if (self.waterlevel > 2)
+			{
+				self.b_wishdir = '0 0 1';
+				self.button2 = TRUE;
+			}
+		}
+		else if (link_type == 4 || link_type == 5) // AI_PLAT_BOTTOM / AI_RIDE_TRAIN
+		{
+			// Check if something is below us (platform/train)
+			traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+			if (trace_ent != world)
+			{
+				// On a mover — stop and ride
+				if (trace_ent.velocity != '0 0 0')
+					self.b_wishdir = '0 0 0';
+			}
+			// else: mover not here yet, keep walking toward link
+		}
+		else if (link_type == 6) // AI_DOORFLAG
+		{
+			// Check if a door is blocking our path
+			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
+			if (trace_ent != world && trace_ent.classname == "door")
+			{
+				// Door in the way — try to open it
+				if (trace_ent.health > 0)
+				{
+					// Shootable door — target it
+					self.enemy = trace_ent;
+					self.button0 = TRUE;
+				}
+				// else: touch-triggered, just walk into it
+			}
+		}
+		// AI_TELELINK (1): just walk in
+		// AI_DROP (3): just walk off
+		step_height = 0;
 	}
-	self.b_angle_y = self.v_angle_y + 10;
-	frik_walkmove(v_forward);
+
+	// jump when next waypoint is significantly above us (real ledge, not stairs)
+	// engine handles step-up to 18u via SV_WalkMove — only jump for actual ledges
+	if (step_height > 30 && self.flags & FL_ONGROUND)
+		self.button2 = TRUE;
+
+	// stuck detection: position hasn't changed
+	diff = self.origin - self._stuck_origin;
+	diff_z = 0;
+	if (vlen(diff) < 1)
+		self._stuck_count = self._stuck_count + 1;
+	else
+		self._stuck_count = 0;
+	self._stuck_origin = self.origin;
+
+	// stuck recovery: rotate + jump to escape geometry
+	if (self._stuck_count > 10)
+	{
+		local vector dir;
+		dir = self.b_wishdir;
+		self.b_wishdir_x = dir_y;
+		self.b_wishdir_y = dir_x * -1;
+
+		if (self._stuck_count > 20 && self.flags & FL_ONGROUND)
+			self.button2 = TRUE;
+
+		if (self._stuck_count > 30)
+		{
+			self._stuck_count = 0;
+			bot_lost(self.target1, FALSE);
+			return;
+		}
+	}
+};
+
+float(vector dir) frik_walkmove =
+{
+	self.b_wishdir = dir;
+	self.b_wishdir_z = 0;
+	return TRUE;
 };

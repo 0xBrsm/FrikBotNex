@@ -277,7 +277,6 @@ void() bot_projectile_scan =
 	local entity foe;
 	local float avdist, flen;
 
-	if (waypoint_mode > WM_LOADED) return;
 	self.avoid = world;
 	avdist = 256;
 
@@ -383,7 +382,6 @@ void() bot_find_enemy =
 		bot_weapon_switch(vlen(org));
 		bot_shoot();
 		self.b_ambush_time = 0;
-		self.b_aiflags = self.b_aiflags - (self.b_aiflags & AI_WAIT);
 	}
 };
 

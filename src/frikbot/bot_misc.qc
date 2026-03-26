@@ -150,8 +150,6 @@ void(float tpic) bot_start_topic =
 void() bot_chat =
 {
 	local float r;
-	if (b_options & OPT_NOCHAT)
-		return;
 	r = ceil (random() * 6);
 	
 	if (self.b_chattime > time)
@@ -614,49 +612,6 @@ for waypoints
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-// this is used for waypoint stuff....
-float (entity targ1, entity targ2) wisible =
-{
-	local vector	spot1, spot2;
-	local entity ignore;
-
-	spot1 = targ1.origin;
-	spot2 = realorigin(targ2);
-	
-	ignore = self;
-	do
-	{
-		traceline (spot1, spot2, TRUE, ignore);
-		spot1 = realorigin(trace_ent);
-                ignore = trace_ent;
-	} while ((trace_ent != world) && (trace_fraction != 1));
-	if (trace_endpos == spot2)
-		return TRUE;
-	else 
-		return FALSE;
-};
-
-
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-sisible
-
-Now this is getting ridiculous. Simple visible,
-used when we need just a simple traceline nothing else
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-float (entity targ) sisible =
-{
-	traceline (self.origin, targ.origin, TRUE, self);
-	if (trace_ent == targ)
-		return TRUE;
-	if (trace_fraction == 1)
-		return TRUE;
-	return FALSE;
-};
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
