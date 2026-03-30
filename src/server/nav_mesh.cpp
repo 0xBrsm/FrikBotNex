@@ -9,9 +9,11 @@
 #include <string>
 #include <vector>
 
+#include "DetourCommon.h"
 #include "DetourNavMesh.h"
 #include "DetourNavMeshBuilder.h"
 #include "DetourNavMeshQuery.h"
+#include "DetourPathCorridor.h"
 #include "Recast.h"
 
 #define NAV_MESH_GOAL_SNAP_MAX_Z 128.0f
@@ -101,29 +103,16 @@ struct RecastBuildGuard
 
 }  // namespace
 
-struct nav_mesh_runtime_s
+struct nav_heightfield_s
 {
-	dtNavMesh *navmesh;
-	dtNavMeshQuery *query;
-	float query_half_extents[3];       /* wide: for items/goals */
-	float query_half_extents_tight[3]; /* tight: for agent position */
-	nav_off_mesh_link_t *links;        /* persistent link metadata (userId indexes here) */
-	int link_count;
-
-	nav_mesh_runtime_s()
-		: navmesh(nullptr), query(nullptr), links(nullptr), link_count(0)
-	{
-		query_half_extents[0] = 64.0f;
-		query_half_extents[1] = 96.0f;
-		query_half_extents[2] = 64.0f;
-		query_half_extents_tight[0] = 32.0f;
-		query_half_extents_tight[1] = 56.0f;
-		query_half_extents_tight[2] = 32.0f;
-	}
+	rcCompactHeightfield *compact;
+	rcConfig config; /* cell_size, cell_height, bmin, walkableHeight etc. */
 };
 
-/* Helper: set up area costs on a query filter. */
-static void nav_setup_filter(dtQueryFilter *filter)
+/* nav_mesh_runtime_s is defined in nav_mesh.h (C++ section) */
+
+/* Set up area costs on a query filter. */
+void nav_mesh_setup_filter(dtQueryFilter *filter)
 {
 	filter->setAreaCost(NAV_AREA_WALK, 1.0f);
 	filter->setAreaCost(NAV_AREA_JUMP, 3.0f);
@@ -131,6 +120,7 @@ static void nav_setup_filter(dtQueryFilter *filter)
 	filter->setAreaCost(NAV_AREA_PLAT, 5.0f);
 	filter->setAreaCost(NAV_AREA_DOOR, 2.0f);
 	filter->setAreaCost(NAV_AREA_RJ, 10.0f);
+	filter->setAreaCost(NAV_AREA_NEAR_WALL, 3.0f);
 }
 
 /* Helper: map link type to Detour area ID. */
@@ -242,6 +232,28 @@ static int nav_mesh_collect_neighbors(const nav_mesh_runtime_t *navmesh, dtPolyR
 	return count;
 }
 
+static float nav_mesh_horizontal_dist_sq(const float *a, const float *b)
+{
+	float dx;
+	float dz;
+
+	dx = a[0] - b[0];
+	dz = a[2] - b[2];
+	return dx * dx + dz * dz;
+}
+
+static float nav_mesh_snap_horizontal_limit(const nav_mesh_runtime_t *navmesh, const float *extents)
+{
+	float limit;
+
+	limit = fmaxf(extents[0], extents[2]) * 0.75f;
+	if (navmesh != nullptr && extents == navmesh->query_half_extents_tight)
+		limit = fminf(limit, 24.0f);
+	else
+		limit = fminf(limit, 48.0f);
+	return fmaxf(limit, 16.0f);
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -253,7 +265,7 @@ static int nav_mesh_find_nearest_internal(
 	char *error,
 	size_t error_size)
 {
-	dtQueryFilter filter; nav_setup_filter(&filter);
+	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
 	float recast_point[3];
 	const float *extents;
 	dtStatus status;
@@ -279,24 +291,26 @@ static int nav_mesh_find_nearest_internal(
 		nav_set_error(error, error_size, "Detour findNearestPoly failed");
 		return 0;
 	}
+	if (*nearest_ref != 0)
+	{
+		float dist_sq;
+		float limit;
+
+		dist_sq = nav_mesh_horizontal_dist_sq(recast_point, nearest_pt);
+		limit = nav_mesh_snap_horizontal_limit(navmesh, extents);
+		if (dist_sq > limit * limit)
+		{
+			nav_set_error(error, error_size, "Nearest polygon snapped %.0f units away", sqrtf(dist_sq));
+			*nearest_ref = 0;
+			memset(nearest_pt, 0, sizeof(float) * 3);
+			if (is_over_poly != nullptr)
+				*is_over_poly = false;
+			return 0;
+		}
+	}
 	return *nearest_ref != 0 ? 1 : 0;
 }
 
-static float nav_mesh_path_distance(const float *points, int point_count)
-{
-	float total;
-	int i;
-
-	total = 0.0f;
-	for (i = 1; i < point_count; ++i)
-	{
-		const float dx = points[i * 3 + 0] - points[(i - 1) * 3 + 0];
-		const float dy = points[i * 3 + 1] - points[(i - 1) * 3 + 1];
-		const float dz = points[i * 3 + 2] - points[(i - 1) * 3 + 2];
-		total += sqrtf(dx * dx + dy * dy + dz * dz);
-	}
-	return total;
-}
 
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts,
@@ -307,6 +321,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	const nav_off_mesh_link_t *off_mesh_links,
 	int off_mesh_link_count,
 	nav_mesh_summary_t *summary,
+	nav_mesh_link_callback_t link_callback,
+	void *callback_data,
 	char *error,
 	size_t error_size)
 {
@@ -391,15 +407,69 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build compact heightfield");
 		return nullptr;
 	}
-	if (!rcErodeWalkableArea(&ctx, rc_config.walkableRadius, *guard.compact))
-	{
-		nav_set_error(error, error_size, "Failed to erode walkable area");
-		return nullptr;
-	}
+	/* Adaptive erosion: erode up to walkableRadius but never narrow a
+	   corridor below min_corridor_half (in cells).  For each cell, find
+	   the local corridor half-width (max dist in neighborhood), then
+	   only erode if there's enough room to keep the minimum passage. */
 	if (!rcBuildDistanceField(&ctx, *guard.compact))
 	{
 		nav_set_error(error, error_size, "Failed to build distance field");
 		return nullptr;
+	}
+	if (0) /* Adaptive erosion disabled — breaks connectivity on multi-floor maps */
+	{
+		const int erosion_cells = rc_config.walkableRadius; /* target erosion in cells */
+		const int min_half = 3; /* minimum corridor half-width to preserve (cells=12u) */
+		/* dist field uses 2x cell units */
+		const unsigned short erosion_dist = (unsigned short)(erosion_cells * 2);
+		const unsigned short min_half_dist = (unsigned short)(min_half * 2);
+		const int w = guard.compact->width;
+		const int h = guard.compact->height;
+
+		for (int z = 0; z < h; ++z)
+		{
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = guard.compact->cells[x + z * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+				{
+					if (guard.compact->areas[si] == RC_NULL_AREA)
+						continue;
+					if (guard.compact->dist[si] >= erosion_dist)
+						continue; /* far from wall — no erosion needed */
+
+					/* Find max dist in IMMEDIATE neighborhood (1 cell radius).
+					   Larger radius sees through narrow passages into wider
+					   areas, inflating local_max and over-eroding. */
+					unsigned short local_max = 0;
+					int rx0 = (x - 1 > 0) ? x - 1 : 0;
+					int rx1 = (x + 1 < w) ? x + 1 : w - 1;
+					int rz0 = (z - 1 > 0) ? z - 1 : 0;
+					int rz1 = (z + 1 < h) ? z + 1 : h - 1;
+					for (int nz = rz0; nz <= rz1; ++nz)
+					{
+						for (int nx = rx0; nx <= rx1; ++nx)
+						{
+							const rcCompactCell &nc = guard.compact->cells[nx + nz * w];
+							for (int ni = (int)nc.index, nn = (int)(nc.index + nc.count); ni < nn; ++ni)
+							{
+								if (guard.compact->areas[ni] != RC_NULL_AREA
+									&& guard.compact->dist[ni] > local_max)
+									local_max = guard.compact->dist[ni];
+							}
+						}
+					}
+
+					/* Erode if corridor is wide enough to keep min passage */
+					unsigned short max_erode = (local_max > min_half_dist)
+						? (local_max - min_half_dist) : 0;
+					if (max_erode > erosion_dist)
+						max_erode = erosion_dist;
+					if (guard.compact->dist[si] < max_erode)
+						guard.compact->areas[si] = RC_NULL_AREA;
+				}
+			}
+		}
 	}
 	if (!rcBuildRegions(&ctx, *guard.compact, 0, rc_config.minRegionArea, rc_config.mergeRegionArea))
 	{
@@ -419,10 +489,77 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		return nullptr;
 	}
 
+	/* Extract boundary edges from contours and invoke callback for
+	   additional off-mesh links (jump/drop detection) in a single pass. */
+	nav_off_mesh_link_t *callback_links = nullptr;
+	int callback_link_count = 0;
+	if (link_callback != nullptr)
+	{
+		/* Extract boundary edges from contour set */
+		std::vector<nav_mesh_boundary_edge_t> contour_edges;
+		const rcContourSet *cset = guard.contours;
+		for (int ci = 0; ci < cset->nconts; ++ci)
+		{
+			const rcContour &cont = cset->conts[ci];
+			if (cont.nverts < 3) continue;
+			for (int vi = 0; vi < cont.nverts; ++vi)
+			{
+				const int *va = &cont.verts[vi * 4];
+				const int *vb = &cont.verts[((vi + 1) % cont.nverts) * 4];
+				/* boundary edge: neighbor region == 0 */
+				if ((va[3] & RC_CONTOUR_REG_MASK) != 0) continue;
+
+				/* Convert cell coords to world (Recast coords) */
+				float ax = cset->bmin[0] + va[0] * cset->cs;
+				float ay = cset->bmin[1] + va[1] * cset->ch;
+				float az = cset->bmin[2] + va[2] * cset->cs;
+				float bx = cset->bmin[0] + vb[0] * cset->cs;
+				float by = cset->bmin[1] + vb[1] * cset->ch;
+				float bz = cset->bmin[2] + vb[2] * cset->cs;
+
+				nav_mesh_boundary_edge_t edge;
+				/* midpoint in Quake coords (Recast X,Z,Y → Quake X,Y,Z) */
+				edge.midpoint[0] = (ax + bx) * 0.5f;
+				edge.midpoint[1] = (az + bz) * 0.5f;
+				edge.midpoint[2] = (ay + by) * 0.5f;
+
+				/* outward 2D normal (perpendicular to edge direction) */
+				float dx = bx - ax, dz = bz - az;
+				float len = sqrtf(dx * dx + dz * dz);
+				if (len > 0.001f)
+				{
+					edge.normal[0] = dz / len;   /* Quake X = Recast perp Z */
+					edge.normal[1] = -dx / len;  /* Quake Y = Recast perp -X */
+					edge.normal[2] = 0;
+				}
+				else
+				{
+					edge.normal[0] = edge.normal[1] = edge.normal[2] = 0;
+				}
+				contour_edges.push_back(edge);
+			}
+		}
+
+		/* Provide heightfield for wall checking (non-owning wrapper) */
+		nav_heightfield_t hf_wrapper;
+		nav_heightfield_t *hf_for_callback = nullptr;
+		if (guard.compact != nullptr)
+		{
+			hf_wrapper.compact = guard.compact;
+			memcpy(&hf_wrapper.config, &rc_config, sizeof(rc_config));
+			hf_for_callback = &hf_wrapper;
+		}
+
+		callback_link_count = link_callback(
+			contour_edges.data(), (int)contour_edges.size(),
+			hf_for_callback, &callback_links, callback_data);
+	}
+
 	guard.poly_mesh = rcAllocPolyMesh();
 	if (guard.poly_mesh == nullptr)
 	{
 		nav_set_error(error, error_size, "Failed to allocate polygon mesh");
+		free(callback_links);
 		return nullptr;
 	}
 	if (!rcBuildPolyMesh(&ctx, *guard.contours, rc_config.maxVertsPerPoly, *guard.poly_mesh))
@@ -448,12 +585,107 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		return nullptr;
 	}
 
-	for (i = 0; i < guard.poly_mesh->npolys; ++i)
+	/* Mark poly areas using distance-field wall proximity.
+	   Two-pass approach:
+	   1. Sample each poly's wall distance from the compact heightfield.
+	   2. Mark a poly as NAV_AREA_NEAR_WALL only if it is near a wall AND
+	      has a neighbor that is NOT near a wall (i.e., a center-of-corridor
+	      alternative exists).  Narrow corridors where ALL polys are near
+	      walls stay as normal WALK cost — no penalty when there's no choice. */
 	{
-		if (guard.poly_mesh->areas[i] == RC_WALKABLE_AREA)
-			guard.poly_mesh->areas[i] = kAreaWalkable;
-		if (guard.poly_mesh->areas[i] == kAreaWalkable)
+		const unsigned short *pverts = guard.poly_mesh->verts;
+		const unsigned short *ppolys = guard.poly_mesh->polys;
+		const int nvp = guard.poly_mesh->nvp;
+		const int npoly = guard.poly_mesh->npolys;
+		const unsigned short dist_threshold =
+			(unsigned short)(config->walkable_radius / config->cell_size * 2.0f);
+
+		/* Pass 1: compute per-poly "near wall" flag via distance field */
+		std::vector<bool> poly_near_wall(static_cast<size_t>(npoly), false);
+
+		for (i = 0; i < npoly; ++i)
+		{
+			if (guard.poly_mesh->areas[i] != RC_WALKABLE_AREA)
+				continue;
+
+			float cx = 0, cz = 0;
+			int vc = 0;
+			const unsigned short *p = &ppolys[i * nvp * 2];
+			for (int vi = 0; vi < nvp && p[vi] != RC_MESH_NULL_IDX; ++vi)
+			{
+				cx += pverts[p[vi] * 3 + 0];
+				cz += pverts[p[vi] * 3 + 2];
+				vc++;
+			}
+			if (vc > 0) { cx /= vc; cz /= vc; }
+
+			int gx = (int)cx;
+			int gz = (int)cz;
+			if (gx < 0) gx = 0;
+			if (gz < 0) gz = 0;
+			if (gx >= guard.compact->width) gx = guard.compact->width - 1;
+			if (gz >= guard.compact->height) gz = guard.compact->height - 1;
+
+			const rcCompactCell *cell = &guard.compact->cells[gx + gz * guard.compact->width];
+			for (int si = (int)cell->index, sn = (int)(cell->index + cell->count); si < sn; ++si)
+			{
+				if (guard.compact->dist[si] < dist_threshold)
+				{
+					poly_near_wall[static_cast<size_t>(i)] = true;
+					break;
+				}
+			}
+		}
+
+		/* Pass 2: only penalize near-wall polys that have a non-near-wall neighbor
+		   (meaning a center path exists).  Neighbor indices are in the second
+		   half of each poly's entry: ppolys[i * nvp * 2 + nvp + edge]. */
+		int n_walk = 0, n_nearwall = 0;
+		for (i = 0; i < npoly; ++i)
+		{
 			guard.poly_mesh->flags[i] = kPolyFlagWalk;
+
+			if (guard.poly_mesh->areas[i] != RC_WALKABLE_AREA)
+				continue;
+
+			if (!poly_near_wall[static_cast<size_t>(i)])
+			{
+				guard.poly_mesh->areas[i] = kAreaWalkable;
+				n_walk++;
+				continue;
+			}
+
+			/* Check neighbors: does any adjacent poly have open space? */
+			int has_open_neighbor = 0;
+			const unsigned short *adj = &ppolys[i * nvp * 2 + nvp];
+			for (int ei = 0; ei < nvp; ++ei)
+			{
+				unsigned short ni = adj[ei];
+				if (ni == RC_MESH_NULL_IDX)
+					continue;
+				if (!poly_near_wall[static_cast<size_t>(ni)])
+				{
+					has_open_neighbor = 1;
+					break;
+				}
+			}
+
+			if (has_open_neighbor)
+			{
+				guard.poly_mesh->areas[i] = NAV_AREA_NEAR_WALL;
+				n_nearwall++;
+			}
+			else
+			{
+				/* Narrow corridor — all neighbors also near wall, no center
+				   path exists.  Keep as normal WALK cost. */
+				guard.poly_mesh->areas[i] = kAreaWalkable;
+				n_walk++;
+			}
+		}
+
+		fprintf(stderr, "Nav: poly areas: %d walk, %d near-wall / %d total\n",
+			n_walk, n_nearwall, npoly);
 	}
 
 	memset(&params, 0, sizeof(params));
@@ -471,7 +703,12 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	params.detailTriCount = guard.detail_mesh->ntris;
 	params.walkableHeight = config->walkable_height;
 	params.walkableRadius = config->walkable_radius;
-	params.walkableClimb = config->walkable_climb;
+	/* Use walkable_height (not walkable_climb) for the Detour tile params.
+	   This controls the Y search extent when linking off-mesh connections
+	   to ground polys.  The navmesh surface is ~44u below floor level
+	   (player hull offset + voxel quantization), so 18u walkable_climb
+	   is too small to find ground polys under off-mesh endpoints. */
+	params.walkableClimb = config->walkable_height;
 	rcVcopy(params.bmin, guard.poly_mesh->bmin);
 	rcVcopy(params.bmax, guard.poly_mesh->bmax);
 	params.cs = rc_config.cs;
@@ -488,34 +725,42 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	std::vector<unsigned char> omc_dir;
 	std::vector<unsigned int> omc_id;
 
-	if (off_mesh_links != nullptr && off_mesh_link_count > 0)
+	/* Build combined link list: caller links + callback links */
 	{
-		float rc_start[3], rc_end[3];
-
-		for (int li = 0; li < off_mesh_link_count; li++)
+		/* Helper to append a link array to the Detour parallel arrays */
+		auto append_links = [&](const nav_off_mesh_link_t *links, int count, int id_base)
 		{
-			nav_quake_to_recast(off_mesh_links[li].start, rc_start);
-			nav_quake_to_recast(off_mesh_links[li].end, rc_end);
-			omc_verts.push_back(rc_start[0]);
-			omc_verts.push_back(rc_start[1]);
-			omc_verts.push_back(rc_start[2]);
-			omc_verts.push_back(rc_end[0]);
-			omc_verts.push_back(rc_end[1]);
-			omc_verts.push_back(rc_end[2]);
-			omc_rad.push_back(off_mesh_links[li].radius);
-			omc_flags.push_back(kPolyFlagWalk);
-			omc_areas.push_back(nav_area_for_link(off_mesh_links[li].link_type));
-			omc_dir.push_back(off_mesh_links[li].bidirectional ? DT_OFFMESH_CON_BIDIR : 0);
-			omc_id.push_back((unsigned int)li);
-		}
+			float rc_start[3], rc_end[3];
+			for (int li = 0; li < count; li++)
+			{
+				nav_quake_to_recast(links[li].start, rc_start);
+				nav_quake_to_recast(links[li].end, rc_end);
+				omc_verts.push_back(rc_start[0]); omc_verts.push_back(rc_start[1]); omc_verts.push_back(rc_start[2]);
+				omc_verts.push_back(rc_end[0]); omc_verts.push_back(rc_end[1]); omc_verts.push_back(rc_end[2]);
+				omc_rad.push_back(links[li].radius);
+				omc_flags.push_back(kPolyFlagWalk);
+				omc_areas.push_back(nav_area_for_link(links[li].link_type));
+				omc_dir.push_back(links[li].bidirectional ? DT_OFFMESH_CON_BIDIR : 0);
+				omc_id.push_back((unsigned int)(id_base + li));
+			}
+		};
 
-		params.offMeshConVerts = omc_verts.data();
-		params.offMeshConRad = omc_rad.data();
-		params.offMeshConFlags = omc_flags.data();
-		params.offMeshConAreas = omc_areas.data();
-		params.offMeshConDir = omc_dir.data();
-		params.offMeshConUserID = omc_id.data();
-		params.offMeshConCount = off_mesh_link_count;
+		if (off_mesh_links != nullptr && off_mesh_link_count > 0)
+			append_links(off_mesh_links, off_mesh_link_count, 0);
+		if (callback_links != nullptr && callback_link_count > 0)
+			append_links(callback_links, callback_link_count, off_mesh_link_count);
+
+		int total_links = off_mesh_link_count + callback_link_count;
+		if (total_links > 0)
+		{
+			params.offMeshConVerts = omc_verts.data();
+			params.offMeshConRad = omc_rad.data();
+			params.offMeshConFlags = omc_flags.data();
+			params.offMeshConAreas = omc_areas.data();
+			params.offMeshConDir = omc_dir.data();
+			params.offMeshConUserID = omc_id.data();
+			params.offMeshConCount = total_links;
+		}
 	}
 
 	if (!dtCreateNavMeshData(&params, &guard.nav_data, &nav_data_size))
@@ -555,33 +800,60 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		return nullptr;
 	}
 
-	/* Log how many off-mesh connections Detour actually stored. */
+	/* Log how many off-mesh connections Detour stored and linked. */
 	{
 		const dtNavMesh *nm = guard.runtime->navmesh;
 		const dtMeshTile *tile = nm->getTile(0);
 		if (tile && tile->header)
-			fprintf(stderr, "Nav: Detour stored %d/%d off-mesh connections\n",
-				tile->header->offMeshConCount, off_mesh_link_count);
+		{
+			int linked = 0, unlinked = 0;
+			for (int oi = 0; oi < tile->header->offMeshConCount; ++oi)
+			{
+				const dtPoly *p = &tile->polys[tile->header->offMeshBase + oi];
+				if (p->firstLink == DT_NULL_LINK)
+					unlinked++;
+				else
+					linked++;
+			}
+			fprintf(stderr, "Nav: Detour stored %d/%d off-mesh, linked=%d unlinked=%d\n",
+				tile->header->offMeshConCount,
+				off_mesh_link_count + callback_link_count,
+				linked, unlinked);
+		}
 	}
 
-	/* Wide extents for goal/item snapping (items may float above floor). */
-	guard.runtime->query_half_extents[0] = fmaxf(config->walkable_radius * 8.0f, 128.0f);
-	guard.runtime->query_half_extents[1] = fmaxf(config->walkable_height * 4.0f, 256.0f);
-	guard.runtime->query_half_extents[2] = fmaxf(config->walkable_radius * 8.0f, 128.0f);
+	/* Wide extents for goal/item snapping.
+	   Keep XZ tighter than the original 64u box to avoid snapping
+	   through thin walls into adjacent rooms. */
+	guard.runtime->query_half_extents[0] = fmaxf(config->walkable_radius * 3.0f, 48.0f);
+	guard.runtime->query_half_extents[1] = fmaxf(config->walkable_height * 2.0f, 128.0f);
+	guard.runtime->query_half_extents[2] = fmaxf(config->walkable_radius * 3.0f, 48.0f);
 
-	/* Tight extents for agent position (bot should be on or very near the mesh). */
-	guard.runtime->query_half_extents_tight[0] = config->walkable_radius * 2.0f;
+	/* Tight extents for agent position.
+	   Y must cover the offset between player origin (center of 56u hull)
+	   and navmesh surface (~44u below), while staying under the minimum
+	   floor gap (~64u on dm4). */
+	guard.runtime->query_half_extents_tight[0] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
 	guard.runtime->query_half_extents_tight[1] = config->walkable_height;
-	guard.runtime->query_half_extents_tight[2] = config->walkable_radius * 2.0f;
+	guard.runtime->query_half_extents_tight[2] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
 
 	/* Store link metadata for userId lookup during path following. */
-	if (off_mesh_link_count > 0 && off_mesh_links != nullptr)
 	{
-		size_t sz = (size_t)off_mesh_link_count * sizeof(nav_off_mesh_link_t);
-		guard.runtime->links = static_cast<nav_off_mesh_link_t *>(malloc(sz));
-		memcpy(guard.runtime->links, off_mesh_links, sz);
-		guard.runtime->link_count = off_mesh_link_count;
+		int total_links = off_mesh_link_count + callback_link_count;
+		if (total_links > 0)
+		{
+			size_t sz = (size_t)total_links * sizeof(nav_off_mesh_link_t);
+			guard.runtime->links = static_cast<nav_off_mesh_link_t *>(malloc(sz));
+			if (off_mesh_link_count > 0 && off_mesh_links != nullptr)
+				memcpy(guard.runtime->links, off_mesh_links,
+					(size_t)off_mesh_link_count * sizeof(nav_off_mesh_link_t));
+			if (callback_link_count > 0 && callback_links != nullptr)
+				memcpy(guard.runtime->links + off_mesh_link_count, callback_links,
+					(size_t)callback_link_count * sizeof(nav_off_mesh_link_t));
+			guard.runtime->link_count = total_links;
+		}
 	}
+	free(callback_links);
 
 	if (summary != nullptr)
 	{
@@ -616,7 +888,7 @@ extern "C" int nav_mesh_find_nearest(
 	bool is_over_poly;
 	const dtMeshTile *tile;
 	const dtPoly *poly;
-	dtQueryFilter filter; nav_setup_filter(&filter);
+	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
 	dtStatus status;
 
 	if (result == nullptr || point == nullptr)
@@ -766,13 +1038,9 @@ extern "C" int nav_mesh_find_path(
 	float end_nearest[3];
 	bool start_over_poly;
 	bool end_over_poly;
-	dtQueryFilter filter; nav_setup_filter(&filter);
+	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
 	dtPolyRef path_refs[NAV_MESH_MAX_PATH_REFS];
 	int path_count;
-	float straight_path[NAV_MESH_MAX_STRAIGHT_POINTS * 3];
-	unsigned char straight_flags[NAV_MESH_MAX_STRAIGHT_POINTS];
-	dtPolyRef straight_refs[NAV_MESH_MAX_STRAIGHT_POINTS];
-	int straight_count;
 	dtStatus status;
 	int i;
 
@@ -789,14 +1057,10 @@ extern "C" int nav_mesh_find_path(
 	memset(end_nearest, 0, sizeof(end_nearest));
 	start_over_poly = false;
 	end_over_poly = false;
-	/* Tight extents for start (agent is on the mesh), wide for end (items may float). */
 	if (!nav_mesh_find_nearest_internal(navmesh, start, &start_ref, start_nearest, &start_over_poly, navmesh->query_half_extents_tight, error, error_size)
 		|| !nav_mesh_find_nearest_internal(navmesh, end, &end_ref, end_nearest, &end_over_poly, NULL, error, error_size))
 		return 0;
 
-	/* Reject if goal snapped too far vertically (wrong floor).
-	   end_nearest is Recast coords (Y=up), end is Quake (Z=up).
-	   Recast Y = Quake Z, so compare end_nearest[1] vs end[2]. */
 	{
 		float goal_snap_dz = end_nearest[1] - end[2];
 		if (goal_snap_dz < 0) goal_snap_dz = -goal_snap_dz;
@@ -822,10 +1086,6 @@ extern "C" int nav_mesh_find_path(
 		nav_set_error(error, error_size, "Detour findPath failed");
 		return 0;
 	}
-	/* Reject truly unreachable goals.  DT_PARTIAL_RESULT fires both
-	   when the goal is on a disconnected island AND when the path
-	   corridor exceeds the buffer (128 polys).  Only reject if the
-	   corridor didn't actually reach the goal polygon. */
 	if (dtStatusDetail(status, DT_PARTIAL_RESULT))
 	{
 		if (path_count <= 0 || path_refs[path_count - 1] != end_ref)
@@ -833,25 +1093,6 @@ extern "C" int nav_mesh_find_path(
 			nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial)");
 			return 0;
 		}
-		/* Buffer-truncated but reached goal — accept. */
-	}
-
-	straight_count = 0;
-	status = navmesh->query->findStraightPath(
-		start_nearest,
-		end_nearest,
-		path_refs,
-		path_count,
-		straight_path,
-		straight_flags,
-		straight_refs,
-		&straight_count,
-		NAV_MESH_MAX_STRAIGHT_POINTS,
-		0);
-	if (dtStatusFailed(status) || straight_count <= 0)
-	{
-		nav_set_error(error, error_size, "Detour findStraightPath failed");
-		return 0;
 	}
 
 	result->found = 1;
@@ -863,149 +1104,6 @@ extern "C" int nav_mesh_find_path(
 	result->path_ref_count = path_count;
 	for (i = 0; i < path_count; ++i)
 		result->path_refs[i] = static_cast<unsigned long long>(path_refs[i]);
-	result->straight_point_count = straight_count;
-	for (i = 0; i < straight_count; ++i)
-	{
-		nav_recast_to_quake(&straight_path[i * 3], &result->straight_points[i * 3]);
-		result->straight_flags[i] = straight_flags[i];
-		result->straight_refs[i] = static_cast<unsigned long long>(straight_refs[i]);
-	}
-	result->travel_distance = nav_mesh_path_distance(result->straight_points, straight_count);
-	return 1;
-}
-
-extern "C" int nav_mesh_move_along_surface(
-	const nav_mesh_runtime_t *navmesh,
-	const float *start, const float *end,
-	float *result_pos,
-	char *error, size_t error_size)
-{
-	dtPolyRef start_ref;
-	float start_nearest[3], end_recast[3], result_recast[3];
-	bool start_over;
-	dtQueryFilter filter; nav_setup_filter(&filter);
-	dtPolyRef visited[16];
-	int visited_count;
-	dtStatus status;
-
-	if (navmesh == nullptr || start == nullptr || end == nullptr || result_pos == nullptr)
-	{
-		nav_set_error(error, error_size, "moveAlongSurface: null argument");
-		return 0;
-	}
-
-	if (!nav_mesh_find_nearest_internal(navmesh, start, &start_ref, start_nearest,
-		&start_over, navmesh->query_half_extents_tight, error, error_size))
-		return 0;
-
-	nav_quake_to_recast(end, end_recast);
-
-	status = navmesh->query->moveAlongSurface(
-		start_ref, start_nearest, end_recast, &filter,
-		result_recast, visited, &visited_count, 16);
-
-	if (dtStatusFailed(status))
-	{
-		nav_set_error(error, error_size, "moveAlongSurface failed");
-		return 0;
-	}
-
-	nav_recast_to_quake(result_recast, result_pos);
-	return 1;
-}
-
-extern "C" int nav_mesh_collect_boundary_edges(
-	const nav_mesh_runtime_t *navmesh,
-	nav_mesh_boundary_edge_t **out_edges,
-	int *out_count)
-{
-	std::vector<nav_mesh_boundary_edge_t> edges;
-	int ti, pi, ei;
-
-	if (navmesh == nullptr || navmesh->navmesh == nullptr
-		|| out_edges == nullptr || out_count == nullptr)
-		return 0;
-
-	*out_edges = nullptr;
-	*out_count = 0;
-
-	const dtNavMesh *nm = navmesh->navmesh;
-	for (ti = 0; ti < nm->getMaxTiles(); ++ti)
-	{
-		const dtMeshTile *tile = nm->getTile(ti);
-		if (tile == nullptr || tile->header == nullptr)
-			continue;
-
-		for (pi = 0; pi < tile->header->polyCount; ++pi)
-		{
-			const dtPoly *poly = &tile->polys[pi];
-			if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
-				continue;
-
-			for (ei = 0; ei < poly->vertCount; ++ei)
-			{
-				/* Only boundary edges (no neighbor polygon) */
-				if (poly->neis[ei] != 0)
-					continue;
-
-				/* Get the two vertices of this edge (Recast coords) */
-				const float *v0 = &tile->verts[poly->verts[ei] * 3];
-				const float *v1 = &tile->verts[poly->verts[(ei + 1) % poly->vertCount] * 3];
-
-				/* Edge midpoint (Recast coords) */
-				float mid_rc[3];
-				mid_rc[0] = (v0[0] + v1[0]) * 0.5f;
-				mid_rc[1] = (v0[1] + v1[1]) * 0.5f;
-				mid_rc[2] = (v0[2] + v1[2]) * 0.5f;
-
-				/* Edge direction (Recast XZ plane) */
-				float dx = v1[0] - v0[0];
-				float dz = v1[2] - v0[2];
-				float len = sqrtf(dx * dx + dz * dz);
-				if (len < 0.001f)
-					continue;
-
-				/* Outward normal: perpendicular to edge in XZ plane.
-				   Recast: X,Z = horizontal.  Normal = rotate edge 90° CW. */
-				float nx = dz / len;
-				float nz = -dx / len;
-
-				/* Verify normal points outward: check against polygon center.
-				   If dot(normal, mid→center) > 0, normal points inward — flip. */
-				float cx = 0, cz = 0;
-				for (int vi = 0; vi < poly->vertCount; ++vi)
-				{
-					cx += tile->verts[poly->verts[vi] * 3 + 0];
-					cz += tile->verts[poly->verts[vi] * 3 + 2];
-				}
-				cx /= poly->vertCount;
-				cz /= poly->vertCount;
-				if (nx * (cx - mid_rc[0]) + nz * (cz - mid_rc[2]) > 0)
-				{
-					nx = -nx;
-					nz = -nz;
-				}
-
-				/* Convert to Quake coords */
-				nav_mesh_boundary_edge_t edge;
-				nav_recast_to_quake(mid_rc, edge.midpoint);
-				/* Normal: Recast (nx, 0, nz) → Quake (nx, nz, 0) */
-				edge.normal[0] = nx;
-				edge.normal[1] = nz;
-				edge.normal[2] = 0.0f;
-
-				edges.push_back(edge);
-			}
-		}
-	}
-
-	if (edges.empty())
-		return 1;
-
-	*out_count = static_cast<int>(edges.size());
-	*out_edges = static_cast<nav_mesh_boundary_edge_t *>(
-		malloc(edges.size() * sizeof(nav_mesh_boundary_edge_t)));
-	memcpy(*out_edges, edges.data(), edges.size() * sizeof(nav_mesh_boundary_edge_t));
 	return 1;
 }
 
@@ -1049,4 +1147,299 @@ extern "C" void nav_mesh_destroy(nav_mesh_runtime_t *navmesh)
 	if (navmesh->navmesh != nullptr)
 		dtFreeNavMesh(navmesh->navmesh);
 	delete navmesh;
+}
+
+/* ---- Path corridor wrapper ---- */
+
+struct nav_corridor_s
+{
+	dtPathCorridor corridor;
+	dtQueryFilter filter;
+};
+
+static int nav_corridor_reseed_to_poly(nav_corridor_t *c, dtPolyRef poly_ref, const float *poly_pos)
+{
+	const dtPolyRef *path;
+	dtPolyRef trimmed[NAV_MESH_MAX_PATH_REFS];
+	float target[3];
+	int path_count;
+	int i;
+
+	if (c == nullptr || poly_ref == 0 || poly_pos == nullptr)
+		return 0;
+
+	path = c->corridor.getPath();
+	path_count = c->corridor.getPathCount();
+	if (path == nullptr || path_count < 1)
+		return 0;
+
+	for (i = 0; i < path_count; ++i)
+	{
+		if (path[i] != poly_ref)
+			continue;
+		if (i == 0)
+			return 0;
+
+		memcpy(target, c->corridor.getTarget(), sizeof(target));
+		memcpy(trimmed, path + i, (size_t)(path_count - i) * sizeof(dtPolyRef));
+		c->corridor.reset(poly_ref, poly_pos);
+		c->corridor.setCorridor(target, trimmed, path_count - i);
+		return 1;
+	}
+
+	return 0;
+}
+
+extern "C" nav_corridor_t *nav_corridor_create(int max_path)
+{
+	nav_corridor_t *c = new (std::nothrow) nav_corridor_t();
+	if (c == nullptr) return nullptr;
+	if (!c->corridor.init(max_path))
+	{
+		delete c;
+		return nullptr;
+	}
+	nav_mesh_setup_filter(&c->filter);
+	return c;
+}
+
+extern "C" void nav_corridor_destroy(nav_corridor_t *c)
+{
+	if (c != nullptr)
+		delete c;
+}
+
+extern "C" int nav_corridor_set(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	const float *start, const float *target,
+	const unsigned long long *path_refs, int path_count)
+{
+	float rc_start[3], rc_target[3];
+	dtPolyRef polys[NAV_MESH_MAX_PATH_REFS];
+	int i;
+
+	if (c == nullptr || navmesh == nullptr || path_count < 1)
+		return 0;
+	if (path_count > NAV_MESH_MAX_PATH_REFS)
+		path_count = NAV_MESH_MAX_PATH_REFS;
+
+	nav_quake_to_recast(start, rc_start);
+	nav_quake_to_recast(target, rc_target);
+	for (i = 0; i < path_count; i++)
+		polys[i] = static_cast<dtPolyRef>(path_refs[i]);
+
+	c->corridor.reset(polys[0], rc_start);
+	c->corridor.setCorridor(rc_target, polys, path_count);
+	return 1;
+}
+
+extern "C" int navigate(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	const float *agent_pos,
+	float *corner_pos,
+	unsigned char *corner_flags,
+	unsigned long long *corner_ref)
+{
+	float rc_pos[3];
+	float snapped_pos[3];
+	float corners[3 * 3]; /* max 3 corners */
+	unsigned char flags[3];
+	dtPolyRef refs[3];
+	dtPolyRef snapped_ref;
+	int have_snapped_pos;
+	int ncorners;
+	static int optimize_counter = 0;
+
+	if (c == nullptr || navmesh == nullptr || navmesh->query == nullptr)
+		return 0;
+
+	/* Sync corridor position to the snapped navmesh position. If the actor
+	   already traversed an off-mesh link in the game world, trim the path
+	   forward to the matching polygon instead of advancing Detour early. */
+	nav_quake_to_recast(agent_pos, rc_pos);
+	snapped_ref = 0;
+	memset(snapped_pos, 0, sizeof(snapped_pos));
+	have_snapped_pos = nav_mesh_find_nearest_internal(
+		navmesh,
+		agent_pos,
+		&snapped_ref,
+		snapped_pos,
+		nullptr,
+		navmesh->query_half_extents_tight,
+		nullptr,
+		0);
+
+	if (have_snapped_pos)
+	{
+		if (!nav_corridor_reseed_to_poly(c, snapped_ref, snapped_pos)
+			&& !c->corridor.isValid(8, navmesh->query, &c->filter))
+			c->corridor.trimInvalidPath(snapped_ref, snapped_pos, navmesh->query, &c->filter);
+	}
+
+	if (c->corridor.getPathCount() < 1)
+		return 0;
+
+	if (!c->corridor.movePosition(have_snapped_pos ? snapped_pos : rc_pos, navmesh->query, &c->filter))
+	{
+		if (!have_snapped_pos || !nav_corridor_reseed_to_poly(c, snapped_ref, snapped_pos))
+			return 0;
+	}
+
+	if (!c->corridor.isValid(8, navmesh->query, &c->filter))
+	{
+		if (!have_snapped_pos)
+			return 0;
+		c->corridor.trimInvalidPath(snapped_ref, snapped_pos, navmesh->query, &c->filter);
+		if (!c->corridor.isValid(1, navmesh->query, &c->filter))
+			return 0;
+	}
+
+	/* Check arrival: corridor position close to target = path done */
+	if (dtVdist2DSqr(c->corridor.getPos(), c->corridor.getTarget()) < 32.0f * 32.0f)
+		return 0;
+
+	/* Get next corners */
+	ncorners = c->corridor.findCorners(corners, flags, refs,
+		3, navmesh->query, &c->filter);
+	if (ncorners < 1)
+		return 0;
+
+	/* Fix corner height using getPolyHeight */
+	{
+		float h = 0;
+		if (dtStatusSucceed(navmesh->query->getPolyHeight(refs[0], corners, &h)))
+			corners[1] = h; /* Recast Y = height */
+	}
+
+	/* Periodically optimize corridor */
+	optimize_counter++;
+	if ((optimize_counter & 15) == 0) /* every 16 frames */
+	{
+		if (ncorners > 1)
+			c->corridor.optimizePathVisibility(
+				&corners[3], 48.0f * 6.0f, /* ~6 polys look-ahead */
+				navmesh->query, &c->filter);
+		c->corridor.optimizePathTopology(navmesh->query, &c->filter);
+	}
+
+	/* Return first corner in Quake coords */
+	nav_recast_to_quake(corners, corner_pos);
+	*corner_flags = flags[0];
+	*corner_ref = static_cast<unsigned long long>(refs[0]);
+	return 1;
+}
+
+extern "C" int nav_corridor_offmesh(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	unsigned long long offmesh_ref,
+	float *start_pos, float *end_pos)
+{
+	dtPolyRef refs[2];
+	float rc_start[3], rc_end[3];
+
+	if (c == nullptr || navmesh == nullptr || navmesh->query == nullptr)
+		return 0;
+
+	if (!c->corridor.moveOverOffmeshConnection(
+		static_cast<dtPolyRef>(offmesh_ref), refs,
+		rc_start, rc_end, navmesh->query))
+		return 0;
+
+	nav_recast_to_quake(rc_start, start_pos);
+	nav_recast_to_quake(rc_end, end_pos);
+	return 1;
+}
+
+extern "C" int nav_corridor_length(const nav_corridor_t *c)
+{
+	if (c == nullptr) return 0;
+	return c->corridor.getPathCount();
+}
+
+/* ---- Heightfield probing ---- */
+
+extern "C" int nav_heightfield_is_blocked(const nav_heightfield_t *hf,
+	const float *point, float floor_z)
+{
+	float rc_point[3];
+	int gx, gz;
+
+	if (hf == nullptr || hf->compact == nullptr)
+		return 0;
+
+	/* Convert Quake coords to Recast heightfield grid coords */
+	nav_quake_to_recast(point, rc_point);
+	gx = (int)((rc_point[0] - hf->config.bmin[0]) / hf->config.cs);
+	gz = (int)((rc_point[2] - hf->config.bmin[2]) / hf->config.cs);
+
+	if (gx < 0 || gx >= hf->compact->width || gz < 0 || gz >= hf->compact->height)
+		return 0; /* outside grid = open space */
+
+	/* Check spans in this column: is there a NON-walkable span at
+	   the probed height?  A walkable span means floor, not wall. */
+	float rc_floor_z = floor_z; /* Quake Z = Recast Y */
+	const rcCompactCell &cell = hf->compact->cells[gx + gz * hf->compact->width];
+	for (int si = (int)cell.index, sn = (int)(cell.index + cell.count); si < sn; ++si)
+	{
+		const rcCompactSpan &span = hf->compact->spans[si];
+		float span_y = hf->config.bmin[1] + (float)span.y * hf->config.ch;
+
+		/* Span is near our probe height and NOT walkable = wall */
+		if (span_y > rc_floor_z - hf->config.walkableHeight * hf->config.ch &&
+			span_y < rc_floor_z + hf->config.walkableHeight * hf->config.ch)
+		{
+			if (hf->compact->areas[si] == RC_NULL_AREA)
+				return 1; /* solid/wall */
+		}
+	}
+
+	/* No solid span at this height = open */
+	return 0;
+}
+
+extern "C" int nav_heightfield_floor_z(const nav_heightfield_t *hf,
+	const float *point, float search_z, float *out_z)
+{
+	float rc_point[3];
+	int gx, gz;
+
+	if (hf == nullptr || hf->compact == nullptr)
+		return 0;
+
+	nav_quake_to_recast(point, rc_point);
+	gx = (int)((rc_point[0] - hf->config.bmin[0]) / hf->config.cs);
+	gz = (int)((rc_point[2] - hf->config.bmin[2]) / hf->config.cs);
+
+	if (gx < 0 || gx >= hf->compact->width || gz < 0 || gz >= hf->compact->height)
+		return 0;
+
+	float rc_search = search_z; /* Quake Z = Recast Y */
+	float best_y = -999999.0f;
+	int found = 0;
+	const rcCompactCell &cell = hf->compact->cells[gx + gz * hf->compact->width];
+	for (int si = (int)cell.index, sn = (int)(cell.index + cell.count); si < sn; ++si)
+	{
+		if (hf->compact->areas[si] == RC_NULL_AREA)
+			continue; /* not walkable */
+		float span_y = hf->config.bmin[1] + (float)hf->compact->spans[si].y * hf->config.ch;
+		float dist = fabsf(span_y - rc_search);
+		float best_dist = fabsf(best_y - rc_search);
+		if (!found || dist < best_dist)
+		{
+			best_y = span_y;
+			found = 1;
+		}
+	}
+
+	if (found && out_z != nullptr)
+		*out_z = best_y; /* Recast Y = Quake Z */
+	return found;
+}
+
+extern "C" void nav_heightfield_free(nav_heightfield_t *hf)
+{
+	if (hf == nullptr) return;
+	if (hf->compact != nullptr)
+		rcFreeCompactHeightfield(hf->compact);
+	delete hf;
 }

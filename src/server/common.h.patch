@@ -1,0 +1,13 @@
+--- common.h
++++ common.h
+@@ -27,7 +27,11 @@
+ #undef true
+ #undef false
+
++#ifndef __cplusplus
+ typedef enum {false, true}	qboolean;
++#else
++typedef int qboolean;
++#endif
+
+ //============================================================================

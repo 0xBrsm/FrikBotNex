@@ -59,95 +59,15 @@ P5: Idle      -- roaming, jumping, eavesdropping
 */
 
 
-void() bot_angle_set =
+// --- shared turn: flick toward b_angle, skill-scaled ---
+// Exponential decay: covers (decay) fraction of remaining angle per frame.
+// Low skill = sluggish, high skill = snappy flicks.
+void() bot_look =
 {
-	local float h;
-	local vector view, pred_vel, foe_fwd, foe_right;
-	local float aim_speed, aim_floor, decay;
+	local float decay;
+	local float dyaw, dpitch;
 
-	if (self.enemy)
-	{
-		if (self.enemy.items & IT_INVISIBILITY)
-			if (random() > 0.01)
-				return;
-		if (self.missile_speed == 0)
-			self.missile_speed = 10000;
-
-		if (self.b_aim_delay == 0)
-			self.b_aim_delay = time;
-
-		if (self.enemy.solid == SOLID_BSP)
-		{
-			view = realorigin(self.enemy) - self.origin;
-		}
-		else
-		{
-			local float levels;
-			levels = 3;
-			view = self.enemy.origin;
-			pred_vel = self.enemy.velocity;
-
-			// skill 2+ opponent model: enhance velocity prediction
-			if (self.b_skill >= 2 && self.missile_speed < 2000
-				&& self.b_opp_ent == self.enemy)
-			{
-				foe_fwd = normalize(self.origin - self.enemy.origin);
-				foe_right_x = foe_fwd_y * -1;
-				foe_right_y = foe_fwd_x;
-				foe_right_z = 0;
-
-				if (self.b_opp_strafe > 0.15 || self.b_opp_strafe < -0.15)
-					pred_vel = pred_vel + foe_right * self.b_opp_strafe * 100;
-
-				if (self.b_opp_aggro > 0.65)
-					pred_vel = pred_vel + foe_fwd * 40;
-				else if (self.b_opp_aggro < 0.3)
-					pred_vel = pred_vel - foe_fwd * 30;
-			}
-
-			while (levels)
-			{
-				h = vlen(view - self.origin) / self.missile_speed;
-				if (self.enemy.flags & FL_ONGROUND)
-					view = pred_vel * h + '0 0 -20';
-				else
-					view = (pred_vel - (sv_gravity * '0 0 1') * h) * h;
-				view = self.enemy.origin + view;
-				traceline(self.enemy.origin, view, FALSE, self);
-				view = trace_endpos;
-				levels = levels - 1;
-			}
-			view = view - self.origin;
-		}
-		view = vectoangles(view);
-		view_x = view_x * -1;
-
-		self.b_angle = view;
-	}
-	else if (self.b_wishdir != '0 0 0')
-	{
-		// no enemy — face movement direction
-		self.b_aim_delay = 0;
-		view = vectoangles(self.b_wishdir);
-		view_x = 0;  // keep pitch level when walking
-		self.b_angle = view;
-	}
-	else
-	{
-		self.b_aim_delay = 0;
-		self.b_angle_x = 0;
-	}
-
-	// --- apply view angles: proportional + velocity smoothing ---
-	// mouse_emu stores angular velocity (y=yaw, x=pitch).
-	// Proportional step sets the desired velocity (natural decel),
-	// but actual velocity blends toward it (smooth accel, no overshoot).
-	local float smooth, accel, max_turn;
-	local float dyaw, dpitch, want_y, want_p, step_len;
-
-	smooth = 0.03 + self.b_skill * 0.15;
-	accel = 0.10 + self.b_skill * 0.15;
-	max_turn = (100 + self.b_skill * 250) * sv_ticrate;
+	decay = 0.3 + self.b_skill * 0.15; // skill 0=0.3, skill 1=0.45, skill 2=0.6, skill 3=0.75
 
 	dyaw = self.b_angle_y - self.v_angle_y;
 	while (dyaw > 180) dyaw = dyaw - 360;
@@ -156,29 +76,76 @@ void() bot_angle_set =
 	while (dpitch > 180) dpitch = dpitch - 360;
 	while (dpitch < -180) dpitch = dpitch + 360;
 
-	// desired velocity from proportional error
-	want_y = dyaw * smooth;
-	want_p = dpitch * smooth;
-
-	// blend actual velocity toward desired (smooth accel)
-	self.mouse_emu_y = self.mouse_emu_y + (want_y - self.mouse_emu_y) * accel;
-	self.mouse_emu_x = self.mouse_emu_x + (want_p - self.mouse_emu_x) * accel;
-
-	// cap velocity
-	step_len = vlen(self.mouse_emu_y * '1 0 0' + self.mouse_emu_x * '0 1 0');
-	if (step_len > max_turn)
-	{
-		self.mouse_emu_y = self.mouse_emu_y * (max_turn / step_len);
-		self.mouse_emu_x = self.mouse_emu_x * (max_turn / step_len);
-	}
-
-	self.v_angle_y = self.v_angle_y + self.mouse_emu_y;
-	self.v_angle_x = self.v_angle_x + self.mouse_emu_x;
+	self.v_angle_y = self.v_angle_y + dyaw * decay;
+	self.v_angle_x = self.v_angle_x + dpitch * decay;
 	while (self.v_angle_x < -180)
 		self.v_angle_x = self.v_angle_x + 360;
 	while (self.v_angle_x > 180)
 		self.v_angle_x = self.v_angle_x - 360;
 };
+
+// --- combat aim: set b_angle toward enemy with prediction ---
+void() bot_aim =
+{
+	local float h;
+	local vector view, pred_vel, foe_fwd, foe_right;
+
+	if (self.enemy.items & IT_INVISIBILITY)
+		if (random() > 0.01)
+			return;
+	if (self.missile_speed == 0)
+		self.missile_speed = 10000;
+
+	if (self.b_aim_delay == 0)
+		self.b_aim_delay = time;
+
+	if (self.enemy.solid == SOLID_BSP)
+	{
+		view = realorigin(self.enemy) - self.origin;
+	}
+	else
+	{
+		local float levels;
+		levels = 3;
+		view = self.enemy.origin;
+		pred_vel = self.enemy.velocity;
+
+		if (self.b_skill >= 2 && self.missile_speed < 2000
+			&& self.b_opp_ent == self.enemy)
+		{
+			foe_fwd = normalize(self.origin - self.enemy.origin);
+			foe_right_x = foe_fwd_y * -1;
+			foe_right_y = foe_fwd_x;
+			foe_right_z = 0;
+
+			if (self.b_opp_strafe > 0.15 || self.b_opp_strafe < -0.15)
+				pred_vel = pred_vel + foe_right * self.b_opp_strafe * 100;
+
+			if (self.b_opp_aggro > 0.65)
+				pred_vel = pred_vel + foe_fwd * 40;
+			else if (self.b_opp_aggro < 0.3)
+				pred_vel = pred_vel - foe_fwd * 30;
+		}
+
+		while (levels)
+		{
+			h = vlen(view - self.origin) / self.missile_speed;
+			if (self.enemy.flags & FL_ONGROUND)
+				view = pred_vel * h + '0 0 -20';
+			else
+				view = (pred_vel - (sv_gravity * '0 0 1') * h) * h;
+			view = self.enemy.origin + view;
+			traceline(self.enemy.origin, view, FALSE, self);
+			view = trace_endpos;
+			levels = levels - 1;
+		}
+		view = view - self.origin;
+	}
+	view = vectoangles(view);
+	view_x = view_x * -1;
+	self.b_angle = view;
+};
+
 
 
 /*
@@ -194,8 +161,18 @@ from bot_phys.qc. One question per frame:
 */
 float stagger_think;
 
+// roaming (no goal — wander randomly)
+.vector _roam_dir;
+.float _roam_change_time;
+
+// navmesh debug visualization
+float nav_debug_total;
+float nav_debug_idx;
+float nav_debug_next;
+
 // debug: per-bot movement metrics (accumulated, printed every 10s)
-.float _m_stuck;       // frames where position didn't change
+.float _m_stuck;       // frames where bot wanted to move but couldn't (geometry)
+.float _m_idle;        // frames where bot had no movement intent
 .vector _m_last_origin; // previous frame position for stuck detection
 .float _m_lava;        // frames on lava/slime
 .float _m_nodir;       // frames with sense_best_dir == -1
@@ -205,6 +182,16 @@ float stagger_think;
 // lava entry tracking
 .float _m_was_lava;
 .float _m_le_nav, _m_le_beeline, _m_le_combat, _m_le_roam;
+
+// target tracking
+.float _m_idle_notgt;  // frames idle with no target
+.float _m_idle_roam;   // frames idle with roam target (self)
+.float _m_polys_seen;  // unique polys visited (coverage proxy)
+.float _m_last_poly;   // last poly ref seen (for change detection)
+
+// wall probe: previous frame floor heights for gradient detection
+.float _wp_floor_left;
+.float _wp_floor_right;
 
 void() bot_server_spawn =
 {
@@ -225,12 +212,38 @@ void() bot_debug_metrics =
 
 	self._m_frames = self._m_frames + 1;
 
-	// stuck = didn't move since last frame (position-based, not velocity)
+	// stuck = wanted to move but didn't (geometry impact)
+	// idle = no movement intent (no goal, between paths, etc.)
 	vel = self.origin - self._m_last_origin;
 	vel_z = 0;
 	if (vlen(vel) < 1)
-		self._m_stuck = self._m_stuck + 1;
+	{
+		if (self.b_wishdir != '0 0 0')
+			self._m_stuck = self._m_stuck + 1;
+		else
+			self._m_idle = self._m_idle + 1;
+	}
 	self._m_last_origin = self.origin;
+
+	// idle breakdown: no target vs roam
+	if (vlen(vel) < 1 && self.b_wishdir == '0 0 0')
+	{
+		if (!self.target1)
+			self._m_idle_notgt = self._m_idle_notgt + 1;
+		else if (self.target1 == self)
+			self._m_idle_roam = self._m_idle_roam + 1;
+	}
+
+	// coverage: count navigate() poly changes as proxy for area explored
+	{
+		local vector dbg;
+		dbg = nav_path_debug(self, -1);
+		if (dbg_x != self._m_last_poly)
+		{
+			self._m_polys_seen = self._m_polys_seen + 1;
+			self._m_last_poly = dbg_x;
+		}
+	}
 
 	local float on_lava;
 	on_lava = (self.sense_ground_type < -3);
@@ -260,25 +273,34 @@ void() bot_debug_metrics =
 		return;
 
 	bprint("["); bprint(self.netname); bprint("] ");
-	bprint("10s: stuck=");
 	s = ftos(rint(100 * self._m_stuck / self._m_frames));
-	bprint(s); bprint("% lava=");
+	bprint("stk="); bprint(s);
+	s = ftos(rint(100 * self._m_idle_notgt / self._m_frames));
+	bprint("% no_tgt="); bprint(s);
+	s = ftos(rint(100 * self._m_idle_roam / self._m_frames));
+	bprint("% roam_idle="); bprint(s);
 	s = ftos(rint(100 * self._m_lava / self._m_frames));
-	bprint(s); bprint("% nodir=");
-	s = ftos(rint(100 * self._m_nodir / self._m_frames));
-	bprint(s); bprint("% hp=");
-	s = ftos(rint(self.health));
-	bprint(s); bprint(" le:");
-	s = ftos(self._m_le_nav); bprint(s); bprint("n/");
-	s = ftos(self._m_le_beeline); bprint(s); bprint("b/");
-	s = ftos(self._m_le_combat); bprint(s); bprint("c/");
-	s = ftos(self._m_le_roam); bprint(s); bprint("r");
-	bprint(" got=");
-	s = ftos(self._m_goals_reached); bprint(s);
+	bprint("% lav="); bprint(s);
+	bprint("% cov=");
+	s = ftos(self._m_polys_seen); bprint(s);
+	bprint(" ");
+	if (self.target1 == self)
+		bprint("tgt=ROAM");
+	else if (self.target1)
+	{
+		bprint("tgt="); bprint(self.target1.classname);
+		s = ftos(rint(vlen(self.target1.origin - self.origin)));
+		bprint(" d="); bprint(s);
+	}
+	else
+		bprint("tgt=NONE");
 	bprint("\n");
 
 	// reset counters
 	self._m_stuck = 0;
+	self._m_idle = 0;
+	self._m_idle_notgt = 0;
+	self._m_idle_roam = 0;
 	self._m_lava = 0;
 	self._m_nodir = 0;
 	self._m_frames = 0;
@@ -287,6 +309,7 @@ void() bot_debug_metrics =
 	self._m_le_combat = 0;
 	self._m_goals_reached = 0;
 	self._m_le_roam = 0;
+	self._m_polys_seen = 0;
 };
 
 void() BotAI =
@@ -298,9 +321,7 @@ void() BotAI =
 		self.button2 = 0;
 		self.b_wishdir = '0 0 0';
 		self.target1 = self.enemy = world;
-		self._nav_goal_ent = world;
 		self.b_aim_delay = 0;
-		self.mouse_emu = '0 0 0';
 		self.b_strafe_dir = 0;
 		self.b_ambush_time = 0;
 		self.b_combat_time = 0;
@@ -331,6 +352,7 @@ void() BotAI =
 
 	self.button2 = 0;
 	self.button0 = 0;
+	self.b_wishdir = '0 0 0';
 
 	// --- perceive ---
 	bot_projectile_scan();
@@ -344,7 +366,8 @@ void() BotAI =
 		{
 			self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
-			bot_angle_set();
+			self.b_angle = vectoangles(self.b_wishdir);
+			bot_look();
 			return;
 		}
 	}
@@ -370,24 +393,87 @@ void() BotAI =
 	{
 		// get a goal if we don't have one
 		if (!self.target1)
-			bot_get(FALSE);
+		{
+			if (!item_head)
+				map_stuff();
+			self.target1 = nav_find_goal();
+		}
+
+		// clear target if item was picked up (model gone)
+		if (self.target1)
+			if (self.target1.model == string_null)
+			{
+				self.target1 = world;
+			}
 
 		if (self.target1)
-		{
-			frik_movetogoal();
-			bot_check_lost(self.target1);
-		}
+			bot_get();
+	}
+
+	// --- wall probe: trace from bbox corners along movement direction ---
+	{
+		local vector dir, rt, org;
+		local float blocked_left, blocked_right;
+
+		if (self.b_wishdir != '0 0 0')
+			dir = self.b_wishdir;
 		else
 		{
-			// no goal — stay put
-			self._m_move_mode = MM_ROAM;
-			self.b_wishdir = '0 0 0';
+			makevectors(self.angles);
+			dir = v_forward;
+		}
+		// right vector from direction (2D perpendicular)
+		makevectors(vectoangles(dir));
+		rt = v_right;
+
+		org = self.origin + dir * 64; // probe point 64u ahead
+		blocked_left = 0;
+		blocked_right = 0;
+
+		// trace down from hull top to hull bottom at each bbox corner
+		// compare floor height to previous frame — gradient > 18u = wall
+		traceline(org - rt * 16 + '0 0 32', org - rt * 16 - '0 0 24', TRUE, self);
+		if (trace_endpos_z - self._wp_floor_left > 18)
+			blocked_left = 1;
+		self._wp_floor_left = trace_endpos_z;
+
+		traceline(org + rt * 16 + '0 0 32', org + rt * 16 - '0 0 24', TRUE, self);
+		if (trace_endpos_z - self._wp_floor_right > 18)
+			blocked_right = 1;
+		self._wp_floor_right = trace_endpos_z;
+
+		if (blocked_left || blocked_right)
+		{
+			if (blocked_left && !blocked_right)
+				self.b_wishdir = normalize(dir + rt * 0.7);
+			else if (blocked_right && !blocked_left)
+				self.b_wishdir = normalize(dir - rt * 0.7);
+			else
+			{
+				// both sides blocked — stop, rotate via bot_look until clear
+				self.b_wishdir = '0 0 0';
+				self.b_angle_y = self.v_angle_y + 90;
+			}
+		}
+		else if (!self.target1)
+		{
+			// no target and clear ahead — walk forward to find new area
+			self.b_wishdir = dir;
 		}
 	}
 
-	bot_angle_set();
-	bot_debug_metrics();
+	// --- set look target ---
+	if (self.enemy)
+		bot_aim();
+	else if (self.b_wishdir != '0 0 0')
+	{
+		local vector _nav_view;
+		_nav_view = vectoangles(self.b_wishdir);
+		_nav_view_x = _nav_view_x * -1;
+		self.b_angle = _nav_view;
+	}
+	bot_look();
 
-	
-		bot_chat();
+	bot_debug_metrics();
+	bot_chat();
 };

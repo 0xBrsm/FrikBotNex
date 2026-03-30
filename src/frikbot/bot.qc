@@ -5,7 +5,7 @@
 .float	ishuman;
 .float	b_frags, b_shirt, b_pants;
 .float	ai_time, b_sound, missile_speed;
-.float	portal_time, b_skill;
+.float	b_skill;
 .float	b_num, b_chattime;
 .float b_strafe_time, b_strafe_dir;
 .float b_aim_delay;
@@ -51,7 +51,6 @@ float MM_ROAM    = 4;
 
 .float _botcam_hud_time;	// throttle for botcam debug overlay
 .float _botcam_beam_time;	// faster refresh for botcam beam temp ents
-.float _stuck_count;		// forward decl (defined in bot_move.qc)
 
 // ---- globals ----
 entity	item_head;
@@ -75,19 +74,17 @@ void(float whichteam, float whatbot, float whatskill) BotConnect;
 void(entity bot)		BotDisconnect;
 void(float clientno)		BotInvalidClientNo;
 float(vector weird)		frik_walkmove;
-void()				frik_movetogoal;
 void()				bot_build_movevect;
 
 // navmesh builtins (Detour pathfinding)
 float()					nav_ready = #80;
-vector(vector pos, vector target)	nav_move = #81;
-float(vector goal)			nav_path_start = #82;
-float(vector start, vector goal)	nav_route_cost = #83;
-vector(vector pos)			nav_path_steer = #84;
+vector(vector pos)			navigate = #84;
 vector(entity bot, float index)	nav_path_debug = #85;
+entity()				nav_find_goal = #86;
+void(entity e)				nav_block = #89;
+void(entity e)				nav_unblock = #90;
 float		nav_booted;
 
-.entity _nav_goal_ent;	// entity we last computed a path to
 
 // ai & misc
 float()				PickARandomBotProfile;
@@ -96,11 +93,8 @@ float(entity targ)		fov;
 float(float y1, float y2)	angcomp;
 float(entity targ)		fisible;
 vector(entity ent)		realorigin;
-void(entity ent)			target_drop;
-void(entity ent)			target_add;
 void()				KickABot;
 void()				BotImpulses;
-void(entity targ, float success) bot_lost;
 string(float r)			BotName;
 float(float v)			frik_anglemod;
 void() bot_chat;
@@ -125,9 +119,9 @@ void() bot_drop_enemy;
 // bot_goal.qc — item registry + goal system
 void() map_stuff;
 void() act_normal;
-float(entity thing) bot_stuff;
-float(entity thing) bot_want;
-void(float scope) bot_get;
+float(entity it) bot_has;
+float(entity it) bot_want;
+void() bot_get;
 
 // bot_ai.qc — main AI loop
 void() bot_handle_ai;

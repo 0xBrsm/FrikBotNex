@@ -44,7 +44,6 @@ this notice in its entirety.
 // ---- Stuck recovery ----
 .float _stuck_count;
 .vector _stuck_origin;
-.float _nav_diag_time;	// next nav diagnostic print time
 
 // ---- Sense fields ----
 
@@ -189,174 +188,199 @@ void() bot_build_movevect =
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
 };
 
+// When a stair waypoint sits on the side edge of the nav ramp, walk along the
+// blocking wall until we find the first tread instead of sliding into the side.
+float(vector along, vector wall_normal, float floor_z, float dist) bot_stair_probe =
+{
+	local vector trace_start, trace_end, probe;
+	local float rise;
+
+	trace_start = self.origin;
+	trace_start_z = trace_start_z - 20;
+	trace_end = self.origin + along * dist;
+	trace_end_z = trace_end_z - 20;
+	traceline(trace_start, trace_end, TRUE, self);
+	if (trace_fraction < 1)
+		return 0;
+
+	probe = self.origin + along * dist - wall_normal * 24;
+	if (pointcontents(probe + '0 0 8') == CONTENT_SOLID)
+		return 0;
+
+	trace_start = probe;
+	trace_start_z = trace_start_z + 24;
+	trace_end = probe;
+	trace_end_z = trace_end_z - 40;
+	traceline(trace_start, trace_end, TRUE, self);
+	if (trace_fraction == 1)
+		return 0;
+
+	rise = trace_endpos_z - floor_z;
+	if (rise < 6 || rise > 24)
+		return 0;
+
+	return rise;
+};
+
+vector(vector wall_normal, float step_height) bot_stair_entry_dir =
+{
+	local vector wall_tangent, trace_start, trace_end, choice;
+	local float floor_z, rise1, rise2, align;
+
+	choice = '0 0 0';
+
+	if (!(self.flags & FL_ONGROUND))
+		return choice;
+	if (step_height <= 4 || step_height >= 128)
+		return choice;
+
+	wall_normal_z = 0;
+	if (vlen(wall_normal) < 0.1)
+		return choice;
+	wall_normal = normalize(wall_normal);
+
+	trace_start = self.origin;
+	trace_start_z = trace_start_z + 24;
+	trace_end = self.origin;
+	trace_end_z = trace_end_z - 64;
+	traceline(trace_start, trace_end, TRUE, self);
+	if (trace_fraction == 1)
+		return choice;
+	floor_z = trace_endpos_z;
+
+	wall_tangent_x = wall_normal_y;
+	wall_tangent_y = wall_normal_x * -1;
+	wall_tangent_z = 0;
+
+	align = self.b_wishdir * wall_tangent;
+
+	// sweep along wall at increasing distances to find stair mouth
+	local float probe_dist;
+	probe_dist = 32;
+	while (probe_dist <= 224)
+	{
+		rise1 = bot_stair_probe(wall_tangent, wall_normal, floor_z, probe_dist);
+		rise2 = bot_stair_probe(wall_tangent * -1, wall_normal, floor_z, probe_dist);
+		if (rise1 || rise2)
+		{
+			if (rise1 && !rise2) return wall_tangent;
+			if (rise2 && !rise1) return wall_tangent * -1;
+			if (align >= 0) return wall_tangent;
+			return wall_tangent * -1;
+		}
+		probe_dist = probe_dist + 32;
+	}
+
+	return choice;
+};
+
 // ---- Navigation ----
 
-void() frik_movetogoal =
+// bot_get: follow cached path corridor to target item
+void() bot_get =
 {
-	local vector steer, goal_pos, diff;
-	local float step_height, path_result;
-	local string reason;
+	local vector wp, steer, diff;
+	local float step_height, link_type;
 
-	reason = string_null;
+	if (!self.target1)
+		return;
 
-	if (self.target1 == world)
+	// get next steering corner from dtPathCorridor
+	wp = navigate(self.origin);
+	if (wp == '0 0 0')
 	{
-		self.b_wishdir = '0 0 0';
-		reason = "no_target";
-
-		if (time > self._nav_diag_time)
-		{
-			self._nav_diag_time = time + 3;
-			bprint("["); bprint(self.netname); bprint("] NAV: ");
-			bprint(reason);
-			bprint(" pos="); bprint(vtos(self.origin));
-			bprint("\n");
-		}
+		self.target1 = world;
 		return;
 	}
 
-	goal_pos = realorigin(self.target1);
-	// brush triggers have center high above floor — use floor Z
-	if (self.target1.solid == SOLID_TRIGGER)
-		goal_pos_z = self.target1.absmin_z;
-
-	if (vlen(goal_pos - self.origin) < 25)
+	// decode off-mesh link type from Z encoding
+	link_type = 0;
+	if (wp_z > 9000)
 	{
-		self.b_wishdir = '0 0 0';
-		return;  // close enough — bot_check_lost handles success
+		link_type = wp_z - 10000;
+		wp_z = wp_z - 10000 - link_type;
 	}
 
-	// compute path when goal entity changes
-	if (self._nav_goal_ent != self.target1)
-	{
-		path_result = nav_path_start(goal_pos);
-		if (path_result > 0)
-			self._nav_goal_ent = self.target1;
-		else
-		{
-			reason = "path_fail";
-
-			if (time > self._nav_diag_time)
-			{
-				self._nav_diag_time = time + 3;
-				bprint("["); bprint(self.netname); bprint("] NAV: ");
-				bprint(reason);
-				bprint(" tgt="); bprint(self.target1.classname);
-				bprint(" pos="); bprint(vtos(self.origin));
-				bprint(" goal="); bprint(vtos(goal_pos));
-				bprint(" dist="); bprint(ftos(rint(vlen(goal_pos - self.origin))));
-				bprint("\n");
-			}
-
-			bot_lost(self.target1, FALSE);
-			return;
-		}
-	}
-
-	// get cached steer direction
-	steer = nav_path_steer(self.origin);
-	if (steer == '0 0 0')
-	{
-		self._nav_goal_ent = world;
-		self.b_wishdir = '0 0 0';
-		self._m_move_mode = MM_BEELINE;
-
-		if (vlen(goal_pos - self.origin) > 64)
-		{
-			reason = "stale";
-
-			if (time > self._nav_diag_time)
-			{
-				self._nav_diag_time = time + 3;
-				bprint("["); bprint(self.netname); bprint("] NAV: ");
-				bprint(reason);
-				bprint(" tgt="); bprint(self.target1.classname);
-				bprint(" pos="); bprint(vtos(self.origin));
-				bprint(" goal="); bprint(vtos(goal_pos));
-				bprint(" dist="); bprint(ftos(rint(vlen(goal_pos - self.origin))));
-				bprint("\n");
-			}
-
-			bot_lost(self.target1, FALSE);
-		}
-		return;
-	}
-
-	// Z encodes either height delta or link type (1000 + AI_*)
+	// compute direction to corner (3D for facing, 2D for movement)
+	steer = wp - self.origin;
 	step_height = steer_z;
-	steer_z = 0;
-	self.b_wishdir = steer;
-	self._m_move_mode = MM_NAV;
 
-	// off-mesh link traversal (steer_z = 1000 + AI_* link type)
-	if (step_height >= 1000)
+	// set b_wishdir with full 3D direction for look angle
+	if (vlen(steer) > 0.1)
+		self.b_wishdir = normalize(steer);
+	else
+		self.b_wishdir = '0 0 0';
+	if (self.target1 == self)
+		self._m_move_mode = MM_ROAM;
+	else
+		self._m_move_mode = MM_NAV;
+
+	// wall avoidance + stair finding
 	{
-		local float link_type;
-		link_type = step_height - 1000;
-
-		if (link_type == 2) // AI_JUMP: press jump
+		local vector trace_start, trace_end, wall_normal, slide, stair_dir;
+		trace_start = self.origin;
+		trace_start_z = trace_start_z - 20;
+		trace_end = trace_start + self.b_wishdir * 32;
+		traceline(trace_start, trace_end, TRUE, self);
+		if (trace_fraction < 1)
 		{
-			if (self.flags & FL_ONGROUND)
-				self.button2 = TRUE;
-		}
-		else if (link_type == 7) // AI_SUPER_JUMP: rocket jump
-		{
-			if (self.weapon != 32) // IT_ROCKET_LAUNCHER
-				self.impulse = 7; // select RL
-			else if (self.flags & FL_ONGROUND)
+			wall_normal = trace_plane_normal;
+			stair_dir = bot_stair_entry_dir(wall_normal, step_height);
+			if (stair_dir != '0 0 0')
+				self.b_wishdir = stair_dir;
+			else
 			{
-				self.button2 = TRUE; // jump
-				self.v_angle_x = self.b_angle_x = 80; // aim down
-				self.button0 = TRUE; // fire
+				wall_normal_z = 0;
+				slide = self.b_wishdir - wall_normal * (self.b_wishdir * wall_normal);
+				if (vlen(slide) > 0.1)
+					self.b_wishdir = normalize(slide);
 			}
 		}
-		else if (link_type == 8) // AI_SURFACE: swim up
-		{
-			if (self.waterlevel > 2)
-			{
-				self.b_wishdir = '0 0 1';
-				self.button2 = TRUE;
-			}
-		}
-		else if (link_type == 4 || link_type == 5) // AI_PLAT_BOTTOM / AI_RIDE_TRAIN
-		{
-			// Check if something is below us (platform/train)
-			traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-			if (trace_ent != world)
-			{
-				// On a mover — stop and ride
-				if (trace_ent.velocity != '0 0 0')
-					self.b_wishdir = '0 0 0';
-			}
-			// else: mover not here yet, keep walking toward link
-		}
-		else if (link_type == 6) // AI_DOORFLAG
-		{
-			// Check if a door is blocking our path
-			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
-			if (trace_ent != world && trace_ent.classname == "door")
-			{
-				// Door in the way — try to open it
-				if (trace_ent.health > 0)
-				{
-					// Shootable door — target it
-					self.enemy = trace_ent;
-					self.button0 = TRUE;
-				}
-				// else: touch-triggered, just walk into it
-			}
-		}
-		// AI_TELELINK (1): just walk in
-		// AI_DROP (3): just walk off
-		step_height = 0;
 	}
 
-	// jump when next waypoint is significantly above us (real ledge, not stairs)
-	// engine handles step-up to 18u via SV_WalkMove — only jump for actual ledges
-	if (step_height > 30 && self.flags & FL_ONGROUND)
-		self.button2 = TRUE;
+	// off-mesh link actions
+	if (link_type == 2) // AI_JUMP
+	{
+		if (self.flags & FL_ONGROUND)
+			self.button2 = TRUE;
+	}
+	else if (link_type == 7) // AI_SUPER_JUMP
+	{
+		if (self.weapon != 32)
+			self.impulse = 7;
+		else if (self.flags & FL_ONGROUND)
+		{
+			self.button2 = TRUE;
+			self.v_angle_x = self.b_angle_x = 80;
+			self.button0 = TRUE;
+		}
+	}
+	else if (link_type == 8) // AI_SURFACE
+	{
+		if (self.waterlevel > 2)
+		{
+			self.b_wishdir = '0 0 1';
+			self.button2 = TRUE;
+		}
+	}
+	else if (link_type == 4 || link_type == 5) // AI_PLAT / AI_TRAIN
+	{
+		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
+		if (trace_ent != world && trace_ent.velocity != '0 0 0')
+			self.b_wishdir = '0 0 0';
+	}
+	else if (link_type == 6) // AI_DOORFLAG
+	{
+		traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
+		if (trace_ent != world && trace_ent.classname == "door")
+			if (trace_ent.health > 0)
+			{
+				self.enemy = trace_ent;
+				self.button0 = TRUE;
+			}
+	}
 
-	// stuck detection: position hasn't changed
+	// stuck detection
 	diff = self.origin - self._stuck_origin;
 	diff_z = 0;
 	if (vlen(diff) < 1)
@@ -365,21 +389,17 @@ void() frik_movetogoal =
 		self._stuck_count = 0;
 	self._stuck_origin = self.origin;
 
-	// stuck recovery: rotate + jump to escape geometry
-	if (self._stuck_count > 10)
+	if (self._stuck_count > 5)
 	{
 		local vector dir;
 		dir = self.b_wishdir;
 		self.b_wishdir_x = dir_y;
 		self.b_wishdir_y = dir_x * -1;
 
-		if (self._stuck_count > 20 && self.flags & FL_ONGROUND)
-			self.button2 = TRUE;
-
-		if (self._stuck_count > 30)
+		if (self._stuck_count > 15)
 		{
 			self._stuck_count = 0;
-			bot_lost(self.target1, FALSE);
+			self.target1 = world;
 			return;
 		}
 	}

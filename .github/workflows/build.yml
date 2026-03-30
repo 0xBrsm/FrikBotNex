@@ -23,14 +23,27 @@ jobs:
         with:
           submodules: true
 
-      - name: Install build dependencies
+      - name: Prefetch upstream WinQuake
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc g++ make patch
+          mkdir -p src/build/tmp
+          FETCH_ONLY=1 UPSTREAM_QUAKE_DIR=src/build/tmp \
+            bash vendor/NexQuake/build/prepare-upstream.sh server
+          test -d src/build/tmp/WinQuake
 
-      - name: Build server
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build server in Wolfi container
         run: |
-          bash src/build/build-server.sh
+          docker buildx build \
+            --platform linux/arm64 \
+            --target server-artifact \
+            --output "type=local,dest=src/build/tmp/server-artifact" \
+            -f src/Dockerfile .
+          mkdir -p src/build/tmp/bin
+          cp src/build/tmp/server-artifact/nqserver src/build/tmp/bin/nqserver
+          chmod +x src/build/tmp/bin/nqserver
+          file src/build/tmp/bin/nqserver
           ls -lh src/build/tmp/bin/nqserver
 
       - name: Upload artifact

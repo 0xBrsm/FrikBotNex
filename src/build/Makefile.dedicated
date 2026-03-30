@@ -1,0 +1,316 @@
+#
+# FrikBotNex Server Makefile
+#
+# Extends NexQuake server build with:
+# - C++ support (nav_mesh.cpp, Recast/Detour libraries)
+# - Recast, Detour, DetourTileCache vendor libraries
+# - Bot navigation (nav_bot, nav_mesh, net_bot)
+#
+
+CC ?= cc
+CXX ?= c++
+
+CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null || echo unknown)
+
+PLATFORM ?=
+IS_ARMHF_TOOLCHAIN := $(findstring gnueabihf,$(CC_MACHINE))
+IS_I386_TOOLCHAIN := $(shell echo "$(CC_MACHINE)" | grep -E '(^|-)i[3-6]86(-|$$)' >/dev/null 2>&1 && echo yes)
+IS_X86_64_TOOLCHAIN := $(findstring x86_64,$(CC_MACHINE))
+
+ifeq ($(origin ARCH), undefined)
+  ifneq (,$(findstring aarch64,$(CC_MACHINE)))
+    ARCH := aarch64
+  else ifneq (,$(IS_ARMHF_TOOLCHAIN))
+    ARCH := armv7
+  else ifneq (,$(IS_X86_64_TOOLCHAIN))
+    ARCH := x86_64
+  else ifneq (,$(IS_I386_TOOLCHAIN))
+    ARCH := i386
+  else
+    ARCH := $(shell uname -m)
+  endif
+endif
+
+BITS ?= auto
+TARGET ?=
+BASE_CFLAGS = -std=gnu11 -Dstricmp=strcasecmp -fcommon -no-pie -DNO_X86_ASM=1 -Did386=0 -DIDGODS -fno-strict-aliasing
+RELEASE_CFLAGS = $(BASE_CFLAGS) -O3 -Wall
+DEBUG_CFLAGS = $(BASE_CFLAGS) -g -Wall
+LDFLAGS = -lm -rdynamic
+STATIC ?=
+
+ifneq ($(strip $(STATIC)),)
+  LDFLAGS += -static
+endif
+
+ifneq ($(strip $(PLATFORM)),)
+  ifeq ($(BITS),auto)
+    ifeq ($(PLATFORM),linux/arm/v7)
+      override BITS := 32
+      override TARGET := armhf
+    else ifeq ($(PLATFORM),linux/386)
+      override BITS := 32
+      override TARGET := i386
+    else ifeq ($(PLATFORM),linux/arm64)
+      override BITS := 64
+    else ifeq ($(PLATFORM),linux/amd64)
+      override BITS := 64
+    else
+      $(error Unsupported PLATFORM: $(PLATFORM))
+    endif
+  endif
+endif
+
+ifeq ($(BITS),auto)
+  ifeq ($(TARGET),armhf)
+    override BITS := 32
+  else ifeq ($(TARGET),i386)
+    override BITS := 32
+  else ifneq (,$(IS_ARMHF_TOOLCHAIN))
+    override BITS := 32
+    override TARGET := armhf
+  else ifneq (,$(IS_I386_TOOLCHAIN))
+    override BITS := 32
+    override TARGET := i386
+  else
+    override BITS := 64
+  endif
+endif
+
+ifeq ($(BITS),32)
+  ifeq ($(strip $(TARGET)),)
+    ifneq (,$(IS_ARMHF_TOOLCHAIN))
+      TARGET := armhf
+    else ifneq (,$(IS_I386_TOOLCHAIN))
+      TARGET := i386
+    else
+      $(error BITS=32 requires TARGET=armhf or TARGET=i386)
+    endif
+  endif
+  ifeq ($(TARGET),armhf)
+    ifeq (,$(IS_ARMHF_TOOLCHAIN))
+      $(error TARGET=armhf requires an armhf toolchain)
+    endif
+    BASE_CFLAGS += -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3-d16
+  else ifeq ($(TARGET),i386)
+    ifneq (,$(IS_X86_64_TOOLCHAIN))
+      BASE_CFLAGS += -m32
+      LDFLAGS += -m32
+    endif
+  endif
+endif
+
+BUILD_DIR = build-netquake-$(ARCH)-$(BITS)$(if $(strip $(TARGET)),-$(TARGET),)
+CFLAGS=$(RELEASE_CFLAGS)
+
+# ---- Recast/Detour vendor paths ----
+
+VENDOR_DIR = ../vendor/recastnavigation
+RECAST_INC = $(VENDOR_DIR)/Recast/Include
+DETOUR_INC = $(VENDOR_DIR)/Detour/Include
+TILECACHE_INC = $(VENDOR_DIR)/DetourTileCache/Include
+CROWD_INC = $(VENDOR_DIR)/DetourCrowd/Include
+RECAST_SRC = $(VENDOR_DIR)/Recast/Source
+DETOUR_SRC = $(VENDOR_DIR)/Detour/Source
+TILECACHE_SRC = $(VENDOR_DIR)/DetourTileCache/Source
+CROWD_SRC = $(VENDOR_DIR)/DetourCrowd/Source
+
+NAV_INCLUDES = -I$(RECAST_INC) -I$(DETOUR_INC) -I$(TILECACHE_INC) -I$(CROWD_INC)
+
+BASE_CXXFLAGS = -std=c++11 -fno-exceptions -fno-rtti -no-pie -fno-strict-aliasing $(NAV_INCLUDES)
+RELEASE_CXXFLAGS = $(BASE_CXXFLAGS) -O3 -Wall
+DEBUG_CXXFLAGS = $(BASE_CXXFLAGS) -g -Wall
+CXXFLAGS = $(RELEASE_CXXFLAGS)
+
+# ---- Object files ----
+
+# Quake engine (C)
+QUAKE_OBJS = \
+	$(BUILD_DIR)/chase.o \
+	$(BUILD_DIR)/cl_demo.o \
+	$(BUILD_DIR)/cl_input.o \
+	$(BUILD_DIR)/cl_main.o \
+	$(BUILD_DIR)/cl_parse.o \
+	$(BUILD_DIR)/cl_tent.o \
+	$(BUILD_DIR)/cmd.o \
+	$(BUILD_DIR)/common.o \
+	$(BUILD_DIR)/console.o \
+	$(BUILD_DIR)/crc.o \
+	$(BUILD_DIR)/cvar.o \
+	$(BUILD_DIR)/host.o \
+	$(BUILD_DIR)/host_cmd.o \
+	$(BUILD_DIR)/keys.o \
+	$(BUILD_DIR)/mathlib.o \
+	$(BUILD_DIR)/menu.o \
+	$(BUILD_DIR)/net_bsd.o \
+	$(BUILD_DIR)/net_dgrm.o \
+	$(BUILD_DIR)/net_loop.o \
+	$(BUILD_DIR)/net_main.o \
+	$(BUILD_DIR)/net_udp.o \
+	$(BUILD_DIR)/net_vcr.o \
+	$(BUILD_DIR)/pr_cmds.o \
+	$(BUILD_DIR)/pr_edict.o \
+	$(BUILD_DIR)/pr_exec.o \
+	$(BUILD_DIR)/r_part.o \
+	$(BUILD_DIR)/sbar.o \
+	$(BUILD_DIR)/sv_main.o \
+	$(BUILD_DIR)/sv_move.o \
+	$(BUILD_DIR)/sv_phys.o \
+	$(BUILD_DIR)/sv_user.o \
+	$(BUILD_DIR)/view.o \
+	$(BUILD_DIR)/wad.o \
+	$(BUILD_DIR)/world.o \
+	$(BUILD_DIR)/zone.o \
+	$(BUILD_DIR)/d_edge.o \
+	$(BUILD_DIR)/d_fill.o \
+	$(BUILD_DIR)/d_init.o \
+	$(BUILD_DIR)/d_modech.o \
+	$(BUILD_DIR)/d_part.o \
+	$(BUILD_DIR)/d_polyse.o \
+	$(BUILD_DIR)/d_scan.o \
+	$(BUILD_DIR)/d_sky.o \
+	$(BUILD_DIR)/d_sprite.o \
+	$(BUILD_DIR)/d_surf.o \
+	$(BUILD_DIR)/d_vars.o \
+	$(BUILD_DIR)/d_zpoint.o \
+	$(BUILD_DIR)/draw.o \
+	$(BUILD_DIR)/model.o \
+	$(BUILD_DIR)/nonintel.o \
+	$(BUILD_DIR)/r_aclip.o \
+	$(BUILD_DIR)/r_alias.o \
+	$(BUILD_DIR)/r_bsp.o \
+	$(BUILD_DIR)/r_draw.o \
+	$(BUILD_DIR)/r_edge.o \
+	$(BUILD_DIR)/r_efrag.o \
+	$(BUILD_DIR)/r_light.o \
+	$(BUILD_DIR)/r_main.o \
+	$(BUILD_DIR)/r_misc.o \
+	$(BUILD_DIR)/r_sky.o \
+	$(BUILD_DIR)/r_sprite.o \
+	$(BUILD_DIR)/r_surf.o \
+	$(BUILD_DIR)/r_vars.o \
+	$(BUILD_DIR)/screen.o \
+	$(BUILD_DIR)/cd_null.o \
+	$(BUILD_DIR)/in_null.o \
+	$(BUILD_DIR)/snd_null.o \
+	$(BUILD_DIR)/sys_linux.o \
+	$(BUILD_DIR)/vid_null.o
+
+# Bot navigation (C + C++)
+BOT_OBJS = \
+	$(BUILD_DIR)/net_bot.o \
+	$(BUILD_DIR)/nav_bot.o \
+	$(BUILD_DIR)/nav_mesh.o
+
+# Recast (C++)
+RECAST_OBJS = \
+	$(BUILD_DIR)/Recast.o \
+	$(BUILD_DIR)/RecastAlloc.o \
+	$(BUILD_DIR)/RecastArea.o \
+	$(BUILD_DIR)/RecastAssert.o \
+	$(BUILD_DIR)/RecastContour.o \
+	$(BUILD_DIR)/RecastFilter.o \
+	$(BUILD_DIR)/RecastLayers.o \
+	$(BUILD_DIR)/RecastMesh.o \
+	$(BUILD_DIR)/RecastMeshDetail.o \
+	$(BUILD_DIR)/RecastRasterization.o \
+	$(BUILD_DIR)/RecastRegion.o
+
+# Detour (C++)
+DETOUR_OBJS = \
+	$(BUILD_DIR)/DetourAlloc.o \
+	$(BUILD_DIR)/DetourAssert.o \
+	$(BUILD_DIR)/DetourCommon.o \
+	$(BUILD_DIR)/DetourNavMesh.o \
+	$(BUILD_DIR)/DetourNavMeshBuilder.o \
+	$(BUILD_DIR)/DetourNavMeshQuery.o \
+	$(BUILD_DIR)/DetourNode.o
+
+# DetourTileCache (C++)
+TILECACHE_OBJS = \
+	$(BUILD_DIR)/DetourTileCache.o \
+	$(BUILD_DIR)/DetourTileCacheBuilder.o
+
+# DetourCrowd (C++ — only dtPathCorridor)
+CROWD_OBJS = \
+	$(BUILD_DIR)/DetourPathCorridor.o
+
+OBJS = $(QUAKE_OBJS) $(BOT_OBJS) $(RECAST_OBJS) $(DETOUR_OBJS) $(TILECACHE_OBJS) $(CROWD_OBJS)
+
+# ---- Targets ----
+
+.PHONY: all clean debug info
+
+all: $(BUILD_DIR)/nqserver
+
+debug: CFLAGS=$(DEBUG_CFLAGS)
+debug: CXXFLAGS=$(DEBUG_CXXFLAGS)
+debug: all
+
+# Detect platform: Termux links with CC + libc++_shared, Linux links with CXX + static libstdc++
+IS_TERMUX := $(shell echo "$(CC_MACHINE)" | grep -q android && echo yes)
+
+$(BUILD_DIR)/nqserver: $(OBJS)
+	@echo "Linking NetQuake server (with navmesh)..."
+ifneq (,$(IS_TERMUX))
+	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS) -lc++_shared
+else
+	$(CXX) $(CFLAGS) -static-libstdc++ -o $@ $(OBJS) $(LDFLAGS)
+endif
+	@echo "Built: $@ ($(ARCH))"
+
+# ---- Compilation rules ----
+
+# Quake C sources
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CC  $<"
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Bot nav (C++ — accesses both Quake engine and Detour directly)
+$(BUILD_DIR)/nav_bot.o: nav_bot.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -I. -c $< -o $@
+
+# Nav mesh C++ source
+$(BUILD_DIR)/nav_mesh.o: nav_mesh.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -I. -c $< -o $@
+
+# Recast library
+$(BUILD_DIR)/%.o: $(RECAST_SRC)/%.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Detour library
+$(BUILD_DIR)/%.o: $(DETOUR_SRC)/%.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# DetourTileCache library
+$(BUILD_DIR)/%.o: $(TILECACHE_SRC)/%.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# DetourCrowd library (dtPathCorridor)
+$(BUILD_DIR)/%.o: $(CROWD_SRC)/%.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+info:
+	@echo "Architecture: $(ARCH)"
+	@echo "Build directory: $(BUILD_DIR)"
+	@echo "C compiler: $(CC)"
+	@echo "C++ compiler: $(CXX)"
+	@echo "CC machine: $(CC_MACHINE)"
+	@echo "CFLAGS: $(CFLAGS)"
+	@echo "CXXFLAGS: $(CXXFLAGS)"

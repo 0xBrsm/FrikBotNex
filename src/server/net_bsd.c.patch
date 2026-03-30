@@ -1,0 +1,38 @@
+--- net_bsd.c.orig	2026-03-27 23:40:48.525178193 -0400
++++ net_bsd.c	2026-03-27 23:42:52.129178254 -0400
+@@ -20,6 +20,7 @@
+ #include "quakedef.h"
+ 
+ #include "net_loop.h"
++#include "net_bot.h"
+ #include "net_dgrm.h"
+ 
+ net_driver_t net_drivers[MAX_NET_DRIVERS] =
+@@ -57,9 +58,26 @@
+ 	Datagram_Close,
+ 	Datagram_Shutdown
+ 	}
++	,
++	{
++	"Bot",
++	false,
++	Bot_Init,
++	Bot_Listen,
++	Bot_SearchForHosts,
++	Bot_Connect,
++	Bot_CheckNewConnections,
++	Bot_GetMessage,
++	Bot_SendMessage,
++	Bot_SendUnreliableMessage,
++	Bot_CanSendMessage,
++	Bot_CanSendUnreliableMessage,
++	Bot_Close,
++	Bot_Shutdown
++	}
+ };
+ 
+-int net_numdrivers = 2;
++int net_numdrivers = 3;
+ 
+ #include "net_udp.h"
+ 

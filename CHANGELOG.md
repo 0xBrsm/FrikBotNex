@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.2.0 — Navmesh Navigation (2026-03-26)
+## 0.3.0 — Detour Best Practice
+
+Rewrote navmesh integration to follow Detour best practices.
+
+- **dtPathCorridor** for path following — replaces manual waypoint tracking
+- **Single-pass build** — jump links detected from contour edges mid-pipeline
+- **Item poly cache** — cached findNearestPoly with 2u extents, direct findPath
+- **Goal arrival** — corridor pos vs target distance check fixes end-of-path detection
+- **Door blocking** — entity→poly mapping, post-path rejection, QC nav_block/nav_unblock
+- **Unified look** — bot_aim + bot_look with skill-scaled flick decay for combat and nav
+- **Gradient wall probe** — downward traces with frame-to-frame floor comparison
+- **C++ nav_bot** — removed wrapper functions, exposed runtime struct directly
+
+## 0.2.0 — Navmesh Navigation
 
 Replaced hand-placed waypoints with automatic Recast/Detour navmesh. Bots navigate any Quake map without pre-authored data.
 
@@ -13,7 +26,7 @@ Replaced hand-placed waypoints with automatic Recast/Detour navmesh. Bots naviga
 - **Removed waypoint system** — deleted bot_way.qc, bot_ed.qc, 37 waypoint files. Net -3,400 lines
 - **Self-contained build** — NexQuake + Recast/Detour as git submodules, CI workflow for ARM64
 
-## 0.1.0 — Initial Release (2026-03-21)
+## 0.1.0 — Initial Release
 
 FrikBotNex: QuakeC bot AI for Quake 1 deathmatch, evolved from FrikBot X++ (v0.10.2).
 

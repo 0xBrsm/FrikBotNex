@@ -17,10 +17,8 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 ;
 
 #define NAV_MESH_MAX_NEIGHBORS 16
-#define NAV_MESH_MAX_PATH_REFS 128
-#define NAV_MESH_MAX_STRAIGHT_POINTS 64
+#define NAV_MESH_MAX_PATH_REFS 512
 
-/* Link types — FrikBot AI_ naming convention */
 /* Link types — FrikBot AI_ naming convention */
 #define AI_TELELINK       1   /* teleporter: walk in, instant transport */
 #define AI_JUMP           2   /* jump up: press jump on approach */
@@ -38,6 +36,7 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define NAV_AREA_PLAT      3   /* platform/train (cost 5.0 — slow ride) */
 #define NAV_AREA_DOOR      4   /* door (cost 2.0 — brief wait) */
 #define NAV_AREA_RJ        5   /* rocket jump (cost 10.0 — expensive, risky) */
+#define NAV_AREA_NEAR_WALL 6   /* within walkable_radius of wall (cost 3.0) */
 
 typedef struct
 {
@@ -68,6 +67,78 @@ typedef struct
 	float	height_delta;		/* vertical change start→end */
 	float	wait_time;		/* seconds to wait (platforms, doors) */
 } nav_off_mesh_link_t;
+
+/* C++ only: close extern "C", include Detour, define struct */
+#ifdef __cplusplus
+} /* close extern "C" for Detour includes */
+#include "DetourNavMesh.h"
+#include "DetourNavMeshQuery.h"
+class dtQueryFilter;
+
+struct nav_mesh_runtime_s
+{
+	dtNavMesh *navmesh;
+	dtNavMeshQuery *query;
+	float query_half_extents[3];       /* wide: for items/goals */
+	float query_half_extents_tight[3]; /* tight: for agent position */
+	nav_off_mesh_link_t *links;
+	int link_count;
+
+	nav_mesh_runtime_s()
+		: navmesh(nullptr), query(nullptr), links(nullptr), link_count(0)
+	{
+		query_half_extents[0] = 64.0f;
+		query_half_extents[1] = 96.0f;
+		query_half_extents[2] = 64.0f;
+		query_half_extents_tight[0] = 32.0f;
+		query_half_extents_tight[1] = 56.0f;
+		query_half_extents_tight[2] = 32.0f;
+	}
+};
+
+void nav_mesh_setup_filter(dtQueryFilter *filter);
+
+/* Blocked poly table: paths through these polys are rejected post-findPath.
+   No virtual dispatch — just a flat array checked after pathfinding. */
+#define NAV_MAX_BLOCKED_POLYS 256
+
+struct nav_blocked_polys
+{
+	dtPolyRef polys[NAV_MAX_BLOCKED_POLYS];
+	int count;
+
+	nav_blocked_polys() : count(0) {}
+
+	void block(const dtPolyRef *refs, int n)
+	{
+		for (int i = 0; i < n && count < NAV_MAX_BLOCKED_POLYS; i++)
+			polys[count++] = refs[i];
+	}
+
+	void unblock(const dtPolyRef *refs, int n)
+	{
+		for (int i = 0; i < n; i++)
+			for (int j = 0; j < count; j++)
+				if (polys[j] == refs[i])
+				{
+					polys[j] = polys[--count];
+					break;
+				}
+	}
+
+	bool path_blocked(const dtPolyRef *path, int path_count) const
+	{
+		if (count == 0) return false;
+		for (int pi = 0; pi < path_count; pi++)
+			for (int bi = 0; bi < count; bi++)
+				if (path[pi] == polys[bi])
+					return true;
+		return false;
+	}
+};
+
+extern "C" { /* reopen for remaining C declarations */
+#endif
 
 typedef struct
 {
@@ -110,14 +181,9 @@ typedef struct
 	unsigned long long end_ref;
 	float start_point[3];
 	float end_point[3];
-	float travel_distance;
 	int	path_ref_count;
 	unsigned long long path_refs[NAV_MESH_MAX_PATH_REFS];
-	int	straight_point_count;
-	float straight_points[NAV_MESH_MAX_STRAIGHT_POINTS * 3];
-	unsigned char straight_flags[NAV_MESH_MAX_STRAIGHT_POINTS];
-	unsigned long long straight_refs[NAV_MESH_MAX_STRAIGHT_POINTS];
-	int	start_over_poly;	/* 1 if start is directly above a polygon */
+	int	start_over_poly;
 } nav_mesh_path_result_t;
 
 /* Query link metadata by userId (index into build-time link array).
@@ -130,12 +196,39 @@ const nav_off_mesh_link_t *nav_mesh_get_link(
 int nav_mesh_get_link_type(
 	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref);
 
+/* Heightfield probe: check if a point (Quake coords) is blocked by solid
+   geometry. Returns 1 if there is a solid span (wall) between floor_z and
+   floor_z + walkable_height at this XY. Returns 0 if clear/open. */
+typedef struct nav_heightfield_s nav_heightfield_t;
+int nav_heightfield_is_blocked(const nav_heightfield_t *hf, const float *point, float floor_z);
+/* Find the nearest walkable floor Z at a point.  Returns 1 if found, 0 if no walkable floor. */
+int nav_heightfield_floor_z(const nav_heightfield_t *hf, const float *point, float search_z, float *out_z);
+void nav_heightfield_free(nav_heightfield_t *hf);
+
+/* Boundary edge: an edge of the navmesh with no neighbor polygon. */
+typedef struct
+{
+	float	midpoint[3];	/* Quake coords */
+	float	normal[3];	/* outward 2D normal (Quake coords, Z=0) */
+} nav_mesh_boundary_edge_t;
+
+/* Callback invoked mid-build after contours are ready.
+   Receives boundary edges + heightfield; returns additional off-mesh links
+   to include in the final Detour build (single pass, no rebuild).
+   Return count of additional links, 0 for none.  Caller frees *out_links. */
+typedef int (*nav_mesh_link_callback_t)(
+	const nav_mesh_boundary_edge_t *edges, int edge_count,
+	const nav_heightfield_t *hf,
+	nav_off_mesh_link_t **out_links,
+	void *user_data);
+
 nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts, int vertex_count,
 	const int *tris, int triangle_count,
 	const nav_mesh_build_config_t *config,
 	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
 	nav_mesh_summary_t *summary,
+	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
 
 int nav_mesh_find_nearest(
@@ -155,30 +248,42 @@ int nav_mesh_find_path(
 	nav_mesh_path_result_t *result,
 	char *error, size_t error_size);
 
-/* Move from start toward end, sliding along walls.
-   Returns 1 and sets result_pos to the reachable position. */
-int nav_mesh_move_along_surface(
-	const nav_mesh_runtime_t *navmesh,
-	const float *start, const float *end,
-	float *result_pos,
-	char *error, size_t error_size);
-
-/* Boundary edge: an edge of the navmesh with no neighbor polygon. */
-typedef struct
-{
-	float	midpoint[3];	/* Quake coords */
-	float	normal[3];	/* outward 2D normal (Quake coords, Z=0) */
-} nav_mesh_boundary_edge_t;
-
-/* Collect all boundary edges from the navmesh.
-   Caller must free(*out_edges) when done. */
-int nav_mesh_collect_boundary_edges(
-	const nav_mesh_runtime_t *navmesh,
-	nav_mesh_boundary_edge_t **out_edges,
-	int *out_count);
-
 void nav_mesh_free_poly_records(nav_mesh_poly_record_t *records);
 void nav_mesh_destroy(nav_mesh_runtime_t *navmesh);
+
+/* ---- Path corridor (dtPathCorridor wrapper) ---- */
+
+typedef struct nav_corridor_s nav_corridor_t;
+
+nav_corridor_t *nav_corridor_create(int max_path);
+void nav_corridor_destroy(nav_corridor_t *c);
+
+/* Load a computed path into the corridor. */
+int nav_corridor_set(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	const float *start, const float *target,
+	const unsigned long long *path_refs, int path_count);
+
+/* Per-frame: find next corner to steer toward.
+   Returns 1 if a corner was found, 0 if path is empty.
+   corner_pos: Quake coords of the steering target.
+   corner_flags: DT_STRAIGHTPATH_* flags (off-mesh, end, etc.)
+   corner_ref: poly ref of the corner. */
+int navigate(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	const float *agent_pos,
+	float *corner_pos,
+	unsigned char *corner_flags,
+	unsigned long long *corner_ref);
+
+/* Advance past an off-mesh connection. Returns landing position. */
+int nav_corridor_offmesh(nav_corridor_t *c,
+	const nav_mesh_runtime_t *navmesh,
+	unsigned long long offmesh_ref,
+	float *start_pos, float *end_pos);
+
+/* Get corridor length (number of polys remaining). */
+int nav_corridor_length(const nav_corridor_t *c);
 
 #ifdef __cplusplus
 }

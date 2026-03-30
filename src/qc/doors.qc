@@ -77,6 +77,7 @@ void() door_hit_bottom =
 {
 	sound (self, CHAN_VOICE, self.noise1, 1, ATTN_NORM);
 	self.state = STATE_BOTTOM;
+	nav_block(self);
 };
 
 void() door_go_down =
@@ -107,6 +108,7 @@ void() door_go_up =
 
 	sound (self, CHAN_VOICE, self.noise2, 1, ATTN_NORM);
 	self.state = STATE_UP;
+	nav_unblock(self);
 	SUB_CalcMove (self.pos2, self.speed, door_hit_top);
 
 	SUB_UseTargets();

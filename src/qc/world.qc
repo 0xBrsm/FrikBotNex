@@ -355,6 +355,49 @@ void() StartFrame =
 	teamplay = cvar("teamplay");
 	skill = cvar("skill");
 	framecount = framecount + 1;
+
+	// navmesh debug: cycle through polys, draw nearby ones as particles
+	if (cvar("nav_debug"))
+	{
+		local vector pt, ppos;
+		local float i, drawn, dx, dy, dsq;
+		local entity p;
+
+		if (!nav_debug_total)
+		{
+			nav_ready();
+			pt = nav_path_debug(world, -1);
+			nav_debug_total = pt_x;
+		}
+
+		p = find(world, classname, "player");
+		if (p && nav_debug_total > 0)
+		{
+			ppos = p.origin;
+			drawn = 0;
+			i = 0;
+			while (i < nav_debug_total && drawn < 8)
+			{
+				pt = nav_path_debug(world, nav_debug_idx);
+				nav_debug_idx = nav_debug_idx + 1;
+				if (nav_debug_idx >= nav_debug_total)
+					nav_debug_idx = 0;
+
+				if (pt != '0 0 0')
+				{
+					dx = pt_x - ppos_x;
+					dy = pt_y - ppos_y;
+					dsq = dx * dx + dy * dy;
+					if (dsq < 262144)
+					{
+						particle(pt, '0 0 0', 73, 15);
+						drawn = drawn + 1;
+					}
+				}
+				i = i + 1;
+			}
+		}
+	}
 };
 
 /*

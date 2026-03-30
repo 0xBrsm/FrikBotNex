@@ -42,150 +42,7 @@ this notice in its entirety.
 
 */
 
-// ----- target_onstack: is this thing on my stack? returns slot or FALSE -----
 
-float(entity scot) target_onstack =
-{
-	if (scot == world)
-		return FALSE;
-	else if (self.target1 == scot)
-		return 1;
-	else if (self.target2 == scot)
-		return 2;
-	else if (self.target3 == scot)
-		return 3;
-	else if (self.target4 == scot)
-		return 4;
-	else
-		return FALSE;
-};
-
-// ----- target_add: shove something onto the LIFO stack -----
-
-void(entity ent) target_add =
-{
-	if (ent == world)
-		return;
-	if (target_onstack(ent))
-		return;
-	self.target4 = self.target3;
-	self.target3 = self.target2;
-	self.target2 = self.target1;
-	self.target1 = ent;
-	self.search_time = time + 5;
-};
-
-// ----- target_drop: yank it off, shift the rest down -----
-
-void(entity ent) target_drop =
-{
-	local float tg;
-	tg = target_onstack(ent);
-	if (tg == 1)
-	{
-		self.target1 = self.target2;
-		self.target2 = self.target3;
-		self.target3 = self.target4;
-		self.target4 = world;
-	}
-	else if (tg == 2)
-	{
-		self.target2 = self.target3;
-		self.target3 = self.target4;
-		self.target4 = world;
-	}
-	else if (tg == 3)
-	{
-		self.target3 = self.target4;
-		self.target4 = world;
-	}
-	else if (tg == 4)
-		self.target4 = world;
-};
-
-// ----- bot_lost: we lost our target. deal with it -----
-
-void(entity targ, float success) bot_lost =
-{
-	if (!targ)
-		return;
-
-	self._nav_goal_ent = world;
-	target_drop(targ);
-	if (targ.classname == "waypoint")
-		targ.b_sound = targ.b_sound - (targ.b_sound & ClientBitFlag(self.colormap - 1));
-
-	if (!success)
-	{
-		// mark item as temporarily unreachable for this bot (30s cooldown)
-		targ.b_sound = targ.b_sound | ClientBitFlag(self.colormap - 1);
-		self.target1 = world;
-	}
-	else
-	{
-		// reached it — clear blocked flag, count it
-		targ.b_sound = targ.b_sound - (targ.b_sound & ClientBitFlag(self.colormap - 1));
-		self._m_goals_reached = self._m_goals_reached + 1;
-		if (targ.classname == "item_artifact_invisibility")
-			if (self.items & IT_INVISIBILITY)
-				bot_start_topic(3);
-		if (targ.flags & FL_ITEM)
-		{
-			if (targ.model == string_null)
-				targ._last = world;
-			else
-				targ._last = self;
-		}
-	}
-	// NOTE: do NOT set targ.search_time on items here.
-	// that caused 10s stalls where bots ignored nearby pickups. sue me.
-};
-
-// ----- bot_check_lost: should I give up? spoiler: probably yes -----
-
-void(entity targ) bot_check_lost =
-{
-	local vector dist;
-	if (targ == world)
-		return;
-
-	if (targ.flags & FL_ITEM)
-	{
-		if (vlen(targ.origin - self.origin) < 32)
-			bot_lost(targ, TRUE);
-		else if (targ.model == string_null)
-			bot_lost(targ, TRUE);
-	}
-	else if (targ.classname == "player")
-	{
-		if (targ.health <= 0)
-			bot_lost(targ, TRUE);
-		else if ((coop) || (teamplay && targ.team == self.team))
-		{
-			if (vlen(targ.origin - self.origin) < 128)
-			{	bot_lost(targ, TRUE); return;	}
-			else if (!fisible(targ))
-				bot_lost(targ, FALSE);
-		}
-	}
-	else if (targ.classname == "func_button")
-	{
-		if (targ.frame)
-		{
-			bot_lost(targ, TRUE);
-			if (self.enemy == targ)
-				self.enemy = world;
-		}
-	}
-	else if ((targ.movetype == MOVETYPE_NONE) && (targ.solid == SOLID_TRIGGER))
-	{
-		if (targ.nextthink >= time)
-			bot_lost(targ, TRUE);
-	}
-
-	if (time > self.search_time)
-		bot_lost(targ, FALSE);
-};
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
@@ -377,10 +234,8 @@ void() map_stuff =
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_stuff — how full is the bot on this
-item's resource? 0 = empty/don't own, 1 = full.
-
-For weapons: 0 if don't own, ammo level if do.
+bot_has — how full is the bot on this item's resource?
+0 = empty/don't own, 1 = full/capped.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -394,63 +249,54 @@ float(float pool) bot_has_weapon_for =
 	return FALSE;
 };
 
-float(entity thing) bot_stuff =
+float(entity it) bot_has =
 {
 	local float remaining;
 
-	// weapons: 0 if don't own, ammo level if do
-	if (thing.item_res == RES_WEAPON)
-		if (!bot_has_weapon_for(thing.item_pool))
+	if (it.item_res == RES_WEAPON)
+		if (!bot_has_weapon_for(it.item_pool))
 			return 0;
 
-	// powerups: normalized time remaining (0 = don't have, 1 = just grabbed)
-	if (thing.item_pool == POOL_QUAD)
+	if (it.item_pool == POOL_QUAD)
 	{ remaining = self.super_damage_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
-	if (thing.item_pool == POOL_PENT)
+	if (it.item_pool == POOL_PENT)
 	{ remaining = self.invincible_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
-	if (thing.item_pool == POOL_RING)
+	if (it.item_pool == POOL_RING)
 	{ remaining = self.invisible_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
-	if (thing.item_pool == POOL_SUIT)
+	if (it.item_pool == POOL_SUIT)
 	{ remaining = self.radsuit_finished - time; if (remaining <= 0) return 0; return remaining / POWERUP_DUR; }
 
-	if (thing.classname == "item_health" && (thing.spawnflags & 2))
+	if (it.classname == "item_health" && (it.spawnflags & 2))
 		return self.health / 250;
-	if (thing.item_pool == POOL_HEALTH)	return self.health / CAP_HEALTH;
-	if (thing.item_pool == POOL_ARMOR)	return (self.armorvalue * self.armortype) / CAP_ARMOR_EHP;
-	if (thing.item_pool == POOL_ROCKETS)	return self.ammo_rockets / CAP_ROCKETS;
-	if (thing.item_pool == POOL_CELLS)	return self.ammo_cells / CAP_CELLS;
-	if (thing.item_pool == POOL_NAILS)	return self.ammo_nails / CAP_NAILS;
-	if (thing.item_pool == POOL_SHELLS)	return self.ammo_shells / CAP_SHELLS;
+	if (it.item_pool == POOL_HEALTH)	return self.health / CAP_HEALTH;
+	if (it.item_pool == POOL_ARMOR)		return (self.armorvalue * self.armortype) / CAP_ARMOR_EHP;
+	if (it.item_pool == POOL_ROCKETS)	return self.ammo_rockets / CAP_ROCKETS;
+	if (it.item_pool == POOL_CELLS)		return self.ammo_cells / CAP_CELLS;
+	if (it.item_pool == POOL_NAILS)		return self.ammo_nails / CAP_NAILS;
+	if (it.item_pool == POOL_SHELLS)	return self.ammo_shells / CAP_SHELLS;
 	return 0;
 };
 
 /*
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
-bot_want — reward profile
+bot_want — how much does the bot want this item?
 
-How much does this bot care about this item?
-Returns a weight based on two axes of bot state:
-
-survival = hp * (0.5 + ap * 0.5)
-combat   = best_weapon_tier * best_weapon_ammo
-
-Each category's weight = own_deficit * axis_deficit * param.
-Sibling resources contribute context without overriding.
-
-Three tunable params: A (survival), B (combat), C (powerups).
+Complete desire score (0-1), irrespective of distance.
+Combines: what the item gives (mag), what the bot has
+(bot_has), bot state (survival/combat axes), and
+personality weights.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
 
-float(entity thing) bot_want =
+float(entity it) bot_want =
 {
-	local float w;
-	local float hp, ap, survival, item_hp, item_survival;
-	local float best_tier, best_ammo, combat, pool_ammo;
+	local float has, need, w;
+	local float hp, ap, survival;
+	local float best_tier, best_ammo, combat;
 
-	// ---- bot state: two axes ----
-
+	// bot state: two axes
 	hp = self.health / CAP_HEALTH;
 	if (hp > 1) hp = 1;
 	ap = (self.armorvalue * self.armortype) / CAP_ARMOR_EHP;
@@ -473,45 +319,49 @@ float(entity thing) bot_want =
 	{	best_tier = 0.15; best_ammo = self.ammo_shells / CAP_SHELLS; }
 	combat = best_tier * best_ammo;
 
-	// ---- category weight (0-1) ----
+	// how much of this resource does the bot already have?
+	has = bot_has(it);
+	if (has < 0) has = 0;
+	if (has > 1) has = 1;
 
-	if (thing.item_res == RES_HEALTH)
+	// objective need: what the item gives vs what the bot has
+	if (it.item_res == RES_ARMOR)
+		need = it.item_mag - has;
+	else
+		need = it.item_mag * (1 - has) * (1 - has);
+	if (need < 0) need = 0;
+
+	// subjective weight: personality × situational urgency
+	if (it.item_res == RES_HEALTH)
 	{
-		item_hp = bot_stuff(thing);
-		if (item_hp < 0) item_hp = 0;
-		if (item_hp > 1) item_hp = 1;
-		item_survival = item_hp * (0.5 + ap * 0.5);
-		w = (1 - item_hp) * (1 - item_survival) * self.w_survival;
+		local float item_survival;
+		item_survival = has * (0.5 + ap * 0.5);
+		w = (1 - has) * (1 - item_survival) * self.w_survival;
 	}
-	else if (thing.item_res == RES_ARMOR)
+	else if (it.item_res == RES_ARMOR)
 		w = (1 - ap) * (1 - survival) * self.w_survival;
-	else if (thing.item_res == RES_WEAPON)
+	else if (it.item_res == RES_WEAPON)
 		w = (1 - best_tier) * (1 - combat) * self.w_combat;
-	else if (thing.item_res == RES_AMMO)
+	else if (it.item_res == RES_AMMO)
 	{
-		if (thing.item_pool == 0)
+		if (it.item_pool == 0)
 			w = (1 - combat) * self.w_scavenge;
-		else if (bot_has_weapon_for(thing.item_pool))
-		{
-			pool_ammo = bot_stuff(thing);
-			if (pool_ammo < 0) pool_ammo = 0;
-			if (pool_ammo > 1) pool_ammo = 1;
-			w = (1 - pool_ammo) * (1 - combat) * self.w_combat;
-		}
+		else if (bot_has_weapon_for(it.item_pool))
+			w = (1 - has) * (1 - combat) * self.w_combat;
 		else
 			w = (1 - combat) * self.w_scavenge * 0.1;
 	}
-	else if (thing.item_res == RES_POWERUP)
+	else if (it.item_res == RES_POWERUP)
 	{
-		if (thing.item_pool == POOL_QUAD)
+		if (it.item_pool == POOL_QUAD)
 			w = combat * survival * self.w_quad;
-		else if (thing.item_pool == POOL_PENT)
+		else if (it.item_pool == POOL_PENT)
 		{
 			w = 1 - survival;
 			if (combat > w) w = combat;
 			w = w * self.w_pent;
 		}
-		else if (thing.item_pool == POOL_RING)
+		else if (it.item_pool == POOL_RING)
 			w = combat * survival * self.w_ring;
 		else
 			w = 0.1;
@@ -519,117 +369,8 @@ float(entity thing) bot_want =
 	else
 		return 0;
 
-	return w;
+	return need * w;
 };
 
-/*
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-bot_get — pick the best item to go after
-
-Iterates the item registry. Scores each item:
-  score = raw_contribution * bot_want
-
-raw = additive: mag * (1 - bot_stuff)^2
-raw = armor:    max(0, mag - bot_stuff)
-bot_want                         — subjective profile
-
-scope TRUE = full map + pathfind
-scope FALSE = nearby (500u) + LOS
-
--=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-*/
-
-void(float scope) bot_get =
-{
-	local entity it, best;
-	local float score, bestscore, raw, has, mag, dist;
-
-	if (!item_head)
-		map_stuff();
-
-	// clear blocked flags every 30s so bots retry
-	if (time > self.portal_time)
-	{
-		local entity cl;
-		cl = item_head;
-		while (cl)
-		{
-			cl.b_sound = cl.b_sound - (cl.b_sound & ClientBitFlag(self.colormap - 1));
-			cl = cl._item_next;
-		}
-		self.portal_time = time + 30;
-	}
-
-	bestscore = 0;
-	best = world;
-	it = item_head;
-
-	while (it)
-	{
-		// skip items this bot recently failed to reach
-		if (it.b_sound & ClientBitFlag(self.colormap - 1))
-		{ it = it._item_next; continue; }
-
-		dist = vlen(it.origin - self.origin);
-
-		local float ncost;
-		ncost = nav_route_cost(self.origin, it.origin);
-		if (ncost < 0)
-		{ it = it._item_next; continue; }
-		dist = ncost;
-
-		if (!scope)
-			if (dist > 4000)
-			{ it = it._item_next; continue; }
-
-		// availability check
-		score = 0;
-		if (it.item_res)
-		{
-			if (it.flags & FL_ITEM)
-			{
-				if (it.model == string_null)
-				{
-					// picked up — stamp respawn time
-					if (it.item_respawn_at == 0 && it.item_respawn_dur > 0)
-						it.item_respawn_at = time + it.item_respawn_dur;
-				}
-				else
-				{
-					it.item_respawn_at = 0;
-					// raw contribution * profile weight * proximity
-					mag = it.item_mag;
-					has = bot_stuff(it);
-					if (has < 0) has = 0;
-					if (has > 1) has = 1;
-					if (it.item_res == RES_ARMOR)
-					{
-						raw = mag - has;
-						if (raw < 0) raw = 0;
-					}
-					else
-						raw = mag * (1 - has) * (1 - has);
-					score = raw * bot_want(it) * (400 / (400 + dist));
-				}
-			}
-		}
-
-		/* With navmesh routing, reachability replaces visibility.
-		   nav_route_cost already filtered unreachable items. */
-
-		if (score > bestscore)
-		{
-			bestscore = score;
-			best = it;
-		}
-		it = it._item_next;
-	}
-
-	if (best == world)
-		return;
-	if (target_onstack(best))
-		return;
-
-	target_add(best);
-};
+/* bot_get is now in bot_move.qc — follows cached path.
+   Goal selection moved to nav_find_goal (C builtin #86). */
