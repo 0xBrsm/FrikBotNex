@@ -397,12 +397,42 @@ void() BotAI =
 			if (!item_head)
 				map_stuff();
 			self.target1 = nav_find_goal();
+			// DBG: log goal acquisition result
+			if (!self.target1)
+			{
+				// no goal — walk in a random direction to find new area
+				makevectors('0 1 0' * (random() * 360));
+				self.b_wishdir = v_forward;
+				if (self._dbg_notgt_time != rint(time))
+				{
+					self._dbg_notgt_time = rint(time);
+					bprint("["); bprint(self.netname);
+					bprint("] DBG nav_find_goal => NONE at ");
+					bprint(vtos(self.origin)); bprint("\n");
+				}
+			}
+			else if (self.target1 == self)
+			{
+				bprint("["); bprint(self.netname);
+				bprint("] DBG nav_find_goal => ROAM\n");
+			}
+			else
+			{
+				bprint("["); bprint(self.netname);
+				bprint("] DBG nav_find_goal => ");
+				bprint(self.target1.classname);
+				bprint(" d="); bprint(ftos(rint(vlen(self.target1.origin - self.origin))));
+				bprint("\n");
+			}
 		}
 
 		// clear target if item was picked up (model gone)
 		if (self.target1)
 			if (self.target1.model == string_null)
 			{
+				bprint("["); bprint(self.netname);
+				bprint("] DBG target model gone: ");
+				bprint(self.target1.classname); bprint("\n");
 				self.target1 = world;
 			}
 

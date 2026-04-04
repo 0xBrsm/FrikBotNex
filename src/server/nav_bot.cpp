@@ -1313,8 +1313,7 @@ static void PF_nav_find_goal(void)
 			dtStatus ps = query->findPath(
 				bot_ref, roam_ref, bot_nearest, roam_rc,
 				&plain_filter, path, &path_count, NAV_MESH_MAX_PATH_REFS);
-			if (dtStatusSucceed(ps) && path_count > 0
-				&& !nav_blocked.path_blocked(path, path_count))
+			if (dtStatusSucceed(ps) && path_count > 0)
 			{
 				{
 					float rdx = roam_rc[0] - bot_nearest[0];

@@ -45,6 +45,12 @@ this notice in its entirety.
 .float _stuck_count;
 .vector _stuck_origin;
 
+// ---- Debug ----
+.float _dbg_notgt_time;   // throttle for no-target logging
+.float _dbg_circle_time;  // throttle for circle logging
+.vector _dbg_last_wp;     // last navigate() corner for circle detection
+.float _dbg_wp_same;      // frames with same corner
+
 // ---- Sense fields ----
 
 .float sense_time;
@@ -289,6 +295,12 @@ void() bot_get =
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
 	{
+		// DBG: corridor empty
+		bprint("["); bprint(self.netname);
+		bprint("] DBG navigate=0 => drop target ");
+		if (self.target1 == self) bprint("ROAM");
+		else if (self.target1) bprint(self.target1.classname);
+		bprint(" at "); bprint(vtos(self.origin)); bprint("\n");
 		self.target1 = world;
 		return;
 	}
@@ -299,6 +311,27 @@ void() bot_get =
 	{
 		link_type = wp_z - 10000;
 		wp_z = wp_z - 10000 - link_type;
+	}
+
+	// DBG: circle detection — same corner for many frames
+	if (vlen(wp - self._dbg_last_wp) < 4)
+		self._dbg_wp_same = self._dbg_wp_same + 1;
+	else
+		self._dbg_wp_same = 0;
+	self._dbg_last_wp = wp;
+
+	// no-progress abandon: same corner for 1s = unreachable
+	if (self._dbg_wp_same > 72)
+	{
+		bprint("["); bprint(self.netname);
+		bprint("] DBG NO_PROGRESS: abandon after 2s, wp="); bprint(vtos(wp));
+		bprint(" pos="); bprint(vtos(self.origin));
+		if (self.target1 == self) bprint(" tgt=ROAM");
+		else if (self.target1) { bprint(" tgt="); bprint(self.target1.classname); }
+		bprint("\n");
+		self._dbg_wp_same = 0;
+		self.target1 = world;
+		return;
 	}
 
 	// compute direction to corner (3D for facing, 2D for movement)
@@ -396,8 +429,26 @@ void() bot_get =
 		self.b_wishdir_x = dir_y;
 		self.b_wishdir_y = dir_x * -1;
 
+		if (self._stuck_count == 6) // log once at entry
+		{
+			local vector _sxy;
+			_sxy = wp - self.origin;
+			_sxy_z = 0;
+			bprint("["); bprint(self.netname);
+			bprint("] DBG STUCK(6): wp="); bprint(vtos(wp));
+			bprint(" pos="); bprint(vtos(self.origin));
+			bprint(" xy="); bprint(ftos(rint(vlen(_sxy))));
+			bprint(" wishdir="); bprint(vtos(self.b_wishdir));
+			if (self.target1 == self) bprint(" tgt=ROAM");
+			else if (self.target1) { bprint(" tgt="); bprint(self.target1.classname); }
+			bprint("\n");
+		}
+
 		if (self._stuck_count > 15)
 		{
+			bprint("["); bprint(self.netname);
+			bprint("] DBG STUCK(15) ABANDON at ");
+			bprint(vtos(self.origin)); bprint("\n");
 			self._stuck_count = 0;
 			self.target1 = world;
 			return;
