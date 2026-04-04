@@ -407,69 +407,198 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build compact heightfield");
 		return nullptr;
 	}
-	/* Adaptive erosion: erode up to walkableRadius but never narrow a
-	   corridor below min_corridor_half (in cells).  For each cell, find
-	   the local corridor half-width (max dist in neighborhood), then
-	   only erode if there's enough room to keep the minimum passage. */
+	/* Wall-only erosion: erode walkable area from walls but NOT from ledge
+	   edges.  Standard erosion kills narrow ledges (DM4 platforms above
+	   lava) because it treats drop-offs the same as walls.  We build a
+	   custom distance field seeded only from wall borders, then erode
+	   spans that are too close to walls.  Ledge-adjacent spans survive. */
 	if (!rcBuildDistanceField(&ctx, *guard.compact))
 	{
 		nav_set_error(error, error_size, "Failed to build distance field");
 		return nullptr;
 	}
-	if (0) /* Adaptive erosion disabled — breaks connectivity on multi-floor maps */
 	{
-		const int erosion_cells = rc_config.walkableRadius; /* target erosion in cells */
-		const int min_half = 3; /* minimum corridor half-width to preserve (cells=12u) */
-		/* dist field uses 2x cell units */
-		const unsigned short erosion_dist = (unsigned short)(erosion_cells * 2);
-		const unsigned short min_half_dist = (unsigned short)(min_half * 2);
 		const int w = guard.compact->width;
 		const int h = guard.compact->height;
+		const int span_count = guard.compact->spanCount;
+		const unsigned short erode_dist = (unsigned short)(rc_config.walkableRadius * 2);
 
-		for (int z = 0; z < h; ++z)
+		std::vector<unsigned short> wd(static_cast<size_t>(span_count), 0xffff);
+
+		/* Seed: distance 0 for walkable spans adjacent to a wall.
+		   A non-connected neighbor is a WALL if the neighbor column has
+		   solid geometry at our floor height.  It is a LEDGE if the
+		   neighbor column has open air at our floor height (drop-off). */
+		for (int y = 0; y < h; ++y)
 		{
 			for (int x = 0; x < w; ++x)
 			{
-				const rcCompactCell &c = guard.compact->cells[x + z * w];
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
 				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
 				{
 					if (guard.compact->areas[si] == RC_NULL_AREA)
 						continue;
-					if (guard.compact->dist[si] >= erosion_dist)
-						continue; /* far from wall — no erosion needed */
+					const rcCompactSpan &s = guard.compact->spans[si];
 
-					/* Find max dist in IMMEDIATE neighborhood (1 cell radius).
-					   Larger radius sees through narrow passages into wider
-					   areas, inflating local_max and over-eroding. */
-					unsigned short local_max = 0;
-					int rx0 = (x - 1 > 0) ? x - 1 : 0;
-					int rx1 = (x + 1 < w) ? x + 1 : w - 1;
-					int rz0 = (z - 1 > 0) ? z - 1 : 0;
-					int rz1 = (z + 1 < h) ? z + 1 : h - 1;
-					for (int nz = rz0; nz <= rz1; ++nz)
+					for (int dir = 0; dir < 4; ++dir)
 					{
-						for (int nx = rx0; nx <= rx1; ++nx)
+						if (rcGetCon(s, dir) != RC_NOT_CONNECTED)
+							continue;
+
+						const int nx = x + rcGetDirOffsetX(dir);
+						const int ny = y + rcGetDirOffsetY(dir);
+
+						if (nx < 0 || nx >= w || ny < 0 || ny >= h)
 						{
-							const rcCompactCell &nc = guard.compact->cells[nx + nz * w];
-							for (int ni = (int)nc.index, nn = (int)(nc.index + nc.count); ni < nn; ++ni)
+							wd[si] = 0; /* out of bounds = wall */
+							goto next_span_seed;
+						}
+
+						const rcCompactCell &nc = guard.compact->cells[nx + ny * w];
+						if (nc.count == 0)
+						{
+							wd[si] = 0; /* no spans = solid = wall */
+							goto next_span_seed;
+						}
+
+						/* Check if any neighbor span has open space at our
+						   floor height.  If yes → ledge.  If no → wall. */
+						bool is_open = false;
+						for (int ni = (int)nc.index, nn = (int)(nc.index + nc.count); ni < nn; ++ni)
+						{
+							const rcCompactSpan &ns = guard.compact->spans[ni];
+							if (s.y >= ns.y && s.y < (int)ns.y + (int)ns.h)
 							{
-								if (guard.compact->areas[ni] != RC_NULL_AREA
-									&& guard.compact->dist[ni] > local_max)
-									local_max = guard.compact->dist[ni];
+								is_open = true;
+								break;
 							}
 						}
+						if (!is_open)
+						{
+							wd[si] = 0; /* solid at our height = wall */
+							goto next_span_seed;
+						}
 					}
-
-					/* Erode if corridor is wide enough to keep min passage */
-					unsigned short max_erode = (local_max > min_half_dist)
-						? (local_max - min_half_dist) : 0;
-					if (max_erode > erosion_dist)
-						max_erode = erosion_dist;
-					if (guard.compact->dist[si] < max_erode)
-						guard.compact->areas[si] = RC_NULL_AREA;
+					next_span_seed:;
 				}
 			}
 		}
+
+		/* 2-pass Chamfer distance transform (matches Recast's internal
+		   algorithm: cardinal weight 2, diagonal weight 3). */
+
+		/* Pass 1: top-left → bottom-right */
+		for (int y = 0; y < h; ++y)
+		{
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+				{
+					const rcCompactSpan &s = guard.compact->spans[si];
+
+					if (rcGetCon(s, 0) != RC_NOT_CONNECTED)
+					{
+						const int ax = x + rcGetDirOffsetX(0);
+						const int ay = y + rcGetDirOffsetY(0);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, 0);
+						if (wd[ai] + 2 < wd[si])
+							wd[si] = wd[ai] + 2;
+
+						const rcCompactSpan &as = guard.compact->spans[ai];
+						if (rcGetCon(as, 3) != RC_NOT_CONNECTED)
+						{
+							const int bx = ax + rcGetDirOffsetX(3);
+							const int by = ay + rcGetDirOffsetY(3);
+							const int bi = (int)guard.compact->cells[bx + by * w].index + rcGetCon(as, 3);
+							if (wd[bi] + 3 < wd[si])
+								wd[si] = wd[bi] + 3;
+						}
+					}
+					if (rcGetCon(s, 3) != RC_NOT_CONNECTED)
+					{
+						const int ax = x + rcGetDirOffsetX(3);
+						const int ay = y + rcGetDirOffsetY(3);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, 3);
+						if (wd[ai] + 2 < wd[si])
+							wd[si] = wd[ai] + 2;
+
+						const rcCompactSpan &as = guard.compact->spans[ai];
+						if (rcGetCon(as, 2) != RC_NOT_CONNECTED)
+						{
+							const int bx = ax + rcGetDirOffsetX(2);
+							const int by = ay + rcGetDirOffsetY(2);
+							const int bi = (int)guard.compact->cells[bx + by * w].index + rcGetCon(as, 2);
+							if (wd[bi] + 3 < wd[si])
+								wd[si] = wd[bi] + 3;
+						}
+					}
+				}
+			}
+		}
+
+		/* Pass 2: bottom-right → top-left */
+		for (int y = h - 1; y >= 0; --y)
+		{
+			for (int x = w - 1; x >= 0; --x)
+			{
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+				{
+					const rcCompactSpan &s = guard.compact->spans[si];
+
+					if (rcGetCon(s, 2) != RC_NOT_CONNECTED)
+					{
+						const int ax = x + rcGetDirOffsetX(2);
+						const int ay = y + rcGetDirOffsetY(2);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, 2);
+						if (wd[ai] + 2 < wd[si])
+							wd[si] = wd[ai] + 2;
+
+						const rcCompactSpan &as = guard.compact->spans[ai];
+						if (rcGetCon(as, 1) != RC_NOT_CONNECTED)
+						{
+							const int bx = ax + rcGetDirOffsetX(1);
+							const int by = ay + rcGetDirOffsetY(1);
+							const int bi = (int)guard.compact->cells[bx + by * w].index + rcGetCon(as, 1);
+							if (wd[bi] + 3 < wd[si])
+								wd[si] = wd[bi] + 3;
+						}
+					}
+					if (rcGetCon(s, 1) != RC_NOT_CONNECTED)
+					{
+						const int ax = x + rcGetDirOffsetX(1);
+						const int ay = y + rcGetDirOffsetY(1);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, 1);
+						if (wd[ai] + 2 < wd[si])
+							wd[si] = wd[ai] + 2;
+
+						const rcCompactSpan &as = guard.compact->spans[ai];
+						if (rcGetCon(as, 0) != RC_NOT_CONNECTED)
+						{
+							const int bx = ax + rcGetDirOffsetX(0);
+							const int by = ay + rcGetDirOffsetY(0);
+							const int bi = (int)guard.compact->cells[bx + by * w].index + rcGetCon(as, 0);
+							if (wd[bi] + 3 < wd[si])
+								wd[si] = wd[bi] + 3;
+						}
+					}
+				}
+			}
+		}
+
+		/* Erode spans too close to walls */
+		int eroded = 0;
+		for (int si = 0; si < span_count; ++si)
+		{
+			if (guard.compact->areas[si] != RC_NULL_AREA && wd[si] < erode_dist)
+			{
+				guard.compact->areas[si] = RC_NULL_AREA;
+				eroded++;
+			}
+		}
+		fprintf(stderr, "Nav: wall-only erosion: %d spans eroded (radius=%d)\n",
+			eroded, rc_config.walkableRadius);
 	}
 	if (!rcBuildRegions(&ctx, *guard.compact, 0, rc_config.minRegionArea, rc_config.mergeRegionArea))
 	{
