@@ -108,6 +108,19 @@ static float nav_xy_dist_sq(const float *a, const float *b)
 	return dx * dx + dy * dy;
 }
 
+/* Trace vertically from top_z down to bot_z at a given XY position.
+   Returns 1 if clear (no solid geometry in between), 0 if blocked. */
+static int nav_trace_clear_vertical(const float *xy, float top_z, float bot_z)
+{
+	vec3_t trace_start, trace_end, zero = {0, 0, 0};
+	trace_t trace;
+
+	trace_start[0] = xy[0]; trace_start[1] = xy[1]; trace_start[2] = top_z;
+	trace_end[0] = xy[0]; trace_end[1] = xy[1]; trace_end[2] = bot_z;
+	trace = SV_Move(trace_start, zero, zero, trace_end, MOVE_NOMONSTERS, NULL);
+	return !trace.allsolid && !trace.startsolid && trace.fraction >= 0.99f;
+}
+
 static int nav_trace_clear_at_height(const float *start, const float *end, float z, edict_t *passedict)
 {
 	vec3_t trace_start;
@@ -651,12 +664,38 @@ static int nav_link_callback(
 			float floors[8];
 			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
 			int nfloors = nav_heightfield_floors_below(hf, mid, mid[2], min_z, floors, 8);
+			{
+				static int dbg2 = 0;
+				if (dbg2 < 5 && nfloors > 0)
+				{
+					fprintf(stderr, "Nav: edge xy=(%.0f %.0f) z=%.0f found %d floors below:",
+						mid[0], mid[1], mid[2], nfloors);
+					for (int di = 0; di < nfloors; di++)
+						fprintf(stderr, " %.0f", floors[di]);
+					fprintf(stderr, "\n");
+					dbg2++;
+				}
+			}
 
 			for (int fi = 0; fi < nfloors; fi++)
 			{
 				float drop_height = mid[2] - floors[fi];
 				if (drop_height < NAV_JUMP_HEIGHT_MIN)
 					continue;
+
+				/* Verify drop is physically possible: check that there's no solid
+				   span blocking the fall at a point outward from the edge.
+				   Uses heightfield (no BSP height offset issues). */
+				{
+					float probe_xy[3];
+					probe_xy[0] = mid[0] + norm[0] * 16.0f;
+					probe_xy[1] = mid[1] + norm[1] * 16.0f;
+					probe_xy[2] = 0;
+					if (nav_heightfield_is_blocked(hf, probe_xy, mid[2]))
+						continue; /* wall at edge height blocks the drop */
+					if (nav_heightfield_is_blocked(hf, probe_xy, floors[fi]))
+						continue; /* solid at landing height */
+				}
 
 				/* Fall time from physics: t = sqrt(2h / g) */
 				float fall_time = sqrtf(2.0f * drop_height / gravity);
