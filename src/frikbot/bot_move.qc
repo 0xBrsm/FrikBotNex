@@ -41,15 +41,12 @@ this notice in its entirety.
 
 */
 
-// ---- Stuck recovery ----
-.float _stuck_count;
-.vector _stuck_origin;
+// ---- Progress tracking (single recovery system) ----
+.float _progress_best;    // best XY distance to corner seen this goal
+.float _progress_stall;   // frames with no improvement
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
-.float _dbg_circle_time;  // throttle for circle logging
-.vector _dbg_last_wp;     // last navigate() corner for circle detection
-.float _dbg_wp_same;      // frames with same corner
 
 // ---- Sense fields ----
 
@@ -194,113 +191,22 @@ void() bot_build_movevect =
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
 };
 
-// When a stair waypoint sits on the side edge of the nav ramp, walk along the
-// blocking wall until we find the first tread instead of sliding into the side.
-float(vector along, vector wall_normal, float floor_z, float dist) bot_stair_probe =
-{
-	local vector trace_start, trace_end, probe;
-	local float rise;
-
-	trace_start = self.origin;
-	trace_start_z = trace_start_z - 20;
-	trace_end = self.origin + along * dist;
-	trace_end_z = trace_end_z - 20;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction < 1)
-		return 0;
-
-	probe = self.origin + along * dist - wall_normal * 24;
-	if (pointcontents(probe + '0 0 8') == CONTENT_SOLID)
-		return 0;
-
-	trace_start = probe;
-	trace_start_z = trace_start_z + 24;
-	trace_end = probe;
-	trace_end_z = trace_end_z - 40;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction == 1)
-		return 0;
-
-	rise = trace_endpos_z - floor_z;
-	if (rise < 6 || rise > 24)
-		return 0;
-
-	return rise;
-};
-
-vector(vector wall_normal, float step_height) bot_stair_entry_dir =
-{
-	local vector wall_tangent, trace_start, trace_end, choice;
-	local float floor_z, rise1, rise2, align;
-
-	choice = '0 0 0';
-
-	if (!(self.flags & FL_ONGROUND))
-		return choice;
-	if (step_height <= 4 || step_height >= 128)
-		return choice;
-
-	wall_normal_z = 0;
-	if (vlen(wall_normal) < 0.1)
-		return choice;
-	wall_normal = normalize(wall_normal);
-
-	trace_start = self.origin;
-	trace_start_z = trace_start_z + 24;
-	trace_end = self.origin;
-	trace_end_z = trace_end_z - 64;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction == 1)
-		return choice;
-	floor_z = trace_endpos_z;
-
-	wall_tangent_x = wall_normal_y;
-	wall_tangent_y = wall_normal_x * -1;
-	wall_tangent_z = 0;
-
-	align = self.b_wishdir * wall_tangent;
-
-	// sweep along wall at increasing distances to find stair mouth
-	local float probe_dist;
-	probe_dist = 32;
-	while (probe_dist <= 224)
-	{
-		rise1 = bot_stair_probe(wall_tangent, wall_normal, floor_z, probe_dist);
-		rise2 = bot_stair_probe(wall_tangent * -1, wall_normal, floor_z, probe_dist);
-		if (rise1 || rise2)
-		{
-			if (rise1 && !rise2) return wall_tangent;
-			if (rise2 && !rise1) return wall_tangent * -1;
-			if (align >= 0) return wall_tangent;
-			return wall_tangent * -1;
-		}
-		probe_dist = probe_dist + 32;
-	}
-
-	return choice;
-};
-
 // ---- Navigation ----
 
-// bot_get: follow cached path corridor to target item
+// bot_get: follow cached path corridor to target item.
+// Single-authority steering: navigate() returns corner, bot walks toward it.
+// Single recovery: if no progress for 1 second, abandon goal.
 void() bot_get =
 {
-	local vector wp, steer, diff;
-	local float step_height, link_type;
+	local vector wp, steer;
+	local float link_type;
 
 	if (!self.target1)
 		return;
 
-	// get next steering corner from dtPathCorridor
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
 	{
-		// DBG: corridor empty
-		bprint("["); bprint(self.netname);
-		bprint("] DBG navigate=0 => drop target ");
-		if (self.target1 == self) bprint("ROAM");
-		else if (self.target1) bprint(self.target1.classname);
-		bprint(" at "); bprint(vtos(self.origin)); bprint("\n");
 		self.target1 = world;
 		return;
 	}
@@ -313,32 +219,8 @@ void() bot_get =
 		wp_z = wp_z - 10000 - link_type;
 	}
 
-	// DBG: circle detection — same corner for many frames
-	if (vlen(wp - self._dbg_last_wp) < 4)
-		self._dbg_wp_same = self._dbg_wp_same + 1;
-	else
-		self._dbg_wp_same = 0;
-	self._dbg_last_wp = wp;
-
-	// no-progress abandon: same corner for 1s = unreachable
-	if (self._dbg_wp_same > 72)
-	{
-		bprint("["); bprint(self.netname);
-		bprint("] DBG NO_PROGRESS: abandon after 2s, wp="); bprint(vtos(wp));
-		bprint(" pos="); bprint(vtos(self.origin));
-		if (self.target1 == self) bprint(" tgt=ROAM");
-		else if (self.target1) { bprint(" tgt="); bprint(self.target1.classname); }
-		bprint("\n");
-		self._dbg_wp_same = 0;
-		self.target1 = world;
-		return;
-	}
-
-	// compute direction to corner (3D for facing, 2D for movement)
+	// single-authority steering: walk toward the nav corner
 	steer = wp - self.origin;
-	step_height = steer_z;
-
-	// set b_wishdir with full 3D direction for look angle
 	if (vlen(steer) > 0.1)
 		self.b_wishdir = normalize(steer);
 	else
@@ -347,29 +229,6 @@ void() bot_get =
 		self._m_move_mode = MM_ROAM;
 	else
 		self._m_move_mode = MM_NAV;
-
-	// wall avoidance + stair finding
-	{
-		local vector trace_start, trace_end, wall_normal, slide, stair_dir;
-		trace_start = self.origin;
-		trace_start_z = trace_start_z - 20;
-		trace_end = trace_start + self.b_wishdir * 32;
-		traceline(trace_start, trace_end, TRUE, self);
-		if (trace_fraction < 1)
-		{
-			wall_normal = trace_plane_normal;
-			stair_dir = bot_stair_entry_dir(wall_normal, step_height);
-			if (stair_dir != '0 0 0')
-				self.b_wishdir = stair_dir;
-			else
-			{
-				wall_normal_z = 0;
-				slide = self.b_wishdir - wall_normal * (self.b_wishdir * wall_normal);
-				if (vlen(slide) > 0.1)
-					self.b_wishdir = normalize(slide);
-			}
-		}
-	}
 
 	// off-mesh link actions
 	if (link_type == 2) // AI_JUMP
@@ -413,43 +272,26 @@ void() bot_get =
 			}
 	}
 
-	// stuck detection
-	diff = self.origin - self._stuck_origin;
-	diff_z = 0;
-	if (vlen(diff) < 1)
-		self._stuck_count = self._stuck_count + 1;
-	else
-		self._stuck_count = 0;
-	self._stuck_origin = self.origin;
-
-	if (self._stuck_count > 5)
+	// progress check: not getting closer to corner? abandon.
 	{
-		local vector dir;
-		dir = self.b_wishdir;
-		self.b_wishdir_x = dir_y;
-		self.b_wishdir_y = dir_x * -1;
+		local vector flat;
+		local float xy_dist;
+		flat = wp - self.origin;
+		flat_z = 0;
+		xy_dist = vlen(flat);
 
-		if (self._stuck_count == 6) // log once at entry
+		if (xy_dist < self._progress_best - 1)
 		{
-			local vector _sxy;
-			_sxy = wp - self.origin;
-			_sxy_z = 0;
-			bprint("["); bprint(self.netname);
-			bprint("] DBG STUCK(6): wp="); bprint(vtos(wp));
-			bprint(" pos="); bprint(vtos(self.origin));
-			bprint(" xy="); bprint(ftos(rint(vlen(_sxy))));
-			bprint(" wishdir="); bprint(vtos(self.b_wishdir));
-			if (self.target1 == self) bprint(" tgt=ROAM");
-			else if (self.target1) { bprint(" tgt="); bprint(self.target1.classname); }
-			bprint("\n");
+			self._progress_best = xy_dist;
+			self._progress_stall = 0;
 		}
+		else
+			self._progress_stall = self._progress_stall + 1;
 
-		if (self._stuck_count > 15)
+		if (self._progress_stall > (1 / cvar("sys_ticrate")))
 		{
-			bprint("["); bprint(self.netname);
-			bprint("] DBG STUCK(15) ABANDON at ");
-			bprint(vtos(self.origin)); bprint("\n");
-			self._stuck_count = 0;
+			self._progress_stall = 0;
+			self._progress_best = 99999;
 			self.target1 = world;
 			return;
 		}

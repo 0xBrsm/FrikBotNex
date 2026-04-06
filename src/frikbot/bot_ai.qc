@@ -189,10 +189,6 @@ float nav_debug_next;
 .float _m_polys_seen;  // unique polys visited (coverage proxy)
 .float _m_last_poly;   // last poly ref seen (for change detection)
 
-// wall probe: previous frame floor heights for gradient detection
-.float _wp_floor_left;
-.float _wp_floor_right;
-
 void() bot_server_spawn =
 {
 	local float n;
@@ -397,99 +393,27 @@ void() BotAI =
 			if (!item_head)
 				map_stuff();
 			self.target1 = nav_find_goal();
-			// DBG: log goal acquisition result
-			if (!self.target1)
+			if (self.target1)
+			{
+				// reset progress tracker for new goal
+				self._progress_best = 99999;
+				self._progress_stall = 0;
+			}
+			else
 			{
 				// no goal — walk in a random direction to find new area
 				makevectors('0 1 0' * (random() * 360));
 				self.b_wishdir = v_forward;
-				if (self._dbg_notgt_time != rint(time))
-				{
-					self._dbg_notgt_time = rint(time);
-					bprint("["); bprint(self.netname);
-					bprint("] DBG nav_find_goal => NONE at ");
-					bprint(vtos(self.origin)); bprint("\n");
-				}
-			}
-			else if (self.target1 == self)
-			{
-				bprint("["); bprint(self.netname);
-				bprint("] DBG nav_find_goal => ROAM\n");
-			}
-			else
-			{
-				bprint("["); bprint(self.netname);
-				bprint("] DBG nav_find_goal => ");
-				bprint(self.target1.classname);
-				bprint(" d="); bprint(ftos(rint(vlen(self.target1.origin - self.origin))));
-				bprint("\n");
 			}
 		}
 
 		// clear target if item was picked up (model gone)
 		if (self.target1)
 			if (self.target1.model == string_null)
-			{
-				bprint("["); bprint(self.netname);
-				bprint("] DBG target model gone: ");
-				bprint(self.target1.classname); bprint("\n");
 				self.target1 = world;
-			}
 
 		if (self.target1)
 			bot_get();
-	}
-
-	// --- wall probe: trace from bbox corners along movement direction ---
-	{
-		local vector dir, rt, org;
-		local float blocked_left, blocked_right;
-
-		if (self.b_wishdir != '0 0 0')
-			dir = self.b_wishdir;
-		else
-		{
-			makevectors(self.angles);
-			dir = v_forward;
-		}
-		// right vector from direction (2D perpendicular)
-		makevectors(vectoangles(dir));
-		rt = v_right;
-
-		org = self.origin + dir * 64; // probe point 64u ahead
-		blocked_left = 0;
-		blocked_right = 0;
-
-		// trace down from hull top to hull bottom at each bbox corner
-		// compare floor height to previous frame — gradient > 18u = wall
-		traceline(org - rt * 16 + '0 0 32', org - rt * 16 - '0 0 24', TRUE, self);
-		if (trace_endpos_z - self._wp_floor_left > 18)
-			blocked_left = 1;
-		self._wp_floor_left = trace_endpos_z;
-
-		traceline(org + rt * 16 + '0 0 32', org + rt * 16 - '0 0 24', TRUE, self);
-		if (trace_endpos_z - self._wp_floor_right > 18)
-			blocked_right = 1;
-		self._wp_floor_right = trace_endpos_z;
-
-		if (blocked_left || blocked_right)
-		{
-			if (blocked_left && !blocked_right)
-				self.b_wishdir = normalize(dir + rt * 0.7);
-			else if (blocked_right && !blocked_left)
-				self.b_wishdir = normalize(dir - rt * 0.7);
-			else
-			{
-				// both sides blocked — stop, rotate via bot_look until clear
-				self.b_wishdir = '0 0 0';
-				self.b_angle_y = self.v_angle_y + 90;
-			}
-		}
-		else if (!self.target1)
-		{
-			// no target and clear ahead — walk forward to find new area
-			self.b_wishdir = dir;
-		}
 	}
 
 	// --- set look target ---
