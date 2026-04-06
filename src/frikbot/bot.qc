@@ -83,6 +83,7 @@ vector(entity bot, float index)	nav_path_debug = #85;
 entity()				nav_find_goal = #86;
 void(entity e)				nav_block = #89;
 void(entity e)				nav_unblock = #90;
+vector()				nav_link_info = #91;
 float		nav_booted;
 
 

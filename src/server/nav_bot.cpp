@@ -73,6 +73,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 /* ---- Per-bot path corridor ---- */
 
 static nav_corridor_t *nav_bot_corridors[MAX_SCOREBOARD];
+static unsigned long long nav_bot_link_ref[MAX_SCOREBOARD]; /* last off-mesh poly ref per bot */
 static nav_mesh_runtime_t *nav_mesh;
 static void nav_build_block_map(void);
 
@@ -557,22 +558,75 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 
 /* ---- Door link detection ---- */
 
-/* ---- Jump/drop link detection ---- */
+/* ---- Physics-based link detection ---- */
 
-/* Scan boundary edges of an existing navmesh.  For each edge, project
-   outward and check if there's a navmesh polygon at a different height.
-   If the height delta is in the jumpable/droppable range, create a link. */
-/* Callback for nav_mesh_build: detect jump/drop links from contour boundary edges.
-   Called mid-build after contours, before Detour finalization. */
-static int nav_jump_link_callback(
+extern cvar_t sv_gravity;
+extern cvar_t sv_maxspeed;
+#define NAV_JUMP_IMPULSE 270.0f  /* Quake jump velocity (SV_ClientThink) */
+
+/* Helper: add a link, growing the array if needed. */
+static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
+	const float *start, const float *end, int type, float speed, float dz)
+{
+	if (*n >= *cap)
+	{
+		*cap *= 2;
+		*links = (nav_off_mesh_link_t *)realloc(*links, (size_t)*cap * sizeof(**links));
+	}
+	nav_off_mesh_link_t *l = &(*links)[*n];
+	l->start[0] = start[0]; l->start[1] = start[1]; l->start[2] = start[2];
+	l->end[0] = end[0]; l->end[1] = end[1]; l->end[2] = end[2];
+	l->radius = NAV_JUMP_LINK_RADIUS;
+	l->bidirectional = 0;
+	l->link_type = type;
+	l->height_delta = dz;
+	l->required_speed = speed;
+	l->wait_time = 0;
+	(*n)++;
+}
+
+/* Scan outward from edge along normal in cell_size steps to find
+   where a floor at target_z begins.  Returns horizontal distance,
+   or 0 if the floor is directly below the edge. */
+static float nav_find_horizontal_gap(const nav_heightfield_t *hf,
+	const float *edge, const float *normal, float target_z, float max_dist)
+{
+	float step = 4.0f; /* cell_size */
+	float probe[3];
+
+	for (float d = step; d <= max_dist; d += step)
+	{
+		probe[0] = edge[0] + normal[0] * d;
+		probe[1] = edge[1] + normal[1] * d;
+		probe[2] = edge[2];
+
+		float found_z;
+		if (nav_heightfield_floor_z(hf, probe, target_z, &found_z))
+		{
+			if (fabsf(found_z - target_z) < 8.0f)
+				return d;
+		}
+	}
+	return 0;
+}
+
+/* Callback for nav_mesh_build: detect drop/jump links from boundary edges.
+   Uses Quake physics to compute landing positions and required approach speeds.
+   One edge can produce multiple links (one per reachable floor below). */
+static int nav_link_callback(
 	const nav_mesh_boundary_edge_t *edges, int edge_count,
 	const nav_heightfield_t *hf,
 	nav_off_mesh_link_t **out_links,
 	void *user_data)
 {
 	(void)user_data;
-	int n = 0, cap = 64, i;
+	int n = 0, cap = 128, i;
 	nav_off_mesh_link_t *links = NULL;
+	float gravity = sv_gravity.value;
+	float maxspeed = sv_maxspeed.value;
+
+	if (gravity < 1.0f) gravity = 800.0f;
+	if (maxspeed < 1.0f) maxspeed = 320.0f;
 
 	*out_links = NULL;
 	if (edge_count == 0) return 0;
@@ -581,94 +635,116 @@ static int nav_jump_link_callback(
 
 	for (i = 0; i < edge_count; i++)
 	{
-		float test[3], dz;
+		const float *mid = edges[i].midpoint;
+		const float *norm = edges[i].normal;
+		float short_probe[3];
 
-		/* Project outward from edge midpoint */
-		test[0] = edges[i].midpoint[0] + edges[i].normal[0] * NAV_JUMP_PROBE_DIST;
-		test[1] = edges[i].midpoint[1] + edges[i].normal[1] * NAV_JUMP_PROBE_DIST;
-		test[2] = edges[i].midpoint[2];
-
-		/* Reject links that project straight into a wall. */
-		if (!nav_trace_clear_at_height(edges[i].midpoint, test, edges[i].midpoint[2] + 24.0f, NULL))
+		/* Short probe outward (8u) to check if there's a wall right at the edge */
+		short_probe[0] = mid[0] + norm[0] * 8.0f;
+		short_probe[1] = mid[1] + norm[1] * 8.0f;
+		short_probe[2] = mid[2];
+		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
 			continue;
 
-		/* Check heightfield: if the projected point is blocked by a wall, skip */
-		if (hf && nav_heightfield_is_blocked(hf, test, edges[i].midpoint[2]))
-			continue;
-
-		/* Find walkable floor height at landing point */
-		float land_z;
-		if (!nav_heightfield_floor_z(hf, test, edges[i].midpoint[2], &land_z))
-			continue;
-		test[2] = land_z;
-
-		/* Height delta: landing minus edge (Quake Z) */
-		dz = land_z - edges[i].midpoint[2];
-
-		/* Jump up: landing is higher */
-		if (dz > NAV_JUMP_HEIGHT_MIN && dz < NAV_JUMP_HEIGHT_MAX)
+		/* ---- Drops: find all floors below ---- */
 		{
-			if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
-			links[n].start[0] = edges[i].midpoint[0];
-			links[n].start[1] = edges[i].midpoint[1];
-			links[n].start[2] = edges[i].midpoint[2];
-			links[n].end[0] = test[0];
-			links[n].end[1] = test[1];
-			links[n].end[2] = test[2];
-			links[n].radius = NAV_JUMP_LINK_RADIUS;
-			links[n].bidirectional = 0;
-			links[n].link_type = AI_JUMP;
-			links[n].height_delta = dz;
-			links[n].required_speed = 0; /* TODO: compute from physics */
-			n++;
+			float floors[8];
+			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
+			int nfloors = nav_heightfield_floors_below(hf, mid, mid[2], min_z, floors, 8);
+
+			for (int fi = 0; fi < nfloors; fi++)
+			{
+				float drop_height = mid[2] - floors[fi];
+				if (drop_height < NAV_JUMP_HEIGHT_MIN)
+					continue;
+
+				/* Fall time from physics: t = sqrt(2h / g) */
+				float fall_time = sqrtf(2.0f * drop_height / gravity);
+
+				/* Find horizontal gap to the landing surface */
+				float gap = nav_find_horizontal_gap(hf, mid, norm, floors[fi], 128.0f);
+
+				/* Required speed to clear the gap */
+				float speed;
+				if (gap < 4.0f)
+					speed = 10.0f; /* step-off: minimal speed */
+				else
+					speed = gap / fall_time;
+
+				if (speed > maxspeed)
+					continue; /* unreachable at max run speed */
+
+				/* Landing position: edge + normal * landing_dist */
+				float land_dist = speed * fall_time;
+				/* Add small margin (8u) past the gap edge */
+				if (gap > 4.0f)
+					land_dist = gap + 8.0f;
+
+				float end[3];
+				end[0] = mid[0] + norm[0] * land_dist;
+				end[1] = mid[1] + norm[1] * land_dist;
+				end[2] = floors[fi];
+
+				/* Verify landing is clear */
+				if (hf && nav_heightfield_is_blocked(hf, end, floors[fi]))
+					continue;
+
+				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
+			}
 		}
-		/* Rocket jump up: landing is too high for normal jump */
-		else if (dz > NAV_JUMP_HEIGHT_MAX && dz < NAV_DROP_HEIGHT_MAX)
+
+		/* ---- Jumps: find floors above within jump reach ---- */
 		{
-			if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
-			links[n].start[0] = edges[i].midpoint[0];
-			links[n].start[1] = edges[i].midpoint[1];
-			links[n].start[2] = edges[i].midpoint[2];
-			links[n].end[0] = test[0];
-			links[n].end[1] = test[1];
-			links[n].end[2] = test[2];
-			links[n].radius = NAV_JUMP_LINK_RADIUS;
-			links[n].bidirectional = 0;
-			links[n].link_type = AI_SUPER_JUMP;
-			links[n].height_delta = dz;
-			links[n].required_speed = 0;
-			n++;
-		}
-		/* Drop down: landing is lower */
-		else if (dz < -NAV_JUMP_HEIGHT_MIN && dz > -NAV_DROP_HEIGHT_MAX)
-		{
-			if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
-			links[n].start[0] = edges[i].midpoint[0];
-			links[n].start[1] = edges[i].midpoint[1];
-			links[n].start[2] = edges[i].midpoint[2];
-			links[n].end[0] = test[0];
-			links[n].end[1] = test[1];
-			links[n].end[2] = test[2];
-			links[n].radius = NAV_JUMP_LINK_RADIUS;
-			links[n].bidirectional = 0;
-			links[n].link_type = AI_DROP;
-			links[n].height_delta = dz;
-			links[n].required_speed = 0;
-			n++;
+			float peak = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE / (2.0f * gravity);
+			float probe[3];
+			probe[0] = mid[0] + norm[0] * NAV_JUMP_PROBE_DIST;
+			probe[1] = mid[1] + norm[1] * NAV_JUMP_PROBE_DIST;
+			probe[2] = mid[2];
+
+			/* Check for wall at probe distance */
+			if (!nav_trace_clear_at_height(mid, probe, mid[2] + 24.0f, NULL))
+				continue;
+			if (hf && nav_heightfield_is_blocked(hf, probe, mid[2]))
+				continue;
+
+			float land_z;
+			if (!nav_heightfield_floor_z(hf, probe, mid[2] + peak, &land_z))
+				continue;
+
+			float jump_height = land_z - mid[2];
+			if (jump_height < NAV_JUMP_HEIGHT_MIN || jump_height > peak)
+				continue;
+
+			/* Time to reach jump_height:
+			   h = v0*t - 0.5*g*t^2  →  t = (v0 - sqrt(v0^2 - 2*g*h)) / g */
+			float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * jump_height;
+			if (disc < 0) continue;
+			float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+			float speed = NAV_JUMP_PROBE_DIST / time_up;
+
+			if (speed > maxspeed)
+				continue;
+			if (speed < 10.0f) speed = 10.0f;
+
+			float end[3];
+			end[0] = probe[0];
+			end[1] = probe[1];
+			end[2] = land_z;
+
+			nav_link_push(&links, &n, &cap, mid, end, AI_JUMP, speed, jump_height);
 		}
 	}
 
 	*out_links = links;
 	{
-		int nj = 0, nd = 0, nr = 0;
-		int li;
+		int nj = 0, nd = 0, nr = 0, li;
 		for (li = 0; li < n; li++)
 		{
 			if (links[li].link_type == AI_JUMP) nj++;
 			else if (links[li].link_type == AI_DROP) nd++;
 			else if (links[li].link_type == AI_SUPER_JUMP) nr++;
 		}
-		Con_Printf("Nav: detected %d links from %d edges (%d jump, %d drop, %d rj)\n",
+		fprintf(stderr, "Nav: detected %d links from %d edges (%d jump, %d drop, %d rj)\n",
 			n, edge_count, nj, nd, nr);
 	}
 	return n;
@@ -796,7 +872,7 @@ void Nav_BuildForMap(void)
 	memset(error, 0, sizeof(error));
 	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
-		NULL, NULL, /* jump link callback disabled for now */
+		nav_link_callback, NULL,
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
@@ -1093,13 +1169,18 @@ static void PF_nav_path_steer(void)
 	G_FLOAT(OFS_RETURN + 1) = corner[1];
 	G_FLOAT(OFS_RETURN + 2) = corner[2];
 
-	/* encode off-mesh link type */
+	/* encode off-mesh link type and cache ref for nav_link_info */
 	if (flags & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
 	{
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
 		if (lt > 0)
+		{
 			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f + (float)lt;
+			nav_bot_link_ref[slot] = ref;
+		}
 	}
+	else
+		nav_bot_link_ref[slot] = 0;
 }
 
 
@@ -1457,10 +1538,41 @@ static void PF_nav_unblock(void)
 	}
 }
 
+/* vector nav_link_info() = #91
+   Returns (required_speed, height_delta, link_type) for the current
+   off-mesh link the bot is approaching.  Returns '0 0 0' if not on a link. */
+static void PF_nav_link_info(void)
+{
+	int slot;
+	unsigned long long ref;
+	const dtOffMeshConnection *con;
+	int idx;
+
+	G_FLOAT(OFS_RETURN + 0) = 0.0f;
+	G_FLOAT(OFS_RETURN + 1) = 0.0f;
+	G_FLOAT(OFS_RETURN + 2) = 0.0f;
+
+	slot = nav_bot_slot();
+	if (slot < 0 || nav_mesh == NULL) return;
+
+	ref = nav_bot_link_ref[slot];
+	if (ref == 0) return;
+
+	con = nav_mesh->navmesh->getOffMeshConnectionByRef(static_cast<dtPolyRef>(ref));
+	if (con == NULL) return;
+
+	idx = static_cast<int>(con->userId);
+	if (idx < 0 || idx >= nav_mesh->link_count) return;
+
+	G_FLOAT(OFS_RETURN + 0) = nav_mesh->links[idx].required_speed;
+	G_FLOAT(OFS_RETURN + 1) = nav_mesh->links[idx].height_delta;
+	G_FLOAT(OFS_RETURN + 2) = (float)nav_mesh->links[idx].link_type;
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 11
+#define NAV_BUILTIN_COUNT 12
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -1486,6 +1598,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 8] = PF_nav_stub;      /* was nav_wp_pos */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 9] = PF_nav_block;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

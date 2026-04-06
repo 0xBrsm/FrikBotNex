@@ -203,6 +203,10 @@ typedef struct nav_heightfield_s nav_heightfield_t;
 int nav_heightfield_is_blocked(const nav_heightfield_t *hf, const float *point, float floor_z);
 /* Find the nearest walkable floor Z at a point.  Returns 1 if found, 0 if no walkable floor. */
 int nav_heightfield_floor_z(const nav_heightfield_t *hf, const float *point, float search_z, float *out_z);
+/* Find all walkable floors below edge_z (and above min_z) at an XY position.
+   Returns count of floors found.  out_floors[] sorted top to bottom (nearest landing first). */
+int nav_heightfield_floors_below(const nav_heightfield_t *hf, const float *point,
+	float edge_z, float min_z, float *out_floors, int max_floors);
 void nav_heightfield_free(nav_heightfield_t *hf);
 
 /* Boundary edge: an edge of the navmesh with no neighbor polygon. */

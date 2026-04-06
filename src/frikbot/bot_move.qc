@@ -231,9 +231,42 @@ void() bot_get =
 		self._m_move_mode = MM_NAV;
 
 	// off-mesh link actions
-	if (link_type == 2) // AI_JUMP
+	if (link_type == 3) // AI_DROP
 	{
-		if (self.flags & FL_ONGROUND)
+		// Controlled drop: slow to required_speed near the edge
+		local vector linfo, flat_to_wp;
+		local float approach_speed, dist_to_edge;
+
+		linfo = nav_link_info();
+		approach_speed = linfo_x;
+		if (approach_speed < 10) approach_speed = 10;
+
+		flat_to_wp = wp - self.origin;
+		flat_to_wp_z = 0;
+		dist_to_edge = vlen(flat_to_wp);
+
+		// Within 64u of edge: scale wishdir to control speed
+		if (dist_to_edge < 64)
+		{
+			local float scale;
+			scale = approach_speed / sv_maxspeed;
+			if (scale > 1) scale = 1;
+			self.b_wishdir = normalize(flat_to_wp) * scale;
+		}
+	}
+	else if (link_type == 2) // AI_JUMP
+	{
+		// Run at required speed and jump at the edge
+		local vector jinfo, jflat;
+		local float jdist;
+
+		jinfo = nav_link_info();
+		jflat = wp - self.origin;
+		jflat_z = 0;
+		jdist = vlen(jflat);
+
+		// Jump when close to edge and on ground
+		if (jdist < 16 && (self.flags & FL_ONGROUND))
 			self.button2 = TRUE;
 	}
 	else if (link_type == 7) // AI_SUPER_JUMP

@@ -1598,6 +1598,56 @@ extern "C" int nav_heightfield_floor_z(const nav_heightfield_t *hf,
 	return found;
 }
 
+extern "C" int nav_heightfield_floors_below(const nav_heightfield_t *hf,
+	const float *point, float edge_z, float min_z,
+	float *out_floors, int max_floors)
+{
+	float rc_point[3];
+	int gx, gz, count = 0;
+
+	if (hf == nullptr || hf->compact == nullptr || out_floors == nullptr || max_floors < 1)
+		return 0;
+
+	nav_quake_to_recast(point, rc_point);
+	gx = (int)((rc_point[0] - hf->config.bmin[0]) / hf->config.cs);
+	gz = (int)((rc_point[2] - hf->config.bmin[2]) / hf->config.cs);
+
+	if (gx < 0 || gx >= hf->compact->width || gz < 0 || gz >= hf->compact->height)
+		return 0;
+
+	/* Recast Y = Quake Z.  Collect walkable spans below edge_z and above min_z. */
+	float rc_edge = edge_z;
+	float rc_min = min_z;
+	float climb = (float)hf->config.walkableClimb * hf->config.ch;
+
+	const rcCompactCell &cell = hf->compact->cells[gx + gz * hf->compact->width];
+	for (int si = (int)cell.index, sn = (int)(cell.index + cell.count); si < sn; ++si)
+	{
+		if (hf->compact->areas[si] == RC_NULL_AREA)
+			continue;
+		float span_y = hf->config.bmin[1] + (float)hf->compact->spans[si].y * hf->config.ch;
+		if (span_y > rc_edge - climb || span_y < rc_min)
+			continue;
+		if (count < max_floors)
+			out_floors[count++] = span_y; /* Recast Y = Quake Z */
+	}
+
+	/* Sort descending (highest/nearest first) — simple insertion sort, count is small */
+	for (int i = 1; i < count; i++)
+	{
+		float val = out_floors[i];
+		int j = i - 1;
+		while (j >= 0 && out_floors[j] < val)
+		{
+			out_floors[j + 1] = out_floors[j];
+			j--;
+		}
+		out_floors[j + 1] = val;
+	}
+
+	return count;
+}
+
 extern "C" void nav_heightfield_free(nav_heightfield_t *hf)
 {
 	if (hf == nullptr) return;
