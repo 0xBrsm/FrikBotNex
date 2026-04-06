@@ -204,7 +204,9 @@ static int nav_is_brush_entity(char *classname)
 {
 	return !strncasecmp(classname, "func_wall", 9)
 		|| !strncasecmp(classname, "func_episodegate", 16)
-		|| !strncasecmp(classname, "func_bossgate", 13);
+		|| !strncasecmp(classname, "func_bossgate", 13)
+		|| !strncasecmp(classname, "func_door", 9)
+		|| !strncasecmp(classname, "func_plat", 9);
 }
 
 /* Count triangles from static brush entity submodels (func_wall etc.)
@@ -252,6 +254,11 @@ static void nav_emit_brush_entity_tris(
 		{
 			msurface_t *s = &m->surfaces[first + si];
 			if (s->texinfo && (s->texinfo->flags & TEX_SPECIAL)) continue;
+			if (s->texinfo && s->texinfo->texture &&
+				(s->texinfo->texture->name[0] == '*') &&
+				(!strncasecmp(s->texinfo->texture->name, "*lava", 5) ||
+				 !strncasecmp(s->texinfo->texture->name, "*slime", 6)))
+				continue;
 			ec = s->numedges;
 			if (ec < 3) continue;
 			if (ec > fc) { fv = (int *)realloc(fv, (size_t)ec * sizeof(int)); fc = ec; }
@@ -1021,7 +1028,7 @@ static void Nav_DebugDraw(void)
 				{
 					float cx = nav_debug_polys[i].center[0];
 					float cy = nav_debug_polys[i].center[1];
-					float cz = nav_debug_polys[i].center[2] + 48;
+					float cz = nav_debug_polys[i].center[2] + 24;
 					fprintf(fp, "v %f %f %f\n", cx - 4, cy, cz);
 					fprintf(fp, "v %f %f %f\n", cx + 4, cy, cz);
 					fprintf(fp, "v %f %f %f\n", cx, cy - 4, cz);
@@ -1129,7 +1136,7 @@ static void PF_nav_path_debug(void)
 		{
 			G_FLOAT(OFS_RETURN + 0) = nav_debug_polys[idx].center[0];
 			G_FLOAT(OFS_RETURN + 1) = nav_debug_polys[idx].center[1];
-			G_FLOAT(OFS_RETURN + 2) = nav_debug_polys[idx].center[2] + 48;
+			G_FLOAT(OFS_RETURN + 2) = nav_debug_polys[idx].center[2] + 24;
 		}
 		return;
 	}
