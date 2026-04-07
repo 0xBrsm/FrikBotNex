@@ -1648,6 +1648,43 @@ extern "C" int nav_heightfield_floors_below(const nav_heightfield_t *hf,
 	return count;
 }
 
+extern "C" int nav_heightfield_floor_above(const nav_heightfield_t *hf,
+	const float *point, float min_z, float max_z, float *out_z)
+{
+	float rc_point[3];
+	int gx, gz;
+
+	if (hf == nullptr || hf->compact == nullptr)
+		return 0;
+
+	nav_quake_to_recast(point, rc_point);
+	gx = (int)((rc_point[0] - hf->config.bmin[0]) / hf->config.cs);
+	gz = (int)((rc_point[2] - hf->config.bmin[2]) / hf->config.cs);
+
+	if (gx < 0 || gx >= hf->compact->width || gz < 0 || gz >= hf->compact->height)
+		return 0;
+
+	/* Find the lowest walkable span between min_z and max_z (Recast Y). */
+	float best = 999999.0f;
+	int found = 0;
+	const rcCompactCell &cell = hf->compact->cells[gx + gz * hf->compact->width];
+	for (int si = (int)cell.index, sn = (int)(cell.index + cell.count); si < sn; ++si)
+	{
+		if (hf->compact->areas[si] == RC_NULL_AREA)
+			continue;
+		float span_y = hf->config.bmin[1] + (float)hf->compact->spans[si].y * hf->config.ch;
+		if (span_y >= min_z && span_y <= max_z && span_y < best)
+		{
+			best = span_y;
+			found = 1;
+		}
+	}
+
+	if (found && out_z != nullptr)
+		*out_z = best;
+	return found;
+}
+
 extern "C" void nav_heightfield_free(nav_heightfield_t *hf)
 {
 	if (hf == nullptr) return;

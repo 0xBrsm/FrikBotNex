@@ -595,6 +595,9 @@ static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
 	l->height_delta = dz;
 	l->required_speed = speed;
 	l->wait_time = 0;
+	fprintf(stderr, "Nav: LINK %s start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f) dz=%.0f spd=%.0f\n",
+		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : "???",
+		start[0], start[1], start[2], end[0], end[1], end[2], dz, speed);
 	(*n)++;
 }
 
@@ -640,6 +643,7 @@ static int nav_link_callback(
 
 	if (gravity < 1.0f) gravity = 800.0f;
 	if (maxspeed < 1.0f) maxspeed = 320.0f;
+	float peak = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE / (2.0f * gravity);
 
 	*out_links = NULL;
 	if (edge_count == 0) return 0;
@@ -729,48 +733,73 @@ static int nav_link_callback(
 					continue;
 
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
+
+				/* Reverse: if drop height is within jump reach, also create
+				   a jump link from the landing floor back up to the edge.
+				   The bot jumps from below the ledge up to the top. */
+				if (drop_height <= peak)
+				{
+					float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * drop_height;
+					if (disc >= 0)
+					{
+						float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+						float jspeed = land_dist / time_up;
+						if (jspeed <= maxspeed)
+						{
+							if (jspeed < 10.0f) jspeed = 10.0f;
+							/* Jump: start at landing, end at edge */
+							nav_link_push(&links, &n, &cap, end, mid, AI_JUMP, jspeed, drop_height);
+						}
+					}
+				}
 			}
 		}
 
-		/* ---- Jumps: find floors above within jump reach ---- */
+		/* ---- Jumps: scan outward for floors above within jump reach ---- */
 		{
-			float peak = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE / (2.0f * gravity);
-			float probe[3];
-			probe[0] = mid[0] + norm[0] * NAV_JUMP_PROBE_DIST;
-			probe[1] = mid[1] + norm[1] * NAV_JUMP_PROBE_DIST;
-			probe[2] = mid[2];
+			float step;
 
-			/* Check for wall at probe distance */
-			if (!nav_trace_clear_at_height(mid, probe, mid[2] + 24.0f, NULL))
-				continue;
-			if (hf && nav_heightfield_is_blocked(hf, probe, mid[2]))
-				continue;
+			/* Probe at multiple distances outward (8u to 64u in cell_size steps) */
+			for (step = 8.0f; step <= 64.0f; step += 4.0f)
+			{
+				float probe[3];
+				probe[0] = mid[0] + norm[0] * step;
+				probe[1] = mid[1] + norm[1] * step;
+				probe[2] = mid[2];
 
-			float land_z;
-			if (!nav_heightfield_floor_z(hf, probe, mid[2] + peak, &land_z))
-				continue;
+				/* Check for wall at jump apex height — the bot jumps OVER the edge */
+				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + 24.0f, NULL))
+					break; /* wall at jump height — no point probing further */
 
-			float jump_height = land_z - mid[2];
-			if (jump_height < NAV_JUMP_HEIGHT_MIN || jump_height > peak)
-				continue;
+				/* Find a floor ABOVE the edge at the probe point. */
+				float land_z;
+				if (!nav_heightfield_floor_above(hf, probe,
+						mid[2] + NAV_JUMP_HEIGHT_MIN, mid[2] + peak, &land_z))
+					continue;
 
-			/* Time to reach jump_height:
-			   h = v0*t - 0.5*g*t^2  →  t = (v0 - sqrt(v0^2 - 2*g*h)) / g */
-			float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * jump_height;
-			if (disc < 0) continue;
-			float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
-			float speed = NAV_JUMP_PROBE_DIST / time_up;
+				float jump_height = land_z - mid[2];
+				if (jump_height < NAV_JUMP_HEIGHT_MIN || jump_height > peak)
+					continue;
 
-			if (speed > maxspeed)
-				continue;
-			if (speed < 10.0f) speed = 10.0f;
+				/* Time to reach jump_height:
+				   h = v0*t - 0.5*g*t^2  →  t = (v0 - sqrt(v0^2 - 2*g*h)) / g */
+				float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * jump_height;
+				if (disc < 0) continue;
+				float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+				float speed = step / time_up;
 
-			float end[3];
-			end[0] = probe[0];
-			end[1] = probe[1];
-			end[2] = land_z;
+				if (speed > maxspeed)
+					continue;
+				if (speed < 10.0f) speed = 10.0f;
 
-			nav_link_push(&links, &n, &cap, mid, end, AI_JUMP, speed, jump_height);
+				float end[3];
+				end[0] = probe[0];
+				end[1] = probe[1];
+				end[2] = land_z;
+
+				nav_link_push(&links, &n, &cap, mid, end, AI_JUMP, speed, jump_height);
+				break; /* found a jump at this edge, don't create duplicates */
+			}
 		}
 	}
 
