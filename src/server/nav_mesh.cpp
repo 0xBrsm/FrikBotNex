@@ -1433,6 +1433,27 @@ extern "C" int navigate(nav_corridor_t *c,
 	if (ncorners < 1)
 		return 0;
 
+	/* Off-mesh link traversal: when the bot is within trigger distance
+	   of a link start, advance the corridor past the link.  This follows
+	   Detour best practice (dtCrowd uses radius * 2.25 as trigger).
+	   The corner is still returned to QC so it can animate the traversal;
+	   on the NEXT call, the corridor is already past the link. */
+	if (flags[0] & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
+	{
+		float trigger = 16.0f * 2.25f; /* agent radius * 2.25 */
+		float dist2d = dtVdist2D(c->corridor.getPos(), corners);
+		if (dist2d < trigger)
+		{
+			dtPolyRef advance_refs[2];
+			float rc_start[3], rc_end[3];
+			c->corridor.moveOverOffmeshConnection(
+				refs[0], advance_refs, rc_start, rc_end, navmesh->query);
+			/* Corridor is now past the link.  Next navigate() call will
+			   see post-link waypoints.  Return the link start corner to
+			   QC this frame so it can execute the traversal action. */
+		}
+	}
+
 	/* Fix corner height using getPolyHeight */
 	{
 		float h = 0;
