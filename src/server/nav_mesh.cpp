@@ -247,7 +247,7 @@ static float nav_mesh_snap_horizontal_limit(const nav_mesh_runtime_t *navmesh, c
 	float limit;
 
 	limit = fmaxf(extents[0], extents[2]) * 0.75f;
-	if (navmesh != nullptr && extents == navmesh->query_half_extents_tight)
+	if (navmesh != nullptr && extents == navmesh->query_half_extents_actor_origin)
 		limit = fminf(limit, 24.0f);
 	else
 		limit = fminf(limit, 48.0f);
@@ -834,9 +834,9 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	params.walkableRadius = config->walkable_radius;
 	/* Use walkable_height (not walkable_climb) for the Detour tile params.
 	   This controls the Y search extent when linking off-mesh connections
-	   to ground polys.  The navmesh surface is ~44u below floor level
-	   (player hull offset + voxel quantization), so 18u walkable_climb
-	   is too small to find ground polys under off-mesh endpoints. */
+	   to nearby ground polys. Off-mesh endpoints are authored from entity
+	   origins, not guaranteed foot-contact points, so the search must cover
+	   origin-to-surface separation even when the navmesh itself is on the floor. */
 	params.walkableClimb = config->walkable_height;
 	rcVcopy(params.bmin, guard.poly_mesh->bmin);
 	rcVcopy(params.bmax, guard.poly_mesh->bmax);
@@ -958,13 +958,13 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	guard.runtime->query_half_extents[1] = fmaxf(config->walkable_height * 2.0f, 128.0f);
 	guard.runtime->query_half_extents[2] = fmaxf(config->walkable_radius * 3.0f, 48.0f);
 
-	/* Tight extents for agent position.
-	   Y must cover the offset between player origin (center of 56u hull)
-	   and navmesh surface (~44u below), while staying under the minimum
-	   floor gap (~64u on dm4). */
-	guard.runtime->query_half_extents_tight[0] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
-	guard.runtime->query_half_extents_tight[1] = config->walkable_height;
-	guard.runtime->query_half_extents_tight[2] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
+	/* Tight extents for actor-origin snapping.
+	   Many callers pass an entity origin above the walkable surface rather
+	   than a foot point on the floor, so Y must cover that origin-to-surface
+	   offset while still staying below the next floor above. */
+	guard.runtime->query_half_extents_actor_origin[0] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
+	guard.runtime->query_half_extents_actor_origin[1] = config->walkable_height;
+	guard.runtime->query_half_extents_actor_origin[2] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
 
 	/* Store link metadata for userId lookup during path following. */
 	{
@@ -1186,7 +1186,7 @@ extern "C" int nav_mesh_find_path(
 	memset(end_nearest, 0, sizeof(end_nearest));
 	start_over_poly = false;
 	end_over_poly = false;
-	if (!nav_mesh_find_nearest_internal(navmesh, start, &start_ref, start_nearest, &start_over_poly, navmesh->query_half_extents_tight, error, error_size)
+	if (!nav_mesh_find_nearest_internal(navmesh, start, &start_ref, start_nearest, &start_over_poly, navmesh->query_half_extents_actor_origin, error, error_size)
 		|| !nav_mesh_find_nearest_internal(navmesh, end, &end_ref, end_nearest, &end_over_poly, NULL, error, error_size))
 		return 0;
 
@@ -1394,7 +1394,7 @@ extern "C" int navigate(nav_corridor_t *c,
 		&snapped_ref,
 		snapped_pos,
 		nullptr,
-		navmesh->query_half_extents_tight,
+		navmesh->query_half_extents_actor_origin,
 		nullptr,
 		0);
 

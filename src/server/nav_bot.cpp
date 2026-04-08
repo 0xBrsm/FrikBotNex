@@ -69,6 +69,8 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
 #define NAV_JUMP_LAND_SNAP_MAX_DIST 24.0f
+#define NAV_PLAYER_FLOOR_OFFSET     24.0f
+#define NAV_DEBUG_MARKER_LIFT       24.0f
 
 /* ---- Per-bot path corridor ---- */
 
@@ -106,6 +108,16 @@ static float nav_xy_dist_sq(const float *a, const float *b)
 	float dx = a[0] - b[0];
 	float dy = a[1] - b[1];
 	return dx * dx + dy * dy;
+}
+
+static float nav_player_floor_z(float origin_z)
+{
+	return origin_z - NAV_PLAYER_FLOOR_OFFSET;
+}
+
+static float nav_debug_marker_z(float surface_z)
+{
+	return surface_z + NAV_DEBUG_MARKER_LIFT;
 }
 
 /* Trace vertically from top_z down to bot_z at a given XY position.
@@ -149,7 +161,7 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 
 	nav_mesh_setup_filter(&filter);
-	memcpy(tight, nav_mesh->query_half_extents_tight, sizeof(tight));
+	memcpy(tight, nav_mesh->query_half_extents_actor_origin, sizeof(tight));
 	nav_q2r(qpos, rc_pos);
 	*out_ref = 0;
 	status = query->findNearestPoly(rc_pos, tight, &filter, out_ref, out_nearest, &over_poly);
@@ -161,7 +173,7 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 	if (!over_poly && nav_xy_dist_sq(qpos, test) > 8.0f * 8.0f)
 		return 0;
-	if (!nav_trace_clear_at_height(qpos, test, test[2] + 24.0f, bot))
+	if (!nav_trace_clear_at_height(qpos, test, test[2] + NAV_PLAYER_FLOOR_OFFSET, bot))
 		return 0;
 
 	return 1;
@@ -660,7 +672,7 @@ static int nav_link_callback(
 		short_probe[0] = mid[0] + norm[0] * 8.0f;
 		short_probe[1] = mid[1] + norm[1] * 8.0f;
 		short_probe[2] = mid[2];
-		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
+		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + NAV_PLAYER_FLOOR_OFFSET, NULL))
 			continue;
 
 		/* ---- Drops: find all floors below ---- */
@@ -768,7 +780,7 @@ static int nav_link_callback(
 				probe[2] = mid[2];
 
 				/* Check for wall at jump apex height — the bot jumps OVER the edge */
-				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + 24.0f, NULL))
+				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + NAV_PLAYER_FLOOR_OFFSET, NULL))
 					break; /* wall at jump height — no point probing further */
 
 				/* Find a floor ABOVE the edge at the probe point. */
@@ -940,7 +952,7 @@ void Nav_BuildForMap(void)
 	memset(error, 0, sizeof(error));
 	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
-		NULL, NULL, /* link callback disabled — drops cause circling */
+		nav_link_callback, NULL,
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
@@ -959,6 +971,54 @@ void Nav_BuildForMap(void)
 	t_done = Sys_FloatTime();
 	Con_Printf("Nav: %.3fs, %d polys, %d entity links\n",
 		t_done - t_start, summary.polygon_count, entity_count);
+
+	/* ---- Height diagnostic: compare player-origin, floor, and navmesh surface ---- */
+	if (nav_mesh != NULL)
+	{
+		int si;
+		for (si = 1; si < sv.num_edicts; si++)
+		{
+			edict_t *e = EDICT_NUM(si);
+			if (e->free) continue;
+			const char *cn = pr_strings + (int)e->v.classname;
+			if (strcmp(cn, "info_player_deathmatch") != 0 &&
+				strcmp(cn, "info_player_start") != 0)
+				continue;
+
+			/* BSP floor trace: point trace down from spawn origin */
+			vec3_t ts, te, zero = {0, 0, 0};
+			trace_t trace;
+			float entity_floor = nav_player_floor_z(e->v.origin[2]);
+			ts[0] = e->v.origin[0]; ts[1] = e->v.origin[1]; ts[2] = e->v.origin[2] + 8;
+			te[0] = e->v.origin[0]; te[1] = e->v.origin[1]; te[2] = e->v.origin[2] - 128;
+			trace = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+			float bsp_floor = trace.endpos[2];
+
+			/* Also trace with player hull to see hull floor */
+			vec3_t hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			ts[2] = e->v.origin[2] + 32;
+			trace = SV_Move(ts, hmins, hmaxs, te, MOVE_NOMONSTERS, NULL);
+			float hull_floor = trace.endpos[2];
+
+			/* Navmesh surface at the player floor, not at the authored origin. */
+			nav_mesh_nearest_result_t nr;
+			char nerr[64];
+			vec3_t floor_probe;
+			floor_probe[0] = e->v.origin[0];
+			floor_probe[1] = e->v.origin[1];
+			floor_probe[2] = entity_floor;
+			if (nav_mesh_find_nearest(nav_mesh, floor_probe, &nr, nerr, sizeof(nerr)))
+			{
+				fprintf(stderr, "Nav: SURFACE %s at (%.0f %.0f) origin_z=%.1f player_floor=%.1f bsp_floor=%.1f hull_floor=%.1f nav_surface=%.1f origin_delta=%.1f floor_delta=%.1f hull_delta=%.1f\n",
+					cn, e->v.origin[0], e->v.origin[1],
+					e->v.origin[2], entity_floor, bsp_floor, hull_floor, nr.nearest_point[2],
+					e->v.origin[2] - nr.nearest_point[2],
+					entity_floor - nr.nearest_point[2],
+					hull_floor - nr.nearest_point[2]);
+			}
+			if (si > 20) break; /* limit output */
+		}
+	}
 
 	/* ---- DM4 waypoint edge diagnostic ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
@@ -1162,9 +1222,10 @@ static void Nav_DebugDraw(void)
 			return;
 		Con_Printf("Nav: debug draw active, %d polys\n", nav_debug_poly_count);
 
-		/* dump navmesh to OBJ file for external viewing */
+		/* Dump elevated debug markers to OBJ so they are visible above the floor.
+		   These are marker crosses, not raw navmesh vertices. */
 		{
-			FILE *fp = fopen("navmesh_debug.obj", "w");
+			FILE *fp = fopen("navmesh_debug_markers.obj", "w");
 			if (fp)
 			{
 				int vi = 1;
@@ -1172,7 +1233,7 @@ static void Nav_DebugDraw(void)
 				{
 					float cx = nav_debug_polys[i].center[0];
 					float cy = nav_debug_polys[i].center[1];
-					float cz = nav_debug_polys[i].center[2] + 24;
+					float cz = nav_debug_marker_z(nav_debug_polys[i].center[2]);
 					fprintf(fp, "v %f %f %f\n", cx - 4, cy, cz);
 					fprintf(fp, "v %f %f %f\n", cx + 4, cy, cz);
 					fprintf(fp, "v %f %f %f\n", cx, cy - 4, cz);
@@ -1182,7 +1243,8 @@ static void Nav_DebugDraw(void)
 					vi += 4;
 				}
 				fclose(fp);
-				Con_Printf("Nav: wrote navmesh_debug.obj (%d polys)\n", nav_debug_poly_count);
+				Con_Printf("Nav: wrote navmesh_debug_markers.obj (%d polys, +%.0fu marker lift)\n",
+					nav_debug_poly_count, NAV_DEBUG_MARKER_LIFT);
 			}
 		}
 	}
@@ -1268,8 +1330,9 @@ static void PF_nav_path_debug(void)
 	e = G_EDICT(OFS_PARM0);
 	idx = (int)G_FLOAT(OFS_PARM1);
 
-	/* world entity: return navmesh poly centers for debug visualization.
-	   index == -1 → (poly_count, 0, 0).  index >= 0 → poly center + 48u Z. */
+	/* world entity: return elevated debug marker positions for navmesh polys.
+	   index == -1 -> (poly_count, 0, 0). index >= 0 -> poly center lifted above
+	   the surface so QC particle markers do not sit inside the floor. */
 	if (e == sv.edicts)
 	{
 		char error[128];
@@ -1285,7 +1348,7 @@ static void PF_nav_path_debug(void)
 		{
 			G_FLOAT(OFS_RETURN + 0) = nav_debug_polys[idx].center[0];
 			G_FLOAT(OFS_RETURN + 1) = nav_debug_polys[idx].center[1];
-			G_FLOAT(OFS_RETURN + 2) = nav_debug_polys[idx].center[2] + 24;
+			G_FLOAT(OFS_RETURN + 2) = nav_debug_marker_z(nav_debug_polys[idx].center[2]);
 		}
 		return;
 	}

@@ -80,7 +80,7 @@ struct nav_mesh_runtime_s
 	dtNavMesh *navmesh;
 	dtNavMeshQuery *query;
 	float query_half_extents[3];       /* wide: for items/goals */
-	float query_half_extents_tight[3]; /* tight: for agent position */
+	float query_half_extents_actor_origin[3]; /* tight: actor origin -> surface snap */
 	nav_off_mesh_link_t *links;
 	int link_count;
 
@@ -90,9 +90,9 @@ struct nav_mesh_runtime_s
 		query_half_extents[0] = 64.0f;
 		query_half_extents[1] = 96.0f;
 		query_half_extents[2] = 64.0f;
-		query_half_extents_tight[0] = 32.0f;
-		query_half_extents_tight[1] = 56.0f;
-		query_half_extents_tight[2] = 32.0f;
+		query_half_extents_actor_origin[0] = 32.0f;
+		query_half_extents_actor_origin[1] = 56.0f;
+		query_half_extents_actor_origin[2] = 32.0f;
 	}
 };
 
@@ -156,9 +156,9 @@ typedef struct
 	int	found;
 	int	is_over_poly;
 	unsigned long long poly_ref;
-	float query_point[3];
-	float nearest_point[3];
-	float poly_center[3];
+	float query_point[3];   /* caller-supplied sample point in Quake coords */
+	float nearest_point[3]; /* nearest point on the navmesh surface in Quake coords */
+	float poly_center[3];   /* polygon center on the navmesh surface in Quake coords */
 	float wall_distance;
 	int	neighbor_count;
 	unsigned long long neighbor_refs[NAV_MESH_MAX_NEIGHBORS];
@@ -167,7 +167,7 @@ typedef struct
 typedef struct
 {
 	unsigned long long poly_ref;
-	float	center[3];
+	float	center[3]; /* polygon center on the navmesh surface in Quake coords */
 	float	bounds_min[3];
 	float	bounds_max[3];
 	int	neighbor_count;

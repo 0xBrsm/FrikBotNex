@@ -233,7 +233,6 @@ void() bot_get =
 	// off-mesh link actions
 	if (link_type == 3) // AI_DROP
 	{
-		// Controlled drop: slow to required_speed near the edge
 		local vector linfo, flat_to_wp;
 		local float approach_speed, dist_to_edge;
 
@@ -244,6 +243,22 @@ void() bot_get =
 		flat_to_wp = wp - self.origin;
 		flat_to_wp_z = 0;
 		dist_to_edge = vlen(flat_to_wp);
+
+		// DBG: log drop approach
+		{
+			static float _drop_dbg_time;
+			if (time > _drop_dbg_time)
+			{
+				_drop_dbg_time = time + 0.5;
+				bprint("["); bprint(self.netname);
+				bprint("] DROP: wp="); bprint(vtos(wp));
+				bprint(" pos="); bprint(vtos(self.origin));
+				bprint(" xy="); bprint(ftos(rint(dist_to_edge)));
+				bprint(" dz="); bprint(ftos(rint(wp_z - self.origin_z)));
+				bprint(" wishdir="); bprint(vtos(self.b_wishdir));
+				bprint("\n");
+			}
+		}
 
 		// Within 64u of edge: scale wishdir to control speed
 		if (dist_to_edge < 64)
