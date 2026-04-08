@@ -306,12 +306,7 @@ void() bot_get =
 	}
 
 	// progress check: not getting closer to corner? abandon.
-	// Skip during off-mesh link traversal (bot is doing controlled approach).
-	if (link_type)
-	{
-		self._progress_stall = 0;
-		self._progress_best = 99999;
-	}
+	// Off-mesh links get 3x timeout (bot may be doing controlled approach).
 	{
 		local vector flat;
 		local float xy_dist;

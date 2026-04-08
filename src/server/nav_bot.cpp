@@ -940,7 +940,7 @@ void Nav_BuildForMap(void)
 	memset(error, 0, sizeof(error));
 	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
-		nav_link_callback, NULL,
+		NULL, NULL, /* link callback disabled — drops cause circling */
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
