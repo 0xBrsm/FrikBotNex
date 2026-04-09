@@ -1,0 +1,22 @@
+--- sys_linux.c
++++ sys_linux.c
+@@ -8,8 +8,6 @@
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+-#include <sys/ipc.h>
+-#include <sys/shm.h>
+ #include <sys/stat.h>
+ #include <string.h>
+ #include <ctype.h>
+@@ -15,6 +13,10 @@
+ #include <sys/mman.h>
+ #include <errno.h>
+ 
++#ifndef FNDELAY
++#define FNDELAY O_NONBLOCK
++#endif
++
+ #include "quakedef.h"
+ 
+ qboolean			isDedicated;

@@ -352,6 +352,18 @@ struct nav_heightfield_support_pair_t
 	}
 };
 
+struct nav_heightfield_axis_support_t
+{
+	int x;
+	int z;
+	int distance;
+
+	nav_heightfield_axis_support_t()
+		: x(0), z(0), distance(0)
+	{
+	}
+};
+
 static bool nav_heightfield_column_has_walkable_span(const rcHeightfield *hf, int x, int z)
 {
 	const rcSpan *span;
@@ -367,40 +379,62 @@ static bool nav_heightfield_column_has_walkable_span(const rcHeightfield *hf, in
 	return false;
 }
 
-static bool nav_heightfield_find_axis_support(
+static bool nav_heightfield_column_has_span_near_height(
+	const rcHeightfield *hf,
+	int x,
+	int z,
+	unsigned short target_smax,
+	int tolerance,
+	bool walkable_only)
+{
+	const rcSpan *span;
+
+	if (hf == nullptr || x < 0 || z < 0 || x >= hf->width || z >= hf->height)
+		return false;
+
+	for (span = hf->spans[x + z * hf->width]; span != nullptr; span = span->next)
+	{
+		if (walkable_only && span->area == RC_NULL_AREA)
+			continue;
+		if (rcAbs(static_cast<int>(span->smax) - static_cast<int>(target_smax)) <= tolerance)
+			return true;
+	}
+	return false;
+}
+
+static void nav_heightfield_collect_axis_supports(
 	const rcHeightfield *hf,
 	int x,
 	int z,
 	int dx,
 	int dz,
 	int max_distance,
-	int *support_x,
-	int *support_z,
-	int *support_distance)
+	std::vector<nav_heightfield_axis_support_t> &supports)
 {
 	int distance;
 
-	if (hf == nullptr || support_x == nullptr || support_z == nullptr || support_distance == nullptr)
-		return false;
+	supports.clear();
+	if (hf == nullptr)
+		return;
 
 	for (distance = 1; distance <= max_distance; ++distance)
 	{
 		const int sx = x + dx * distance;
 		const int sz = z + dz * distance;
+		nav_heightfield_axis_support_t support;
 
 		if (sx < 0 || sz < 0 || sx >= hf->width || sz >= hf->height)
-			return false;
+			return;
 		if (hf->spans[sx + sz * hf->width] == nullptr)
 			continue;
 		if (!nav_heightfield_column_has_walkable_span(hf, sx, sz))
-			return false;
+			return;
 
-		*support_x = sx;
-		*support_z = sz;
-		*support_distance = distance;
-		return true;
+		support.x = sx;
+		support.z = sz;
+		support.distance = distance;
+		supports.push_back(support);
 	}
-	return false;
 }
 
 static nav_heightfield_support_pair_t nav_heightfield_find_best_support_pair(
@@ -468,68 +502,132 @@ static void nav_heightfield_propose_axis_gap_fills(
 	int forward_dx,
 	int forward_dz)
 {
-	int back_x;
-	int back_z;
-	int back_distance;
-	int forward_x;
-	int forward_z;
-	int forward_distance;
+	int best_average_smax;
+	int best_total_distance;
+	int best_height_delta;
 	int step;
-	nav_heightfield_support_pair_t pair;
+	int best_back_x;
+	int best_back_z;
+	int best_forward_x;
+	int best_forward_z;
+	nav_heightfield_support_pair_t best_pair;
+	std::vector<nav_heightfield_axis_support_t> back_supports;
+	std::vector<nav_heightfield_axis_support_t> forward_supports;
 
 	if (hf == nullptr || config == nullptr || config->walkableRadius < 1)
 		return;
-	if (!nav_heightfield_find_axis_support(
-			hf,
-			x,
-			z,
-			back_dx,
-			back_dz,
-			config->walkableRadius,
-			&back_x,
-			&back_z,
-			&back_distance))
-		return;
-	if (!nav_heightfield_find_axis_support(
-			hf,
-			x,
-			z,
-			forward_dx,
-			forward_dz,
-			config->walkableRadius,
-			&forward_x,
-			&forward_z,
-			&forward_distance))
-		return;
-
-	pair = nav_heightfield_find_best_support_pair(
+	nav_heightfield_collect_axis_supports(
 		hf,
-		back_x,
-		back_z,
-		forward_x,
-		forward_z,
-		config->walkableClimb);
-	if (!pair.valid)
+		x,
+		z,
+		back_dx,
+		back_dz,
+		config->walkableRadius,
+		back_supports);
+	nav_heightfield_collect_axis_supports(
+		hf,
+		x,
+		z,
+		forward_dx,
+		forward_dz,
+		config->walkableRadius,
+		forward_supports);
+	if (back_supports.empty() || forward_supports.empty())
 		return;
 
-	for (step = 1; step < back_distance + forward_distance; ++step)
+	best_average_smax = -1;
+	best_total_distance = 0x7fffffff;
+	best_height_delta = 0x7fffffff;
+	best_back_x = 0;
+	best_back_z = 0;
+	best_forward_x = 0;
+	best_forward_z = 0;
+	for (size_t back_index = 0; back_index < back_supports.size(); ++back_index)
 	{
-		const int fill_x = back_x + forward_dx * step;
-		const int fill_z = back_z + forward_dz * step;
-		const int index = fill_x + fill_z * hf->width;
-		const int total_distance = back_distance + forward_distance;
-		const int from_back = step;
-		const int from_forward = total_distance - step;
-		const unsigned short smax = static_cast<unsigned short>(
-			(static_cast<int>(pair.first_smax) * from_forward +
-			 static_cast<int>(pair.second_smax) * from_back +
-			 total_distance / 2) /
-			total_distance);
-		const int score = total_distance * 1024 + pair.height_delta;
+		for (size_t forward_index = 0; forward_index < forward_supports.size(); ++forward_index)
+		{
+			const nav_heightfield_axis_support_t &back = back_supports[back_index];
+			const nav_heightfield_axis_support_t &forward = forward_supports[forward_index];
+			const int total_distance = back.distance + forward.distance;
+			const int step_dx = forward.x > back.x ? 1 : (forward.x < back.x ? -1 : 0);
+			const int step_dz = forward.z > back.z ? 1 : (forward.z < back.z ? -1 : 0);
+			nav_heightfield_support_pair_t pair = nav_heightfield_find_best_support_pair(
+				hf,
+				back.x,
+				back.z,
+				forward.x,
+				forward.z,
+				config->walkableClimb);
 
-		if (hf->spans[index] != nullptr)
-			break;
-		nav_heightfield_propose_gap_fill(fills, index, smax, score);
+			if (!pair.valid)
+				continue;
+
+			for (step = 1; step < total_distance; ++step)
+			{
+				const int fill_x = back.x + step_dx * step;
+				const int fill_z = back.z + step_dz * step;
+				const unsigned short smax = static_cast<unsigned short>(
+					(static_cast<int>(pair.first_smax) * (total_distance - step) +
+					 static_cast<int>(pair.second_smax) * step +
+					 total_distance / 2) /
+					total_distance);
+
+				if (nav_heightfield_column_has_span_near_height(
+						hf,
+						fill_x,
+						fill_z,
+						smax,
+						config->walkableClimb,
+						false))
+					break;
+			}
+			if (step != total_distance)
+				continue;
+
+			{
+				const int average_smax =
+					(static_cast<int>(pair.first_smax) + static_cast<int>(pair.second_smax)) / 2;
+
+				if (best_pair.valid &&
+					(average_smax < best_average_smax ||
+					 (average_smax == best_average_smax && total_distance > best_total_distance) ||
+					 (average_smax == best_average_smax && total_distance == best_total_distance &&
+					  pair.height_delta >= best_height_delta)))
+					continue;
+
+				best_pair = pair;
+				best_average_smax = average_smax;
+				best_total_distance = total_distance;
+				best_height_delta = pair.height_delta;
+				best_back_x = back.x;
+				best_back_z = back.z;
+				best_forward_x = forward.x;
+				best_forward_z = forward.z;
+			}
+		}
+	}
+	if (!best_pair.valid)
+		return;
+
+	{
+		const int total_distance = rcAbs(best_forward_x - best_back_x) + rcAbs(best_forward_z - best_back_z);
+		const int step_dx = best_forward_x > best_back_x ? 1 : (best_forward_x < best_back_x ? -1 : 0);
+		const int step_dz = best_forward_z > best_back_z ? 1 : (best_forward_z < best_back_z ? -1 : 0);
+		const int score = best_total_distance * 1024 + best_pair.height_delta - best_average_smax;
+
+		for (step = 1; step < total_distance; ++step)
+		{
+			const int fill_x = best_back_x + step_dx * step;
+			const int fill_z = best_back_z + step_dz * step;
+			const int index = fill_x + fill_z * hf->width;
+			const unsigned short smax = static_cast<unsigned short>(
+				(static_cast<int>(best_pair.first_smax) * (total_distance - step) +
+				 static_cast<int>(best_pair.second_smax) * step +
+				 total_distance / 2) /
+				total_distance);
+
+			nav_heightfield_propose_gap_fill(fills, index, smax, score);
+		}
 	}
 }
 
@@ -557,11 +655,6 @@ static void nav_heightfield_bridge_small_gaps(
 	{
 		for (x = 0; x < hf->width; ++x)
 		{
-			const int index = x + z * hf->width;
-
-			if (hf->spans[index] != nullptr)
-				continue;
-
 			nav_heightfield_propose_axis_gap_fills(fills, hf, config, x, z, -1, 0, 1, 0);
 			nav_heightfield_propose_axis_gap_fills(fills, hf, config, x, z, 0, -1, 0, 1);
 		}
