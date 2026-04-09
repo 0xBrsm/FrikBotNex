@@ -34,7 +34,6 @@ namespace {
 
 constexpr unsigned char kAreaWalkable = 1;
 constexpr unsigned short kPolyFlagWalk = 1;
-constexpr int kHeightfieldGapFillMaxCells = 1;
 
 struct NavRcContext : public rcContext
 {
@@ -340,20 +339,103 @@ struct nav_heightfield_gap_fill_t
 	}
 };
 
-static const rcSpan *nav_heightfield_top_walkable_span(const rcHeightfield *hf, int x, int z)
+struct nav_heightfield_support_pair_t
+{
+	bool valid;
+	unsigned short first_smax;
+	unsigned short second_smax;
+	int height_delta;
+
+	nav_heightfield_support_pair_t()
+		: valid(false), first_smax(0), second_smax(0), height_delta(0x7fffffff)
+	{
+	}
+};
+
+static bool nav_heightfield_column_has_walkable_span(const rcHeightfield *hf, int x, int z)
 {
 	const rcSpan *span;
-	const rcSpan *best;
 
 	if (hf == nullptr || x < 0 || z < 0 || x >= hf->width || z >= hf->height)
-		return nullptr;
+		return false;
 
-	best = nullptr;
 	for (span = hf->spans[x + z * hf->width]; span != nullptr; span = span->next)
 	{
-		if (span->area == RC_NULL_AREA)
+		if (span->area != RC_NULL_AREA)
+			return true;
+	}
+	return false;
+}
+
+static bool nav_heightfield_find_axis_support(
+	const rcHeightfield *hf,
+	int x,
+	int z,
+	int dx,
+	int dz,
+	int max_distance,
+	int *support_x,
+	int *support_z,
+	int *support_distance)
+{
+	int distance;
+
+	if (hf == nullptr || support_x == nullptr || support_z == nullptr || support_distance == nullptr)
+		return false;
+
+	for (distance = 1; distance <= max_distance; ++distance)
+	{
+		const int sx = x + dx * distance;
+		const int sz = z + dz * distance;
+
+		if (sx < 0 || sz < 0 || sx >= hf->width || sz >= hf->height)
+			return false;
+		if (hf->spans[sx + sz * hf->width] == nullptr)
 			continue;
-		best = span;
+		if (!nav_heightfield_column_has_walkable_span(hf, sx, sz))
+			return false;
+
+		*support_x = sx;
+		*support_z = sz;
+		*support_distance = distance;
+		return true;
+	}
+	return false;
+}
+
+static nav_heightfield_support_pair_t nav_heightfield_find_best_support_pair(
+	const rcHeightfield *hf,
+	int ax,
+	int az,
+	int bx,
+	int bz,
+	int walkable_climb)
+{
+	const rcSpan *a;
+	const rcSpan *b;
+	nav_heightfield_support_pair_t best;
+
+	if (hf == nullptr)
+		return best;
+
+	for (a = hf->spans[ax + az * hf->width]; a != nullptr; a = a->next)
+	{
+		if (a->area == RC_NULL_AREA)
+			continue;
+		for (b = hf->spans[bx + bz * hf->width]; b != nullptr; b = b->next)
+		{
+			const int diff = rcAbs(static_cast<int>(a->smax) - static_cast<int>(b->smax));
+
+			if (b->area == RC_NULL_AREA || diff > walkable_climb)
+				continue;
+			if (best.valid && diff >= best.height_delta)
+				continue;
+
+			best.valid = true;
+			best.first_smax = a->smax;
+			best.second_smax = b->smax;
+			best.height_delta = diff;
+		}
 	}
 	return best;
 }
@@ -375,22 +457,98 @@ static void nav_heightfield_propose_gap_fill(
 	fill.score = score;
 }
 
-/* Fill tiny empty columns that sit between two walkable columns at nearly the
-   same height. This repairs voxel cracks from BSP rasterization without
-   replacing Recast's normal solid-geometry pipeline. */
+static void nav_heightfield_propose_axis_gap_fills(
+	std::vector<nav_heightfield_gap_fill_t> &fills,
+	const rcHeightfield *hf,
+	const rcConfig *config,
+	int x,
+	int z,
+	int back_dx,
+	int back_dz,
+	int forward_dx,
+	int forward_dz)
+{
+	int back_x;
+	int back_z;
+	int back_distance;
+	int forward_x;
+	int forward_z;
+	int forward_distance;
+	int step;
+	nav_heightfield_support_pair_t pair;
+
+	if (hf == nullptr || config == nullptr || config->walkableRadius < 1)
+		return;
+	if (!nav_heightfield_find_axis_support(
+			hf,
+			x,
+			z,
+			back_dx,
+			back_dz,
+			config->walkableRadius,
+			&back_x,
+			&back_z,
+			&back_distance))
+		return;
+	if (!nav_heightfield_find_axis_support(
+			hf,
+			x,
+			z,
+			forward_dx,
+			forward_dz,
+			config->walkableRadius,
+			&forward_x,
+			&forward_z,
+			&forward_distance))
+		return;
+
+	pair = nav_heightfield_find_best_support_pair(
+		hf,
+		back_x,
+		back_z,
+		forward_x,
+		forward_z,
+		config->walkableClimb);
+	if (!pair.valid)
+		return;
+
+	for (step = 1; step < back_distance + forward_distance; ++step)
+	{
+		const int fill_x = back_x + forward_dx * step;
+		const int fill_z = back_z + forward_dz * step;
+		const int index = fill_x + fill_z * hf->width;
+		const int total_distance = back_distance + forward_distance;
+		const int from_back = step;
+		const int from_forward = total_distance - step;
+		const unsigned short smax = static_cast<unsigned short>(
+			(static_cast<int>(pair.first_smax) * from_forward +
+			 static_cast<int>(pair.second_smax) * from_back +
+			 total_distance / 2) /
+			total_distance);
+		const int score = total_distance * 1024 + pair.height_delta;
+
+		if (hf->spans[index] != nullptr)
+			break;
+		nav_heightfield_propose_gap_fill(fills, index, smax, score);
+	}
+}
+
+/* Fill tiny empty runs bracketed by walkable support columns on the same
+   effective floor. The maximum repaired width is bounded by walkableRadius,
+   so the pass only repairs cracks the agent radius should already tolerate. */
 static void nav_heightfield_bridge_small_gaps(
 	rcContext *ctx,
 	rcHeightfield *hf,
 	const rcConfig *config)
 {
-	const rcSpan *a;
-	const rcSpan *b;
 	int x;
 	int z;
 	int fills_applied;
 	std::vector<nav_heightfield_gap_fill_t> fills;
 
 	if (ctx == nullptr || hf == nullptr || config == nullptr)
+		return;
+	if (config->walkableRadius < 1)
 		return;
 
 	fills.resize(static_cast<size_t>(hf->width * hf->height));
@@ -404,37 +562,8 @@ static void nav_heightfield_bridge_small_gaps(
 			if (hf->spans[index] != nullptr)
 				continue;
 
-			if (kHeightfieldGapFillMaxCells >= 1 && x > 0 && x + 1 < hf->width)
-			{
-				a = nav_heightfield_top_walkable_span(hf, x - 1, z);
-				b = nav_heightfield_top_walkable_span(hf, x + 1, z);
-				if (a != nullptr && b != nullptr)
-				{
-					const int diff = rcAbs(static_cast<int>(a->smax) - static_cast<int>(b->smax));
-					if (diff <= config->walkableClimb)
-					{
-						const unsigned short smax = static_cast<unsigned short>(
-							(static_cast<int>(a->smax) + static_cast<int>(b->smax) + 1) / 2);
-						nav_heightfield_propose_gap_fill(fills, index, smax, diff);
-					}
-				}
-			}
-
-			if (kHeightfieldGapFillMaxCells >= 1 && z > 0 && z + 1 < hf->height)
-			{
-				a = nav_heightfield_top_walkable_span(hf, x, z - 1);
-				b = nav_heightfield_top_walkable_span(hf, x, z + 1);
-				if (a != nullptr && b != nullptr)
-				{
-					const int diff = rcAbs(static_cast<int>(a->smax) - static_cast<int>(b->smax));
-					if (diff <= config->walkableClimb)
-					{
-						const unsigned short smax = static_cast<unsigned short>(
-							(static_cast<int>(a->smax) + static_cast<int>(b->smax) + 1) / 2);
-						nav_heightfield_propose_gap_fill(fills, index, smax, diff);
-					}
-				}
-			}
+			nav_heightfield_propose_axis_gap_fills(fills, hf, config, x, z, -1, 0, 1, 0);
+			nav_heightfield_propose_axis_gap_fills(fills, hf, config, x, z, 0, -1, 0, 1);
 		}
 	}
 
