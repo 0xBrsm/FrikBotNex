@@ -328,24 +328,20 @@ static int nav_mesh_find_nearest_internal(
 
 
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
-	const float *verts,
-	int vertex_count,
-	const int *tris,
-	int triangle_count,
 	const nav_mesh_build_config_t *config,
 	const nav_off_mesh_link_t *off_mesh_links,
 	int off_mesh_link_count,
 	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback,
 	void *callback_data,
+	nav_mesh_heightfield_callback_t hf_callback,
+	void *hf_user_data,
 	char *error,
 	size_t error_size)
 {
 	NavRcContext ctx;
 	rcConfig rc_config;
 	RecastBuildGuard guard;
-	std::vector<float> recast_verts;
-	std::vector<unsigned char> areas;
 	int nav_data_size;
 	dtNavMeshCreateParams params;
 	dtStatus status;
@@ -353,26 +349,15 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	if (summary != nullptr)
 		memset(summary, 0, sizeof(*summary));
-	if (verts == nullptr || tris == nullptr || config == nullptr)
+	if (config == nullptr || hf_callback == nullptr)
 	{
-		nav_set_error(error, error_size, "Navmesh build requires non-null vertices, triangles, and config");
-		return nullptr;
-	}
-	if (vertex_count < 3 || triangle_count < 1)
-	{
-		nav_set_error(error, error_size, "Navmesh build requires at least 3 vertices and 1 triangle");
+		nav_set_error(error, error_size, "Navmesh build requires config and heightfield callback");
 		return nullptr;
 	}
 
 	memset(&rc_config, 0, sizeof(rc_config));
-	recast_verts.resize(static_cast<size_t>(vertex_count) * 3u);
-	for (i = 0; i < vertex_count; ++i)
-		nav_quake_to_recast(&verts[i * 3], &recast_verts[static_cast<size_t>(i) * 3u]);
-
-	rcCalcBounds(recast_verts.data(), vertex_count, rc_config.bmin, rc_config.bmax);
 	rc_config.cs = config->cell_size;
 	rc_config.ch = config->cell_height;
-	rcCalcGridSize(rc_config.bmin, rc_config.bmax, rc_config.cs, &rc_config.width, &rc_config.height);
 	rc_config.walkableSlopeAngle = config->walkable_slope_angle;
 	rc_config.walkableHeight = (int)ceilf(config->walkable_height / rc_config.ch);
 	rc_config.walkableClimb = (int)ceilf(config->walkable_climb / rc_config.ch);
@@ -387,26 +372,29 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	nav_data_size = 0;
 
+	/* The caller populates the heightfield via hull traces.
+	   We need bounds first — the callback sets bmin/bmax and grid size,
+	   then creates and fills the heightfield. */
 	guard.solid = rcAllocHeightfield();
 	if (guard.solid == nullptr)
 	{
 		nav_set_error(error, error_size, "Failed to allocate Recast heightfield");
 		return nullptr;
 	}
-	if (!rcCreateHeightfield(&ctx, *guard.solid, rc_config.width, rc_config.height, rc_config.bmin, rc_config.bmax, rc_config.cs, rc_config.ch))
+
+	if (!hf_callback(&ctx, guard.solid, &rc_config, hf_user_data))
 	{
-		nav_set_error(error, error_size, "Failed to create Recast heightfield");
+		nav_set_error(error, error_size, "Heightfield population callback failed");
 		return nullptr;
 	}
 
-	areas.assign(static_cast<size_t>(triangle_count), 0);
-	rcMarkWalkableTriangles(&ctx, rc_config.walkableSlopeAngle, recast_verts.data(), vertex_count, tris, triangle_count, areas.data());
-	if (!rcRasterizeTriangles(&ctx, recast_verts.data(), vertex_count, tris, areas.data(), triangle_count, *guard.solid, rc_config.walkableClimb))
-	{
-		nav_set_error(error, error_size, "Failed to rasterize triangles into heightfield");
-		return nullptr;
-	}
+	/* Sync rc_config bounds from the populated heightfield */
+	rcVcopy(rc_config.bmin, guard.solid->bmin);
+	rcVcopy(rc_config.bmax, guard.solid->bmax);
+	rc_config.width = guard.solid->width;
+	rc_config.height = guard.solid->height;
 
+	/* Apply span filters */
 	rcFilterLowHangingWalkableObstacles(&ctx, rc_config.walkableClimb, *guard.solid);
 	rcFilterLedgeSpans(&ctx, rc_config.walkableHeight, rc_config.walkableClimb, *guard.solid);
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
@@ -1004,8 +992,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	if (summary != nullptr)
 	{
-		summary->input_vertex_count = vertex_count;
-		summary->input_triangle_count = triangle_count;
+		summary->input_vertex_count = 0; /* hull trace mode — no input triangles */
+		summary->input_triangle_count = 0;
 		summary->polygon_count = guard.poly_mesh->npolys;
 		summary->navmesh_vertex_count = guard.poly_mesh->nverts;
 		summary->detail_mesh_count = guard.detail_mesh->nmeshes;

@@ -230,13 +230,18 @@ typedef int (*nav_mesh_link_callback_t)(
 	nav_off_mesh_link_t **out_links,
 	void *user_data);
 
+/* Heightfield population callback: called to fill the heightfield with
+   solid spans.  If provided, replaces BSP triangle rasterization.
+   Use rcAddSpan() to add solid spans.  Return 1 on success, 0 on failure. */
+typedef int (*nav_mesh_heightfield_callback_t)(
+	void *ctx, void *heightfield, const void *rc_config, void *user_data);
+
 nav_mesh_runtime_t *nav_mesh_build(
-	const float *verts, int vertex_count,
-	const int *tris, int triangle_count,
 	const nav_mesh_build_config_t *config,
 	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
 	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback, void *callback_data,
+	nav_mesh_heightfield_callback_t hf_callback, void *hf_user_data,
 	char *error, size_t error_size);
 
 int nav_mesh_find_nearest(
