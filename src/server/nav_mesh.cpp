@@ -254,6 +254,21 @@ static float nav_mesh_snap_horizontal_limit(const nav_mesh_runtime_t *navmesh, c
 	return fmaxf(limit, 16.0f);
 }
 
+static int nav_mesh_build_regions(
+	NavRcContext *ctx,
+	rcCompactHeightfield *compact,
+	const rcConfig *config)
+{
+	/* Layer regions: designed for multi-layer (multi-floor) maps.
+	   Handles overlapping spans and narrow ledges better than
+	   watershed or monotone partitioning. */
+	return rcBuildLayerRegions(
+		ctx,
+		*compact,
+		0,
+		config->minRegionArea);
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -412,11 +427,6 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	   lava) because it treats drop-offs the same as walls.  We build a
 	   custom distance field seeded only from wall borders, then erode
 	   spans that are too close to walls.  Ledge-adjacent spans survive. */
-	if (!rcBuildDistanceField(&ctx, *guard.compact))
-	{
-		nav_set_error(error, error_size, "Failed to build distance field");
-		return nullptr;
-	}
 	{
 		const int w = guard.compact->width;
 		const int h = guard.compact->height;
@@ -600,7 +610,15 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		fprintf(stderr, "Nav: wall-only erosion: %d spans eroded (radius=%d)\n",
 			eroded, rc_config.walkableRadius);
 	}
-	if (!rcBuildRegions(&ctx, *guard.compact, 0, rc_config.minRegionArea, rc_config.mergeRegionArea))
+	/* The custom erosion above changes walkable spans, so rebuild the
+	   distance field afterward. Regions and near-wall costs both consume
+	   compact->dist and must see the post-erosion topology. */
+	if (!rcBuildDistanceField(&ctx, *guard.compact))
+	{
+		nav_set_error(error, error_size, "Failed to build post-erosion distance field");
+		return nullptr;
+	}
+	if (!nav_mesh_build_regions(&ctx, guard.compact, &rc_config))
 	{
 		nav_set_error(error, error_size, "Failed to build navigation regions");
 		return nullptr;
