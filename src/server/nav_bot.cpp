@@ -956,117 +956,6 @@ static int nav_merge_links(
 	return total;
 }
 
-/* ---- Hull-trace heightfield population ---- */
-
-/* Populate the Recast heightfield by tracing the player hull downward
-   at each grid cell.  This uses the engine's hull 1 collision which
-   naturally bridges small holes in the floor geometry. */
-static int nav_hull_trace_heightfield(void *ctx_ptr, void *hf_ptr,
-	const void *rc_config_ptr, void *user_data)
-{
-	(void)user_data;
-	rcContext *ctx = (rcContext *)ctx_ptr;
-	rcHeightfield *hf = (rcHeightfield *)hf_ptr;
-	const rcConfig *rc_config = (const rcConfig *)rc_config_ptr;
-	model_t *worldmodel = sv.worldmodel;
-
-	if (!worldmodel) return 0;
-
-	/* Compute world bounds from BSP model */
-	/* Recast coords: X = Quake X, Y = Quake Z (up), Z = Quake Y */
-	float bmin[3], bmax[3];
-	bmin[0] = worldmodel->mins[0] - 64;  /* Quake X → Recast X */
-	bmin[1] = worldmodel->mins[2] - 64;  /* Quake Z → Recast Y */
-	bmin[2] = worldmodel->mins[1] - 64;  /* Quake Y → Recast Z */
-	bmax[0] = worldmodel->maxs[0] + 64;
-	bmax[1] = worldmodel->maxs[2] + 64;
-	bmax[2] = worldmodel->maxs[1] + 64;
-
-	fprintf(stderr, "Nav: hull bounds: model mins=(%.0f %.0f %.0f) maxs=(%.0f %.0f %.0f)\n",
-		worldmodel->mins[0], worldmodel->mins[1], worldmodel->mins[2],
-		worldmodel->maxs[0], worldmodel->maxs[1], worldmodel->maxs[2]);
-	fprintf(stderr, "Nav: hull recast bmin=(%.0f %.0f %.0f) bmax=(%.0f %.0f %.0f)\n",
-		bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
-
-	rcCalcGridSize(bmin, bmax, rc_config->cs, (int *)&hf->width, (int *)&hf->height);
-	fprintf(stderr, "Nav: hull grid: %dx%d\n", hf->width, hf->height);
-	if (!rcCreateHeightfield(ctx, *hf, hf->width, hf->height,
-		bmin, bmax, rc_config->cs, rc_config->ch))
-		return 0;
-
-	vec3_t hull_mins = {-16, -16, -24};
-	vec3_t hull_maxs = {16, 16, 32};
-	float cs = rc_config->cs;
-	float ch = rc_config->ch;
-	int w = hf->width;
-	int h = hf->height;
-	/* Quake Z bounds for tracing */
-	float q_zmax = worldmodel->maxs[2] + 64;
-	float q_zmin = worldmodel->mins[2] - 64;
-	int total_spans = 0;
-
-	for (int gz = 0; gz < h; gz++)
-	{
-		for (int gx = 0; gx < w; gx++)
-		{
-			/* Cell center in Recast coords → Quake coords */
-			float rc_x = bmin[0] + (gx + 0.5f) * cs;
-			float rc_z = bmin[2] + (gz + 0.5f) * cs;
-			float qx = rc_x;    /* Recast X = Quake X */
-			float qy = rc_z;    /* Recast Z = Quake Y */
-
-			/* Trace downward through the column, finding each floor */
-			float trace_z = q_zmax;
-			int max_floors = 8;
-
-			while (trace_z > q_zmin && max_floors > 0)
-			{
-				vec3_t start = {qx, qy, trace_z};
-				vec3_t end = {qx, qy, q_zmin};
-				trace_t trace = SV_Move(start, hull_mins, hull_maxs, end, MOVE_NOMONSTERS, NULL);
-
-				if (trace.allsolid)
-				{
-					/* Entire column is solid from here down */
-					unsigned short smin_c = 0;
-					unsigned short smax_c = (unsigned short)((trace_z - bmin[1]) / ch);
-					if (smax_c > 0)
-						rcAddSpan(ctx, *hf, gx, gz, smin_c, smax_c, RC_WALKABLE_AREA, rc_config->walkableClimb);
-					total_spans++;
-					break;
-				}
-
-				if (trace.fraction >= 1.0f)
-					break; /* open air all the way down */
-
-				/* Hit a floor. endpos[2] is player origin height.
-				   Actual floor surface = endpos[2] + hull_mins[2] = endpos[2] - 24 */
-				float floor_z = trace.endpos[2] + hull_mins[2];
-
-				/* Convert floor to Recast Y cell units.
-				   The solid region extends below the floor. Use a thick slab
-				   (64u) to ensure adjacent cells always overlap, preventing
-				   fragmentation on sloped surfaces. */
-				float rc_floor_y = floor_z; /* Quake Z = Recast Y */
-				unsigned short smax = (unsigned short)((rc_floor_y - bmin[1]) / ch);
-				unsigned short smin = (smax > 32) ? (smax - 32) : 0;
-
-				rcAddSpan(ctx, *hf, gx, gz, smin, smax, RC_WALKABLE_AREA, rc_config->walkableClimb);
-				total_spans++;
-
-				/* Continue tracing below this floor:
-				   start from below the floor surface minus hull height */
-				trace_z = floor_z - 2.0f;
-				max_floors--;
-			}
-		}
-	}
-
-	fprintf(stderr, "Nav: hull trace heightfield: %dx%d grid, %d solid spans\n",
-		w, h, total_spans);
-	return 1;
-}
-
 /* ---- Build ---- */
 
 void Nav_BuildForMap(void)
@@ -1075,6 +964,10 @@ void Nav_BuildForMap(void)
 	nav_mesh_summary_t summary;
 	nav_off_mesh_link_t *entity_links;
 	int entity_count;
+	float *verts = NULL;
+	int vert_count = 0;
+	int *tris = NULL;
+	int tri_count = 0;
 	char error[256];
 	double t_start, t_done;
 
@@ -1082,6 +975,31 @@ void Nav_BuildForMap(void)
 	if (sv.worldmodel == NULL) return;
 
 	t_start = Sys_FloatTime();
+
+	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count))
+	{
+		Con_Printf("Nav: BSP extraction failed\n");
+		return;
+	}
+	Con_Printf("Nav: BSP extracted %d verts, %d tris\n", vert_count, tri_count);
+
+	/* Log BSP bounds */
+	{
+		int bi;
+		float bmin[3] = {999999, 999999, 999999};
+		float bmax[3] = {-999999, -999999, -999999};
+		for (bi = 0; bi < vert_count; bi++)
+		{
+			if (verts[bi*3+0] < bmin[0]) bmin[0] = verts[bi*3+0];
+			if (verts[bi*3+1] < bmin[1]) bmin[1] = verts[bi*3+1];
+			if (verts[bi*3+2] < bmin[2]) bmin[2] = verts[bi*3+2];
+			if (verts[bi*3+0] > bmax[0]) bmax[0] = verts[bi*3+0];
+			if (verts[bi*3+1] > bmax[1]) bmax[1] = verts[bi*3+1];
+			if (verts[bi*3+2] > bmax[2]) bmax[2] = verts[bi*3+2];
+		}
+		Con_Printf("Nav: BSP bounds (%.0f %.0f %.0f) - (%.0f %.0f %.0f)\n",
+			bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
+	}
 
 	nav_default_config(&config);
 
@@ -1094,22 +1012,24 @@ void Nav_BuildForMap(void)
 
 	Con_Printf("Nav: %d teleporter links\n", entity_count);
 
-	/* Build navmesh using hull traces for heightfield population */
+	/* Single-pass build: entity links provided upfront, jump/drop links
+	   detected mid-build via callback after contours are ready. */
 	memset(&summary, 0, sizeof(summary));
 	memset(error, 0, sizeof(error));
-	nav_mesh = nav_mesh_build(
+	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
 		nav_link_callback, NULL,
-		nav_hull_trace_heightfield, NULL,
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
 	{
 		Con_Printf("Nav: build failed: %s\n", error);
-		free(entity_links);
+		free(verts); free(tris); free(entity_links);
 		return;
 	}
 
+	free(verts);
+	free(tris);
 	free(entity_links);
 
 	nav_build_block_map();
@@ -1192,51 +1112,6 @@ void Nav_BuildForMap(void)
 				found ? sqrtf((probe[0]-nr.nearest_point[0])*(probe[0]-nr.nearest_point[0]) +
 							  (probe[1]-nr.nearest_point[1])*(probe[1]-nr.nearest_point[1]) +
 							  (probe[2]-nr.nearest_point[2])*(probe[2]-nr.nearest_point[2])) : 0.0f);
-		}
-	}
-
-	/* ---- DM4 fine ledge probe: scan along X=820 to find the break ---- */
-	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
-	{
-		fprintf(stderr, "Nav: LEDGE SCAN along X=820, Z=46:\n");
-		dtPolyRef prev_ref = 0;
-		for (int y = -300; y >= -650; y -= 4)
-		{
-			float p[3] = {820.0f, (float)y, 46.0f};
-			nav_mesh_nearest_result_t nr;
-			char nerr[64];
-			int found = nav_mesh_find_nearest(nav_mesh, p, &nr, nerr, sizeof(nerr));
-			if (!found || nr.poly_ref != prev_ref)
-			{
-				float dist = found ? sqrtf(
-					(p[0]-nr.nearest_point[0])*(p[0]-nr.nearest_point[0]) +
-					(p[1]-nr.nearest_point[1])*(p[1]-nr.nearest_point[1]) +
-					(p[2]-nr.nearest_point[2])*(p[2]-nr.nearest_point[2])) : 0;
-				fprintf(stderr, "  Y=%d %s ref=%llu nearest=(%.0f %.0f %.0f) dist=%.0f\n",
-					y, found ? "HIT" : "MISS",
-					found ? nr.poly_ref : 0ULL,
-					found ? nr.nearest_point[0] : 0,
-					found ? nr.nearest_point[1] : 0,
-					found ? nr.nearest_point[2] : 0,
-					dist);
-				if (found) prev_ref = nr.poly_ref;
-			}
-		}
-
-		/* Also do a BSP floor trace along the same line to check for gaps */
-		fprintf(stderr, "Nav: BSP FLOOR SCAN along X=820, Z=46:\n");
-		float prev_floor = -99999;
-		for (int y = -300; y >= -650; y -= 4)
-		{
-			vec3_t ts = {820, (float)y, 100}, te = {820, (float)y, -200}, zero = {0,0,0};
-			trace_t tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
-			float fz = tr.endpos[2];
-			if (fabsf(fz - prev_floor) > 2 || tr.fraction >= 1.0f)
-			{
-				fprintf(stderr, "  Y=%d bsp_floor=%.1f%s\n", y, fz,
-					tr.fraction >= 1.0f ? " (NO HIT)" : "");
-				prev_floor = fz;
-			}
 		}
 	}
 
