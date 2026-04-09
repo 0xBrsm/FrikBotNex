@@ -1115,6 +1115,69 @@ void Nav_BuildForMap(void)
 		}
 	}
 
+	/* ---- DM4 grid probe: find all poly refs on upper level ---- */
+	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
+	{
+		/* Grid probe at Z=46 (upper walkway) across the map.
+		   Log unique poly refs and their centers to find islands. */
+		dtQueryFilter filter;
+		nav_mesh_setup_filter(&filter);
+		unsigned long long seen_refs[256];
+		float seen_centers[256][3];
+		int seen_count = 0;
+		int x, y;
+		for (x = -200; x <= 1200; x += 32)
+		{
+			for (y = -1200; y <= 600; y += 32)
+			{
+				float p[3] = {(float)x, (float)y, 46.0f};
+				nav_mesh_nearest_result_t nr;
+				char nerr[64];
+				if (!nav_mesh_find_nearest(nav_mesh, p, &nr, nerr, sizeof(nerr)))
+					continue;
+				/* Only consider polys near the upper level (Z within 50u) */
+				if (nr.nearest_point[2] < -10 || nr.nearest_point[2] > 60)
+					continue;
+				/* Check if already seen */
+				int found = 0;
+				for (int si = 0; si < seen_count; si++)
+					if (seen_refs[si] == nr.poly_ref) { found = 1; break; }
+				if (!found && seen_count < 256)
+				{
+					seen_refs[seen_count] = nr.poly_ref;
+					seen_centers[seen_count][0] = nr.nearest_point[0];
+					seen_centers[seen_count][1] = nr.nearest_point[1];
+					seen_centers[seen_count][2] = nr.nearest_point[2];
+					seen_count++;
+				}
+			}
+		}
+		fprintf(stderr, "Nav: GRID found %d unique upper-level polys\n", seen_count);
+
+		/* For each pair, test pathfinding to find connected components */
+		/* Simpler: test all polys against ref=358 (known main island) */
+		float rc_start[3];
+		rc_start[0] = seen_centers[0][0]; rc_start[1] = seen_centers[0][2]; rc_start[2] = seen_centers[0][1];
+		int connected_to_first = 0;
+		for (int si = 0; si < seen_count; si++)
+		{
+			float rc_end[3];
+			rc_end[0] = seen_centers[si][0]; rc_end[1] = seen_centers[si][2]; rc_end[2] = seen_centers[si][1];
+			dtPolyRef path[512];
+			int pc = 0;
+			dtStatus st = nav_mesh->query->findPath(
+				(dtPolyRef)seen_refs[0], (dtPolyRef)seen_refs[si],
+				rc_start, rc_end, &filter, path, &pc, 512);
+			int ok = !dtStatusFailed(st) && !dtStatusDetail(st, DT_PARTIAL_RESULT);
+			if (ok) connected_to_first++;
+			else
+				fprintf(stderr, "  DISCONNECTED ref=%llu at (%.0f %.0f %.0f)\n",
+					seen_refs[si], seen_centers[si][0], seen_centers[si][1], seen_centers[si][2]);
+		}
+		fprintf(stderr, "Nav: GRID %d/%d upper polys connected to first poly (ref=%llu)\n",
+			connected_to_first, seen_count, seen_refs[0]);
+	}
+
 	/* ---- DM4 waypoint edge diagnostic ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
