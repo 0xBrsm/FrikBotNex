@@ -672,24 +672,55 @@ static int nav_link_callback(
 		short_probe[0] = mid[0] + norm[0] * 8.0f;
 		short_probe[1] = mid[1] + norm[1] * 8.0f;
 		short_probe[2] = mid[2];
-		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + NAV_PLAYER_FLOOR_OFFSET, NULL))
+		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
+		{
+			static int wall_rej_lower = 0;
+			if (mid[2] < -100 && mid[2] > -160) wall_rej_lower++;
 			continue;
+		}
+		/* Count lower edges that pass wall check */
+		{
+			static int lower_pass = 0;
+			if (mid[2] < -100 && mid[2] > -160)
+			{
+				lower_pass++;
+				if (lower_pass <= 3)
+					fprintf(stderr, "Nav: LOWER_PASS edge=(%.0f %.0f %.0f) norm=(%.2f %.2f)\n",
+						mid[0], mid[1], mid[2], norm[0], norm[1]);
+			}
+		}
 
 		/* ---- Drops: find all floors below ---- */
 		{
 			float floors[8];
 			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
 			int nfloors = nav_heightfield_floors_below(hf, mid, mid[2], min_z, floors, 8);
+			/* Also check outward from edge along normal for floors below */
+			if (nfloors == 0 && mid[2] < -100 && mid[2] > -160)
 			{
-				static int dbg2 = 0;
-				if (dbg2 < 5 && nfloors > 0)
+				float out_probe[3];
+				float out_z;
+				int d;
+				for (d = 8; d <= 64; d += 8)
 				{
-					fprintf(stderr, "Nav: edge xy=(%.0f %.0f) z=%.0f found %d floors below:",
-						mid[0], mid[1], mid[2], nfloors);
-					for (int di = 0; di < nfloors; di++)
-						fprintf(stderr, " %.0f", floors[di]);
-					fprintf(stderr, "\n");
-					dbg2++;
+					out_probe[0] = mid[0] + norm[0] * d;
+					out_probe[1] = mid[1] + norm[1] * d;
+					out_probe[2] = mid[2];
+					int nf2 = nav_heightfield_floors_below(hf, out_probe, mid[2], mid[2] - NAV_DROP_HEIGHT_MAX, floors, 8);
+					if (nf2 > 0)
+					{
+						static int dbg3 = 0;
+						if (dbg3 < 5)
+						{
+							fprintf(stderr, "Nav: LOWER_OUT edge=(%.0f %.0f %.0f) probe_dist=%d floors=%d",
+								mid[0], mid[1], mid[2], d, nf2);
+							for (int di = 0; di < nf2; di++)
+								fprintf(stderr, " z=%.0f", floors[di]);
+							fprintf(stderr, "\n");
+							dbg3++;
+						}
+						break;
+					}
 				}
 			}
 
@@ -813,6 +844,41 @@ static int nav_link_callback(
 				break; /* found a jump at this edge, don't create duplicates */
 			}
 		}
+	}
+
+	/* Log wall rejection stats for lower corridor */
+	{
+		int lower_total = 0, lower_wall = 0;
+		for (int ei = 0; ei < edge_count; ei++)
+		{
+			if (edges[ei].midpoint[2] < -100 && edges[ei].midpoint[2] > -160)
+			{
+				lower_total++;
+				float sp[3];
+				sp[0] = edges[ei].midpoint[0] + edges[ei].normal[0] * 8.0f;
+				sp[1] = edges[ei].midpoint[1] + edges[ei].normal[1] * 8.0f;
+				sp[2] = edges[ei].midpoint[2];
+				if (!nav_trace_clear_at_height(edges[ei].midpoint, sp, edges[ei].midpoint[2] + 24.0f, NULL))
+					lower_wall++;
+			}
+		}
+		fprintf(stderr, "Nav: lower corridor edges: %d total, %d wall-rejected, %d pass\n",
+			lower_total, lower_wall, lower_total - lower_wall);
+	}
+
+	/* Log edge height distribution */
+	{
+		int z_hist[20];
+		memset(z_hist, 0, sizeof(z_hist));
+		for (int ei = 0; ei < edge_count; ei++)
+		{
+			int bucket = (int)((edges[ei].midpoint[2] + 400) / 50);
+			if (bucket >= 0 && bucket < 20) z_hist[bucket]++;
+		}
+		fprintf(stderr, "Nav: edge Z distribution (%d edges):", edge_count);
+		for (int bi = 0; bi < 20; bi++)
+			if (z_hist[bi]) fprintf(stderr, " [%.0f]=% d", bi * 50.0f - 400, z_hist[bi]);
+		fprintf(stderr, "\n");
 	}
 
 	*out_links = links;
@@ -1017,6 +1083,35 @@ void Nav_BuildForMap(void)
 					hull_floor - nr.nearest_point[2]);
 			}
 			if (si > 20) break; /* limit output */
+		}
+	}
+
+	/* ---- DM4 stairway connectivity probe ---- */
+	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
+	{
+		/* Probe from wp33 (772,-471,-82) toward wp1 (776,-808,-210)
+		   in steps to find where the navmesh breaks */
+		float probe[3];
+		float start[3] = {772, -471, -82};
+		float end[3] = {776, -808, -210};
+		int steps = 20;
+		fprintf(stderr, "Nav: STAIR PROBE from (%.0f %.0f %.0f) to (%.0f %.0f %.0f)\n",
+			start[0], start[1], start[2], end[0], end[1], end[2]);
+		for (int s = 0; s <= steps; s++)
+		{
+			float t = (float)s / steps;
+			probe[0] = start[0] + (end[0] - start[0]) * t;
+			probe[1] = start[1] + (end[1] - start[1]) * t;
+			probe[2] = start[2] + (end[2] - start[2]) * t;
+			nav_mesh_nearest_result_t nr;
+			char nerr[64];
+			int found = nav_mesh_find_nearest(nav_mesh, probe, &nr, nerr, sizeof(nerr));
+			fprintf(stderr, "  t=%.2f pos=(%.0f %.0f %.0f) %s dist=%.0f\n",
+				t, probe[0], probe[1], probe[2],
+				found ? "HIT" : "MISS",
+				found ? sqrtf((probe[0]-nr.nearest_point[0])*(probe[0]-nr.nearest_point[0]) +
+							  (probe[1]-nr.nearest_point[1])*(probe[1]-nr.nearest_point[1]) +
+							  (probe[2]-nr.nearest_point[2])*(probe[2]-nr.nearest_point[2])) : 0.0f);
 		}
 	}
 
@@ -1457,7 +1552,15 @@ static void PF_nav_find_goal(void)
 		{
 			if (path[path_count - 1] != nav_item_cache[i].poly_ref)
 			{
-				Con_Printf("  PARTIAL to %s (%d polys)\n", pr_strings + (int)it->v.classname, path_count);
+				{
+					/* Log where the partial path ends */
+					float last_pos[3] = {0};
+					nav_mesh->query->closestPointOnPoly(path[path_count-1], bot_nearest, last_pos, NULL);
+					float lq[3];
+					lq[0] = last_pos[0]; lq[1] = last_pos[2]; lq[2] = last_pos[1]; /* recast→quake */
+					Con_Printf("  PARTIAL to %s (%d polys) ends=(%.0f %.0f %.0f)\n",
+						pr_strings + (int)it->v.classname, path_count, lq[0], lq[1], lq[2]);
+				}
 				continue;
 			}
 		}
@@ -1472,6 +1575,18 @@ static void PF_nav_find_goal(void)
 
 		dist = (float)path_count * 48.0f;
 		cost = (1.0f - want) * dist;
+
+		/* Log each reachable item's cost breakdown */
+		{
+			float qdist = sqrtf(
+				(pos[0]-it->v.origin[0])*(pos[0]-it->v.origin[0]) +
+				(pos[1]-it->v.origin[1])*(pos[1]-it->v.origin[1]) +
+				(pos[2]-it->v.origin[2])*(pos[2]-it->v.origin[2]));
+			fprintf(stderr, "  GOAL %s want=%.2f polys=%d cost=%.0f qdist=%.0f%s\n",
+				pr_strings + (int)it->v.classname, want, path_count, cost, qdist,
+				(cost < bestcost) ? " *BEST*" : "");
+		}
+
 		if (cost < bestcost)
 		{
 			bestcost = cost;

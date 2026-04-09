@@ -1461,39 +1461,6 @@ extern "C" int navigate(nav_corridor_t *c,
 			corners[1] = h; /* Recast Y = height */
 	}
 
-	/* Wall offset: push corner away from nearby walls so the 32-wide
-	   hull has clearance.  Skip off-mesh links — they need exact positions. */
-	if (!(flags[0] & 0x04)) /* not DT_STRAIGHTPATH_OFFMESH_CONNECTION */
-	{
-		float wall_dist = 0, wall_pos[3], wall_normal[3];
-		const float clearance = 16.0f; /* player hull half-width */
-
-		dtStatus ws = navmesh->query->findDistanceToWall(
-			refs[0], corners, clearance + 1.0f,
-			&c->filter, &wall_dist, wall_pos, wall_normal);
-
-		if (dtStatusSucceed(ws) && wall_dist < clearance)
-		{
-			float deficit = clearance - wall_dist;
-			float pushed[3];
-			pushed[0] = corners[0] + wall_normal[0] * deficit;
-			pushed[1] = corners[1];
-			pushed[2] = corners[2] + wall_normal[2] * deficit;
-
-			/* Constrain pushed position to navmesh surface */
-			float constrained[3];
-			dtPolyRef visited[8];
-			int nvisited = 0;
-			if (dtStatusSucceed(navmesh->query->moveAlongSurface(
-					refs[0], corners, pushed,
-					&c->filter, constrained, visited, &nvisited, 8)))
-			{
-				corners[0] = constrained[0];
-				corners[2] = constrained[2];
-			}
-		}
-	}
-
 	/* Periodically optimize corridor */
 	optimize_counter++;
 	if ((optimize_counter & 15) == 0) /* every 16 frames */
