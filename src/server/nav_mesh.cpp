@@ -34,6 +34,7 @@ namespace {
 
 constexpr unsigned char kAreaWalkable = 1;
 constexpr unsigned short kPolyFlagWalk = 1;
+constexpr int kHeightfieldGapFillMaxCells = 1;
 
 struct NavRcContext : public rcContext
 {
@@ -326,6 +327,137 @@ static int nav_mesh_find_nearest_internal(
 	return *nearest_ref != 0 ? 1 : 0;
 }
 
+struct nav_heightfield_gap_fill_t
+{
+	bool valid;
+	unsigned short smin;
+	unsigned short smax;
+	int score;
+
+	nav_heightfield_gap_fill_t()
+		: valid(false), smin(0), smax(0), score(0x7fffffff)
+	{
+	}
+};
+
+static const rcSpan *nav_heightfield_top_walkable_span(const rcHeightfield *hf, int x, int z)
+{
+	const rcSpan *span;
+	const rcSpan *best;
+
+	if (hf == nullptr || x < 0 || z < 0 || x >= hf->width || z >= hf->height)
+		return nullptr;
+
+	best = nullptr;
+	for (span = hf->spans[x + z * hf->width]; span != nullptr; span = span->next)
+	{
+		if (span->area == RC_NULL_AREA)
+			continue;
+		best = span;
+	}
+	return best;
+}
+
+static void nav_heightfield_propose_gap_fill(
+	std::vector<nav_heightfield_gap_fill_t> &fills,
+	int index,
+	unsigned short smax,
+	int score)
+{
+	nav_heightfield_gap_fill_t &fill = fills[static_cast<size_t>(index)];
+
+	if (fill.valid && score >= fill.score)
+		return;
+
+	fill.valid = true;
+	fill.smax = smax;
+	fill.smin = smax > 0 ? static_cast<unsigned short>(smax - 1) : 0;
+	fill.score = score;
+}
+
+/* Fill tiny empty columns that sit between two walkable columns at nearly the
+   same height. This repairs voxel cracks from BSP rasterization without
+   replacing Recast's normal solid-geometry pipeline. */
+static void nav_heightfield_bridge_small_gaps(
+	rcContext *ctx,
+	rcHeightfield *hf,
+	const rcConfig *config)
+{
+	const rcSpan *a;
+	const rcSpan *b;
+	int x;
+	int z;
+	int fills_applied;
+	std::vector<nav_heightfield_gap_fill_t> fills;
+
+	if (ctx == nullptr || hf == nullptr || config == nullptr)
+		return;
+
+	fills.resize(static_cast<size_t>(hf->width * hf->height));
+
+	for (z = 0; z < hf->height; ++z)
+	{
+		for (x = 0; x < hf->width; ++x)
+		{
+			const int index = x + z * hf->width;
+
+			if (hf->spans[index] != nullptr)
+				continue;
+
+			if (kHeightfieldGapFillMaxCells >= 1 && x > 0 && x + 1 < hf->width)
+			{
+				a = nav_heightfield_top_walkable_span(hf, x - 1, z);
+				b = nav_heightfield_top_walkable_span(hf, x + 1, z);
+				if (a != nullptr && b != nullptr)
+				{
+					const int diff = rcAbs(static_cast<int>(a->smax) - static_cast<int>(b->smax));
+					if (diff <= config->walkableClimb)
+					{
+						const unsigned short smax = static_cast<unsigned short>(
+							(static_cast<int>(a->smax) + static_cast<int>(b->smax) + 1) / 2);
+						nav_heightfield_propose_gap_fill(fills, index, smax, diff);
+					}
+				}
+			}
+
+			if (kHeightfieldGapFillMaxCells >= 1 && z > 0 && z + 1 < hf->height)
+			{
+				a = nav_heightfield_top_walkable_span(hf, x, z - 1);
+				b = nav_heightfield_top_walkable_span(hf, x, z + 1);
+				if (a != nullptr && b != nullptr)
+				{
+					const int diff = rcAbs(static_cast<int>(a->smax) - static_cast<int>(b->smax));
+					if (diff <= config->walkableClimb)
+					{
+						const unsigned short smax = static_cast<unsigned short>(
+							(static_cast<int>(a->smax) + static_cast<int>(b->smax) + 1) / 2);
+						nav_heightfield_propose_gap_fill(fills, index, smax, diff);
+					}
+				}
+			}
+		}
+	}
+
+	fills_applied = 0;
+	for (z = 0; z < hf->height; ++z)
+	{
+		for (x = 0; x < hf->width; ++x)
+		{
+			const int index = x + z * hf->width;
+			const nav_heightfield_gap_fill_t &fill = fills[static_cast<size_t>(index)];
+
+			if (!fill.valid)
+				continue;
+			if (!rcAddSpan(ctx, *hf, x, z, fill.smin, fill.smax, RC_WALKABLE_AREA, config->walkableClimb))
+				continue;
+			fills_applied++;
+		}
+	}
+
+	if (fills_applied > 0)
+		fprintf(stderr, "Nav: bridged %d tiny raster gaps before ledge filtering\n", fills_applied);
+}
+
 
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts,
@@ -408,6 +540,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	}
 
 	rcFilterLowHangingWalkableObstacles(&ctx, rc_config.walkableClimb, *guard.solid);
+	nav_heightfield_bridge_small_gaps(&ctx, guard.solid, &rc_config);
 	rcFilterLedgeSpans(&ctx, rc_config.walkableHeight, rc_config.walkableClimb, *guard.solid);
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
 
