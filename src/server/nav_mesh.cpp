@@ -763,8 +763,93 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	rcFilterLowHangingWalkableObstacles(&ctx, rc_config.walkableClimb, *guard.solid);
 	nav_heightfield_bridge_small_gaps(&ctx, guard.solid, &rc_config);
+	/* Use standard ledge filter for poly quality, then rely on
+	   erode-then-restore BFS (in compact heightfield) to reconnect
+	   any paths it breaks. */
 	rcFilterLedgeSpans(&ctx, rc_config.walkableHeight, rc_config.walkableClimb, *guard.solid);
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
+#if 0
+	/* Custom ledge filter: only remove a span if it has NO walkable
+	   neighbor at a similar height. The standard rcFilterLedgeSpans
+	   removes a span if ANY neighbor is a ledge, which kills narrow
+	   walkways along walls. Our version keeps walkway spans that have
+	   at least one same-height neighbor. */
+	{
+		const int xSize = guard.solid->width;
+		const int zSize = guard.solid->height;
+		int filtered = 0, preserved = 0;
+		for (int z = 0; z < zSize; ++z)
+		{
+			for (int x = 0; x < xSize; ++x)
+			{
+				for (rcSpan *span = guard.solid->spans[x + z * xSize]; span; span = span->next)
+				{
+					if (span->area == RC_NULL_AREA)
+						continue;
+
+					const int bot = (int)span->smax;
+					int has_ledge = 0;
+					int support_count = 0;
+					int access_min = bot;
+					int access_max = bot;
+
+					for (int dir = 0; dir < 4; ++dir)
+					{
+						int nx = x + rcGetDirOffsetX(dir);
+						int nz = z + rcGetDirOffsetY(dir);
+						if (nx < 0 || nz < 0 || nx >= xSize || nz >= zSize)
+						{
+							has_ledge = 1;
+							continue;
+						}
+
+						/* Find best neighbor span at similar height */
+						int neighbor_ok = 0;
+						for (const rcSpan *ns = guard.solid->spans[nx + nz * xSize]; ns; ns = ns->next)
+						{
+							int nbot = (int)ns->smax;
+							int top = span->next ? (int)span->next->smin : 0xffff;
+							int ntop = ns->next ? (int)ns->next->smin : 0xffff;
+							if (rcMin(top, ntop) - rcMax(bot, nbot) > rc_config.walkableHeight)
+							{
+								if (rcAbs(nbot - bot) <= rc_config.walkableClimb)
+								{
+									neighbor_ok = 1;
+									if (nbot < access_min) access_min = nbot;
+									if (nbot > access_max) access_max = nbot;
+								}
+							}
+						}
+
+						if (neighbor_ok)
+							support_count++;
+						else
+							has_ledge = 1;
+					}
+
+					/* Steep slope: accessible neighbors span too large a height range */
+					int steep = (access_max - access_min) > rc_config.walkableClimb;
+
+					/* Remove if:
+					   - No walkable support (isolated ledge), OR
+					   - On a steep slope (standard Recast check)
+					   Keep if: has ledge on some sides but also has 2+
+					   walkable supports and isn't on a steep slope. */
+					if (steep || (has_ledge && support_count < 2))
+					{
+						span->area = RC_NULL_AREA;
+						filtered++;
+					}
+					else if (has_ledge)
+						preserved++;
+				}
+			}
+		}
+		fprintf(stderr, "Nav: ledge filter: %d removed, %d preserved (walkway spans)\n",
+			filtered, preserved);
+	}
+	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
+#endif /* custom ledge filter disabled — using standard + BFS restore */
 
 	guard.compact = rcAllocCompactHeightfield();
 	if (guard.compact == nullptr)
