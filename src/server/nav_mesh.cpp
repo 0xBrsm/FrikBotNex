@@ -1092,8 +1092,12 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 					const int ay = cy + rcGetDirOffsetY(dir);
 					const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
 
-					if (!was_eroded[ai])
-						continue;
+					/* Traverse through any non-walkable cell — both eroded
+					   cells and cells that were never walkable (decorative
+					   holes). We can restore eroded cells; for never-walkable
+					   cells we just pass through to find bridges beyond. */
+					if (guard.compact->areas[ai] != RC_NULL_AREA)
+						continue; /* already walkable — in a region */
 
 					if (eroded_nearest_region[ai] >= 0 &&
 						eroded_nearest_region[ai] != eroded_nearest_region[si])
@@ -1112,13 +1116,13 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			}
 		}
 
-		/* Restore only the bridge cells and trace back to regions */
+		/* Restore bridge cells and trace back to regions */
 		for (size_t bi = 0; bi < bridge_cells.size(); ++bi)
 		{
 			int si = bridge_cells[bi];
-			if (was_eroded[si] && guard.compact->areas[si] == RC_NULL_AREA)
+			if (guard.compact->areas[si] == RC_NULL_AREA)
 			{
-				guard.compact->areas[si] = was_eroded[si];
+				guard.compact->areas[si] = was_eroded[si] ? was_eroded[si] : RC_WALKABLE_AREA;
 				restored++;
 			}
 		}
@@ -1130,13 +1134,13 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			int si = bridge_cells[bi];
 			/* Trace back toward the region by following decreasing eroded_dist */
 			int cur = si;
-			for (int step = 0; step < rc_config.walkableRadius * 2; ++step)
+			for (int step = 0; step < 100; ++step) /* trace back up to 100 cells */
 			{
-				if (!was_eroded[cur] || eroded_dist[cur] <= 0)
+				if (eroded_dist[cur] <= 0)
 					break;
 				if (guard.compact->areas[cur] == RC_NULL_AREA)
 				{
-					guard.compact->areas[cur] = was_eroded[cur];
+					guard.compact->areas[cur] = was_eroded[cur] ? was_eroded[cur] : RC_WALKABLE_AREA;
 					restored++;
 				}
 				/* Find neighbor with lower distance */
