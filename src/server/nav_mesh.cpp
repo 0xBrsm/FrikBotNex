@@ -1069,8 +1069,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		{
 			int si = bfs_queue[qi];
 			int my_dist = eroded_dist[si];
-			if (my_dist >= rc_config.walkableRadius * 4)
-				continue; /* limit growth to reasonable distance */
+			/* No distance cap — bridge any gap, however wide */
 
 			/* Find this cell's position */
 			int cx = 0, cy = 0;
