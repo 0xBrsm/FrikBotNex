@@ -952,6 +952,20 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			}
 		}
 
+		/* Build span→position lookup table (avoids O(w*h) scan per span) */
+		std::vector<unsigned short> span_x(static_cast<size_t>(span_count));
+		std::vector<unsigned short> span_y_pos(static_cast<size_t>(span_count));
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+				{
+					span_x[si] = (unsigned short)x;
+					span_y_pos[si] = (unsigned short)y;
+				}
+			}
+
 		/* Erode-then-restore: full erosion for wall clearance, then
 		   selectively un-erode the minimum cells needed to maintain
 		   connectivity between disconnected walkable regions.
@@ -989,16 +1003,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 					for (size_t qi = 0; qi < queue.size(); ++qi)
 					{
 						int cur = queue[qi];
-						/* Find this span's grid position */
-						int cy = 0, cx = 0;
-						for (int fy = 0; fy < h && cy == 0; ++fy)
-							for (int fx = 0; fx < w; ++fx)
-							{
-								const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
-								if (cur >= (int)fc.index && cur < (int)(fc.index + fc.count))
-								{ cx = fx; cy = fy; goto found_pos; }
-							}
-						found_pos:
+						int cx = span_x[cur], cy = span_y_pos[cur];
 						{
 							const rcCompactSpan &cs = guard.compact->spans[cur];
 							for (int dir = 0; dir < 4; ++dir)
@@ -1072,16 +1077,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			/* No distance cap — bridge any gap, however wide */
 
 			/* Find this cell's position */
-			int cx = 0, cy = 0;
-			for (int fy = 0; fy < h; ++fy)
-				for (int fx = 0; fx < w; ++fx)
-				{
-					const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
-					if (si >= (int)fc.index && si < (int)(fc.index + fc.count))
-					{ cx = fx; cy = fy; goto found_bfs; }
-				}
-			found_bfs:
-
+			int cx = span_x[si], cy = span_y_pos[si];
 			{
 				const rcCompactSpan &s = guard.compact->spans[si];
 				for (int dir = 0; dir < 4; ++dir)
@@ -1144,16 +1140,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 					restored++;
 				}
 				/* Find neighbor with lower distance */
-				int cx2 = 0, cy2 = 0;
-				for (int fy = 0; fy < h; ++fy)
-					for (int fx = 0; fx < w; ++fx)
-					{
-						const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
-						if (cur >= (int)fc.index && cur < (int)(fc.index + fc.count))
-						{ cx2 = fx; cy2 = fy; goto found_trace; }
-					}
-				found_trace:
 				{
+					int cx2 = span_x[cur], cy2 = span_y_pos[cur];
 					const rcCompactSpan &s = guard.compact->spans[cur];
 					int best_dist = eroded_dist[cur];
 					int best_ni = -1;
