@@ -200,7 +200,8 @@ QUAKE_OBJS = \
 BOT_OBJS = \
 	$(BUILD_DIR)/net_bot.o \
 	$(BUILD_DIR)/nav_bot.o \
-	$(BUILD_DIR)/nav_mesh.o
+	$(BUILD_DIR)/nav_mesh.o \
+	$(BUILD_DIR)/nav_val.o
 
 # Recast (C++)
 RECAST_OBJS = \
@@ -275,6 +276,11 @@ $(BUILD_DIR)/nav_bot.o: nav_bot.cpp
 
 # Nav mesh C++ source
 $(BUILD_DIR)/nav_mesh.o: nav_mesh.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -I. -c $< -o $@
+
+$(BUILD_DIR)/nav_val.o: nav_val.cpp
 	@mkdir -p $(BUILD_DIR)
 	@echo "  CXX $<"
 	$(CXX) $(CXXFLAGS) -I. -c $< -o $@

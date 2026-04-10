@@ -293,6 +293,9 @@ int nav_corridor_offmesh(nav_corridor_t *c,
 /* Get corridor length (number of polys remaining). */
 int nav_corridor_length(const nav_corridor_t *c);
 
+/* Waypoint-vs-navmesh validation (nav_val.cpp) */
+void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname);
+
 #ifdef __cplusplus
 }
 #endif

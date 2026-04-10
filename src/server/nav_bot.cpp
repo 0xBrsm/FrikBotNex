@@ -1038,6 +1038,10 @@ void Nav_BuildForMap(void)
 	Con_Printf("Nav: %.3fs, %d polys, %d entity links\n",
 		t_done - t_start, summary.polygon_count, entity_count);
 
+	/* Validate navmesh against hand-crafted waypoints */
+	if (nav_mesh != NULL)
+		Nav_Validate(nav_mesh, sv.name);
+
 	/* ---- Height diagnostic: compare player-origin, floor, and navmesh surface ---- */
 	if (nav_mesh != NULL)
 	{
@@ -1086,7 +1090,10 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* ---- DM4 stairway connectivity probe ---- */
+	/* Inline diagnostics removed — see Nav_Validate() in nav_val.cpp */
+
+	/* ---- DM4 stairway connectivity probe — REMOVED ---- */
+#if 0 /* inline diagnostics moved to nav_val.cpp */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
 		/* Probe from wp33 (772,-471,-82) toward wp1 (776,-808,-210)
@@ -1238,6 +1245,93 @@ void Nav_BuildForMap(void)
 			ok_count, partial_count, fail_count, miss_count, nedges);
 	}
 
+	/* ---- DM1 full waypoint edge validation ---- */
+	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm1"))
+	{
+		static float dm1_wps_v[][3] = {
+			{640,716,46},{1066,733,94},{1054,1321,94},{783,1313,46},
+			{585,883,46},{901,1060,46},{448,1313,42},{436,1562,46},
+			{238,1593,46},{-122,1583,-98},{-127,1414,-98},{113,1416,-98},
+			{109,1287,-98},{417,1258,-98},{157,916,-98},{-292,866,-98},
+			{397,1595,-98},{-143,1418,46},{-385,1407,46},{607,608,46},
+			{77,614,46},{-501,770,46},{-534,988,46},{-655,992,46},
+			{-651,1227,46},{-524,1592,46},{443,1145,46},{220,1236,46},
+			{178,1027,46},{28,1157,46},{153,1154,-98},{-307,1219,94},
+			{-292,1100,94},{464,823,46},{435,1451,-98},{-300,1432,46},
+			{600,1309,46},{-322,1007,-98},{-543,1222,46},{1000,941,94},
+			{-156,1049,-98},{104,1392,46},{280,1416,-98},{280,1416,46},
+			{-656,1417,46},{-263,723,-98},{-203,769,46},{82,763,46},
+			{348,758,46},{141,764,46},{488,607,46},{482,683,54},
+		};
+		static int dm1_edges_v[][2] = {
+			{0,1},{0,19},{1,0},{1,2},{1,39},{2,1},{2,3},{3,5},{3,36},
+			{3,2},{3,4},{4,3},{4,5},{4,36},{5,3},{5,4},{5,36},{6,36},
+			{6,26},{6,7},{7,6},{7,8},{8,7},{8,9},{8,43},{9,8},{9,10},
+			{10,9},{10,11},{11,10},{11,12},{11,42},{12,11},{12,13},
+			{12,40},{12,30},{13,12},{13,34},{13,30},{13,14},{14,45},
+			{14,15},{14,30},{14,13},{15,45},{15,37},{15,40},{15,14},
+			{16,34},{16,6},{17,43},{17,18},{18,35},{18,17},{19,0},
+			{19,50},{20,50},{20,47},{21,46},{21,22},{22,21},{22,23},
+			{23,22},{23,24},{24,23},{24,25},{24,31},{24,44},{25,24},
+			{25,9},{25,38},{25,44},{26,6},{26,27},{26,28},{27,26},
+			{27,29},{27,30},{28,26},{28,29},{28,30},{29,28},{29,27},
+			{29,30},{30,12},{30,14},{30,40},{30,13},{31,24},{31,32},
+			{31,38},{32,31},{32,15},{32,37},{33,51},{34,16},{35,9},
+			{36,3},{36,4},{36,6},{36,5},{37,15},{37,40},{38,25},
+			{38,31},{38,44},{39,5},{40,37},{40,30},{40,15},{40,12},
+			{41,43},{41,10},{42,11},{43,17},{43,8},{43,41},{44,24},
+			{44,25},{44,38},{45,14},{45,15},{46,47},{46,21},{46,37},
+			{47,20},{47,46},{47,49},{47,14},{48,33},{49,48},{50,51},
+			{50,19},{50,20},{51,50},{51,33},
+		};
+		int nwps = sizeof(dm1_wps_v) / sizeof(dm1_wps_v[0]);
+		int nedges = sizeof(dm1_edges_v) / sizeof(dm1_edges_v[0]);
+		dtQueryFilter filter;
+		nav_mesh_setup_filter(&filter);
+
+		int ok_count = 0, partial_count = 0, fail_count = 0, miss_count = 0;
+		fprintf(stderr, "Nav: DM1 WAYPOINT VALIDATION (%d edges):\n", nedges);
+		for (int ei = 0; ei < nedges; ei++)
+		{
+			int ai = dm1_edges_v[ei][0], bi = dm1_edges_v[ei][1];
+			if (ai < 0 || ai >= nwps || bi < 0 || bi >= nwps) continue;
+			nav_mesh_nearest_result_t nra, nrb;
+			char nerr[64];
+			int fa = nav_mesh_find_nearest(nav_mesh, dm1_wps_v[ai], &nra, nerr, sizeof(nerr));
+			int fb = nav_mesh_find_nearest(nav_mesh, dm1_wps_v[bi], &nrb, nerr, sizeof(nerr));
+			if (!fa || !fb)
+			{
+				miss_count++;
+				fprintf(stderr, "  MISS wp%d→wp%d%s%s\n", ai+1, bi+1,
+					fa ? "" : " (start off mesh)", fb ? "" : " (end off mesh)");
+				continue;
+			}
+			float rca[3], rcb[3];
+			rca[0]=nra.nearest_point[0]; rca[1]=nra.nearest_point[2]; rca[2]=nra.nearest_point[1];
+			rcb[0]=nrb.nearest_point[0]; rcb[1]=nrb.nearest_point[2]; rcb[2]=nrb.nearest_point[1];
+			dtPolyRef path[512]; int pc = 0;
+			dtStatus st = nav_mesh->query->findPath(
+				(dtPolyRef)nra.poly_ref, (dtPolyRef)nrb.poly_ref,
+				rca, rcb, &filter, path, &pc, 512);
+			int partial = dtStatusDetail(st, DT_PARTIAL_RESULT) ? 1 : 0;
+			int failed = dtStatusFailed(st) ? 1 : 0;
+			if (failed) { fail_count++; fprintf(stderr, "  FAIL wp%d→wp%d\n", ai+1, bi+1); }
+			else if (partial)
+			{
+				partial_count++;
+				float dz = dm1_wps_v[bi][2] - dm1_wps_v[ai][2];
+				fprintf(stderr, "  PARTIAL wp%d→wp%d (%.0f,%.0f,%.0f)→(%.0f,%.0f,%.0f) dz=%.0f polys=%d\n",
+					ai+1, bi+1,
+					dm1_wps_v[ai][0], dm1_wps_v[ai][1], dm1_wps_v[ai][2],
+					dm1_wps_v[bi][0], dm1_wps_v[bi][1], dm1_wps_v[bi][2],
+					dz, pc);
+			}
+			else ok_count++;
+		}
+		fprintf(stderr, "Nav: DM1 WAYPOINT VALIDATION: %d OK, %d PARTIAL, %d FAIL, %d MISS / %d total\n",
+			ok_count, partial_count, fail_count, miss_count, nedges);
+	}
+
 	/* ---- DM4 grid probe: find all poly refs on LOWER CORRIDOR level (Z≈-82) ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
@@ -1345,6 +1439,8 @@ void Nav_BuildForMap(void)
 			}
 		}
 	}
+
+#endif /* inline diagnostics */
 
 	/* ---- DM4 waypoint edge diagnostic ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
