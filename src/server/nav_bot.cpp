@@ -51,7 +51,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_WALKABLE_SLOPE_ANGLE     45.0f
 #define NAV_WALKABLE_HEIGHT          56.0f
 #define NAV_WALKABLE_CLIMB           18.0f
-#define NAV_WALKABLE_RADIUS          16.0f
+#define NAV_WALKABLE_RADIUS           4.0f  /* 1 cell — preserves narrow walkway connectivity */
 #define NAV_MAX_EDGE_LEN            192.0f
 #define NAV_MAX_SIMPLIFICATION_ERROR  1.3f
 #define NAV_MIN_REGION_SIZE           2
@@ -1112,6 +1112,39 @@ void Nav_BuildForMap(void)
 				found ? sqrtf((probe[0]-nr.nearest_point[0])*(probe[0]-nr.nearest_point[0]) +
 							  (probe[1]-nr.nearest_point[1])*(probe[1]-nr.nearest_point[1]) +
 							  (probe[2]-nr.nearest_point[2])*(probe[2]-nr.nearest_point[2])) : 0.0f);
+		}
+	}
+
+	/* ---- DM4 fine probe along wp50→wp51 to find the exact break ---- */
+	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
+	{
+		fprintf(stderr, "Nav: FINE PROBE wp50(557,-45,46)→wp51(605,-113,46):\n");
+		dtPolyRef prev_ref = 0;
+		for (int step = 0; step <= 40; step++)
+		{
+			float t = step / 40.0f;
+			float qpos[3] = {557 + 48*t, -45 + (-68)*t, 46};
+			nav_mesh_nearest_result_t nr;
+			char nerr[64];
+			int found = nav_mesh_find_nearest(nav_mesh, qpos, &nr, nerr, sizeof(nerr));
+			float snap = found ? sqrtf(
+				(qpos[0]-nr.nearest_point[0])*(qpos[0]-nr.nearest_point[0]) +
+				(qpos[1]-nr.nearest_point[1])*(qpos[1]-nr.nearest_point[1]) +
+				(qpos[2]-nr.nearest_point[2])*(qpos[2]-nr.nearest_point[2])) : 0;
+
+			/* Also BSP floor trace */
+			vec3_t ts = {qpos[0], qpos[1], 100}, te = {qpos[0], qpos[1], -200}, zero = {0,0,0};
+			trace_t tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+
+			if (!found || nr.poly_ref != prev_ref || step == 0 || step == 40)
+			{
+				fprintf(stderr, "  t=%.2f (%.0f,%.0f) %s ref=%llu snap=%.0f bsp_z=%.1f nav_z=%.1f\n",
+					t, qpos[0], qpos[1],
+					found ? (snap < 50 ? "HIT" : "FAR") : "MISS",
+					found ? nr.poly_ref : 0ULL, snap, tr.endpos[2],
+					found ? nr.nearest_point[2] : 0.0f);
+				if (found) prev_ref = nr.poly_ref;
+			}
 		}
 	}
 
