@@ -1115,7 +1115,97 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* ---- DM4 grid probe: find all poly refs on upper level ---- */
+	/* ---- DM4 full waypoint edge validation ---- */
+	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
+	{
+		static float dm4_wps_v[][3] = {
+			{776,-808,-210},{272,-952,46},{112,-1136,-82},{784,-176,46},
+			{-64,-232,-50},{-64,512,-274},{428,-966,-82},{134,-820,-82},
+			{426,-790,-82},{336,-732,-82},{354,-471,-86},{188,-408,-82},
+			{505,-318,-82},{512,-97,-82},{631,-386,-82},{337,-1206,-2},
+			{334,-1016,46},{337,-863,42},{337,-737,46},{337,-508,46},
+			{516,-468,46},{610,-180,46},{120,-478,46},{143,-303,-34},
+			{160,-183,-50},{199,76,-82},{-120,-518,-50},{868,-176,46},
+			{847,-578,46},{1121,-593,46},{983,-457,-82},{993,-594,-82},
+			{772,-471,-82},{368,-92,-274},{375,-239,-274},{-49,-234,-274},
+			{-56,75,-274},{69,70,-274},{620,-242,-274},{624,-42,-274},
+			{514,-240,-274},{206,-245,-274},{626,58,-274},{369,65,-266},
+			{701,66,-274},{-60,334,-274},{752,-502,-82},{856,-391,46},
+			{553,66,-274},{557,-45,46},{605,-113,46},{173,-60,-82},
+			{224,-59,-82},{335,-431,-82},{434,-390,-82},{-183,-472,-50},
+			{314,-1027,-82},{336,-801,-82},{-61,573,-274},
+		};
+		/* edges: from(0-based) → to(0-based) */
+		static int dm4_edges_v[][2] = {
+			{0,32},{0,33},{0,46},{1,17},{1,16},{2,56},{2,15},{2,7},
+			{3,21},{3,27},{4,23},{4,26},{5,45},{5,58},{6,56},{6,8},
+			{6,7},{6,57},{7,2},{7,56},{7,57},{7,6},{8,57},{8,56},
+			{8,6},{8,2},{9,57},{9,53},{9,10},{10,54},{11,53},{11,10},
+			{12,53},{12,14},{12,13},{13,12},{13,14},{13,52},{13,34},
+			{14,12},{14,13},{14,34},{15,2},{15,16},{16,15},{16,17},
+			{17,16},{17,18},{17,42},{18,17},{18,19},{19,18},{19,20},
+			{19,22},{19,12},{20,19},{20,53},{20,12},{20,21},{21,20},
+			{21,3},{21,50},{21,13},{22,19},{22,23},{22,53},{23,22},
+			{23,24},{23,4},{24,23},{24,51},{25,51},{26,4},{26,27},
+			{26,55},{27,47},{27,3},{28,47},{28,29},{28,30},{28,0},
+			{29,28},{30,28},{31,32},{31,30},{32,31},{32,0},{33,34},
+			{33,43},{34,33},{34,40},{34,35},{34,27},{35,34},{35,36},
+			{35,41},{36,35},{36,37},{36,45},{37,36},{38,40},{38,39},
+			{39,38},{39,44},{39,48},{39,42},{40,34},{40,38},{41,13},
+			{42,48},{42,17},{42,44},{43,33},{44,39},{44,48},{44,42},
+			{45,36},{45,5},{46,47},{47,27},{47,28},{47,32},{47,30},
+			{48,42},{48,44},{48,39},{49,50},{49,13},{50,21},{50,49},
+			{51,24},{51,25},{52,25},{53,34},{53,12},{53,11},{53,9},
+			{54,21},{55,26},{56,57},{56,2},{56,6},{56,8},{57,9},
+			{57,8},{57,7},{57,56},{58,5},
+		};
+		int nwps = sizeof(dm4_wps_v) / sizeof(dm4_wps_v[0]);
+		int nedges = sizeof(dm4_edges_v) / sizeof(dm4_edges_v[0]);
+		dtQueryFilter filter;
+		nav_mesh_setup_filter(&filter);
+
+		int ok_count = 0, partial_count = 0, fail_count = 0, miss_count = 0;
+		fprintf(stderr, "Nav: DM4 WAYPOINT VALIDATION (%d edges):\n", nedges);
+		for (int ei = 0; ei < nedges; ei++)
+		{
+			int ai = dm4_edges_v[ei][0], bi = dm4_edges_v[ei][1];
+			if (ai < 0 || ai >= nwps || bi < 0 || bi >= nwps) continue;
+
+			nav_mesh_nearest_result_t nra, nrb;
+			char nerr[64];
+			int fa = nav_mesh_find_nearest(nav_mesh, dm4_wps_v[ai], &nra, nerr, sizeof(nerr));
+			int fb = nav_mesh_find_nearest(nav_mesh, dm4_wps_v[bi], &nrb, nerr, sizeof(nerr));
+
+			if (!fa || !fb) { miss_count++; continue; }
+
+			float rca[3], rcb[3];
+			rca[0]=nra.nearest_point[0]; rca[1]=nra.nearest_point[2]; rca[2]=nra.nearest_point[1];
+			rcb[0]=nrb.nearest_point[0]; rcb[1]=nrb.nearest_point[2]; rcb[2]=nrb.nearest_point[1];
+			dtPolyRef path[512]; int pc = 0;
+			dtStatus st = nav_mesh->query->findPath(
+				(dtPolyRef)nra.poly_ref, (dtPolyRef)nrb.poly_ref,
+				rca, rcb, &filter, path, &pc, 512);
+			int partial = dtStatusDetail(st, DT_PARTIAL_RESULT) ? 1 : 0;
+			int failed = dtStatusFailed(st) ? 1 : 0;
+
+			if (failed) { fail_count++; fprintf(stderr, "  FAIL wp%d→wp%d\n", ai+1, bi+1); }
+			else if (partial)
+			{
+				partial_count++;
+				float dz = dm4_wps_v[bi][2] - dm4_wps_v[ai][2];
+				fprintf(stderr, "  PARTIAL wp%d→wp%d (%.0f,%.0f,%.0f)→(%.0f,%.0f,%.0f) dz=%.0f polys=%d\n",
+					ai+1, bi+1,
+					dm4_wps_v[ai][0], dm4_wps_v[ai][1], dm4_wps_v[ai][2],
+					dm4_wps_v[bi][0], dm4_wps_v[bi][1], dm4_wps_v[bi][2],
+					dz, pc);
+			}
+			else ok_count++;
+		}
+		fprintf(stderr, "Nav: DM4 WAYPOINT VALIDATION: %d OK, %d PARTIAL, %d FAIL, %d MISS / %d total\n",
+			ok_count, partial_count, fail_count, miss_count, nedges);
+	}
+
+	/* ---- DM4 grid probe: find all poly refs on LOWER CORRIDOR level (Z≈-82) ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
 		/* Grid probe at Z=46 (upper walkway) across the map.
@@ -1130,13 +1220,13 @@ void Nav_BuildForMap(void)
 		{
 			for (y = -1200; y <= 600; y += 32)
 			{
-				float p[3] = {(float)x, (float)y, 46.0f};
+				float p[3] = {(float)x, (float)y, -82.0f};
 				nav_mesh_nearest_result_t nr;
 				char nerr[64];
 				if (!nav_mesh_find_nearest(nav_mesh, p, &nr, nerr, sizeof(nerr)))
 					continue;
 				/* Only consider polys near the upper level (Z within 50u) */
-				if (nr.nearest_point[2] < -10 || nr.nearest_point[2] > 60)
+				if (nr.nearest_point[2] < -140 || nr.nearest_point[2] > -100)
 					continue;
 				/* Check if already seen */
 				int found = 0;
@@ -1176,6 +1266,51 @@ void Nav_BuildForMap(void)
 		}
 		fprintf(stderr, "Nav: GRID %d/%d upper polys connected to first poly (ref=%llu)\n",
 			connected_to_first, seen_count, seen_refs[0]);
+
+		/* Find the graph break: closest connected poly to closest disconnected poly */
+		{
+			float best_dist = 999999;
+			int best_conn = -1, best_disc = -1;
+			for (int ci = 0; ci < seen_count; ci++)
+			{
+				/* check if connected */
+				float rc_e[3];
+				rc_e[0] = seen_centers[ci][0]; rc_e[1] = seen_centers[ci][2]; rc_e[2] = seen_centers[ci][1];
+				dtPolyRef tp[512]; int tpc = 0;
+				dtStatus ts = nav_mesh->query->findPath((dtPolyRef)seen_refs[0], (dtPolyRef)seen_refs[ci],
+					rc_start, rc_e, &filter, tp, &tpc, 512);
+				int conn = !dtStatusFailed(ts) && !dtStatusDetail(ts, DT_PARTIAL_RESULT);
+				if (!conn) continue;
+
+				for (int di = 0; di < seen_count; di++)
+				{
+					float rc_d[3];
+					rc_d[0] = seen_centers[di][0]; rc_d[1] = seen_centers[di][2]; rc_d[2] = seen_centers[di][1];
+					dtPolyRef dp[512]; int dpc = 0;
+					dtStatus ds = nav_mesh->query->findPath((dtPolyRef)seen_refs[0], (dtPolyRef)seen_refs[di],
+						rc_start, rc_d, &filter, dp, &dpc, 512);
+					int disc = dtStatusFailed(ds) || dtStatusDetail(ds, DT_PARTIAL_RESULT);
+					if (!disc) continue;
+
+					float dx = seen_centers[ci][0] - seen_centers[di][0];
+					float dy = seen_centers[ci][1] - seen_centers[di][1];
+					float d = sqrtf(dx*dx + dy*dy);
+					if (d < best_dist)
+					{
+						best_dist = d;
+						best_conn = ci;
+						best_disc = di;
+					}
+				}
+			}
+			if (best_conn >= 0 && best_disc >= 0)
+			{
+				fprintf(stderr, "Nav: BREAK closest connected=(%.0f %.0f) ref=%llu ↔ disconnected=(%.0f %.0f) ref=%llu dist=%.0f\n",
+					seen_centers[best_conn][0], seen_centers[best_conn][1], seen_refs[best_conn],
+					seen_centers[best_disc][0], seen_centers[best_disc][1], seen_refs[best_disc],
+					best_dist);
+			}
+		}
 	}
 
 	/* ---- DM4 waypoint edge diagnostic ---- */
