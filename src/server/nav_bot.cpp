@@ -51,7 +51,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_WALKABLE_SLOPE_ANGLE     45.0f
 #define NAV_WALKABLE_HEIGHT          56.0f
 #define NAV_WALKABLE_CLIMB           18.0f
-#define NAV_WALKABLE_RADIUS           4.0f  /* 1 cell — preserves narrow walkway connectivity */
+#define NAV_WALKABLE_RADIUS          16.0f
 #define NAV_MAX_EDGE_LEN            192.0f
 #define NAV_MAX_SIMPLIFICATION_ERROR  1.3f
 #define NAV_MIN_REGION_SIZE           2
@@ -1018,7 +1018,7 @@ void Nav_BuildForMap(void)
 	memset(error, 0, sizeof(error));
 	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
-		nav_link_callback, NULL,
+		NULL, NULL, /* link callback disabled — drops cause stuck bots */
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
@@ -1115,15 +1115,15 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* ---- DM4 fine probe along wp50→wp51 to find the exact break ---- */
+	/* ---- DM4 fine probe along wp14→wp53 to find the exact break ---- */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
-		fprintf(stderr, "Nav: FINE PROBE wp50(557,-45,46)→wp51(605,-113,46):\n");
+		fprintf(stderr, "Nav: FINE PROBE wp14(512,-97,-82)→wp53(224,-59,-82):\n");
 		dtPolyRef prev_ref = 0;
 		for (int step = 0; step <= 40; step++)
 		{
 			float t = step / 40.0f;
-			float qpos[3] = {557 + 48*t, -45 + (-68)*t, 46};
+			float qpos[3] = {512 + (224-512)*t, -97 + (-59+97)*t, -82};
 			nav_mesh_nearest_result_t nr;
 			char nerr[64];
 			int found = nav_mesh_find_nearest(nav_mesh, qpos, &nr, nerr, sizeof(nerr));
