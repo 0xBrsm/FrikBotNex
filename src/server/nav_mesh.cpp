@@ -952,69 +952,229 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			}
 		}
 
-		/* Adaptive erosion: erode near-wall spans, but preserve narrow
-		   corridors. Compute a max-filtered version of the wall distance
-		   field: for each span, the max wd within erode_dist steps.
-		   This approximates the corridor half-width at each point.
-		   Only erode if the corridor is wide enough (local_max >= 2 * erode_dist). */
+		/* Erode-then-restore: full erosion for wall clearance, then
+		   selectively un-erode the minimum cells needed to maintain
+		   connectivity between disconnected walkable regions.
 
-		/* Max-filter the wall distance field using 2-pass Chamfer-like sweep.
-		   This propagates max values outward from high-wd cells. */
-		std::vector<unsigned short> wd_max(static_cast<size_t>(span_count), 0);
+		   Step 1: Erode all near-wall cells unconditionally. */
+		int eroded = 0;
+		std::vector<unsigned char> was_eroded(static_cast<size_t>(span_count), 0);
 		for (int si = 0; si < span_count; ++si)
-			wd_max[si] = wd[si];
-
-		/* Propagate max: repeat erode_dist/2 passes (each pass propagates 1 cell) */
-		int passes = rc_config.walkableRadius; /* number of 1-cell propagation passes */
-		for (int pass = 0; pass < passes; ++pass)
 		{
-			for (int y = 0; y < h; ++y)
+			if (guard.compact->areas[si] != RC_NULL_AREA && wd[si] < erode_dist)
 			{
-				for (int x = 0; x < w; ++x)
+				was_eroded[si] = guard.compact->areas[si]; /* save original area */
+				guard.compact->areas[si] = RC_NULL_AREA;
+				eroded++;
+			}
+		}
+
+		/* Step 2: Flood-fill to find connected walkable regions. */
+		std::vector<int> region_id(static_cast<size_t>(span_count), -1);
+		int num_regions = 0;
+		for (int y = 0; y < h; ++y)
+		{
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
 				{
-					const rcCompactCell &c = guard.compact->cells[x + y * w];
-					for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+					if (guard.compact->areas[si] == RC_NULL_AREA || region_id[si] >= 0)
+						continue;
+					/* BFS flood fill */
+					int rid = num_regions++;
+					std::vector<int> queue;
+					queue.push_back(si);
+					region_id[si] = rid;
+					for (size_t qi = 0; qi < queue.size(); ++qi)
 					{
-						if (guard.compact->areas[si] == RC_NULL_AREA)
-							continue;
-						const rcCompactSpan &s = guard.compact->spans[si];
-						for (int dir = 0; dir < 4; ++dir)
+						int cur = queue[qi];
+						/* Find this span's grid position */
+						int cy = 0, cx = 0;
+						for (int fy = 0; fy < h && cy == 0; ++fy)
+							for (int fx = 0; fx < w; ++fx)
+							{
+								const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
+								if (cur >= (int)fc.index && cur < (int)(fc.index + fc.count))
+								{ cx = fx; cy = fy; goto found_pos; }
+							}
+						found_pos:
 						{
-							if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
-								continue;
-							const int ax = x + rcGetDirOffsetX(dir);
-							const int ay = y + rcGetDirOffsetY(dir);
-							const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
-							if (wd_max[ai] > wd_max[si])
-								wd_max[si] = wd_max[ai];
+							const rcCompactSpan &cs = guard.compact->spans[cur];
+							for (int dir = 0; dir < 4; ++dir)
+							{
+								if (rcGetCon(cs, dir) == RC_NOT_CONNECTED)
+									continue;
+								const int ax = cx + rcGetDirOffsetX(dir);
+								const int ay = cy + rcGetDirOffsetY(dir);
+								const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(cs, dir);
+								if (guard.compact->areas[ai] != RC_NULL_AREA && region_id[ai] < 0)
+								{
+									region_id[ai] = rid;
+									queue.push_back(ai);
+								}
+							}
 						}
 					}
 				}
 			}
 		}
 
-		/* Erode: near wall AND corridor is wide enough */
-		int eroded = 0, preserved = 0;
-		for (int si = 0; si < span_count; ++si)
-		{
-			if (guard.compact->areas[si] == RC_NULL_AREA)
-				continue;
-			if (wd[si] >= erode_dist)
-				continue; /* far from wall — keep */
+		/* Step 3: BFS from all regions simultaneously into eroded cells.
+		   Each eroded cell gets labeled with the nearest region.
+		   When two expanding fronts from different regions meet at an
+		   eroded cell, that cell is a bridge. Restore only bridge cells
+		   and the minimum path between them. */
+		std::vector<int> eroded_nearest_region(static_cast<size_t>(span_count), -1);
+		std::vector<int> eroded_dist(static_cast<size_t>(span_count), 0x7fffffff);
 
-			/* wd_max[si] = max wall distance within ~erode_dist cells.
-			   If >= 2 * erode_dist, the corridor center is far enough from
-			   walls that eroding the edges still leaves a walkable center. */
-			if (wd_max[si] >= (unsigned short)(erode_dist * 5))
+		/* Seed BFS from all region border cells */
+		std::vector<int> bfs_queue;
+		for (int y = 0; y < h; ++y)
+		{
+			for (int x = 0; x < w; ++x)
 			{
-				guard.compact->areas[si] = RC_NULL_AREA;
-				eroded++;
+				const rcCompactCell &c = guard.compact->cells[x + y * w];
+				for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+				{
+					if (guard.compact->areas[si] == RC_NULL_AREA || region_id[si] < 0)
+						continue;
+					/* Check if this walkable cell borders an eroded cell */
+					const rcCompactSpan &s = guard.compact->spans[si];
+					for (int dir = 0; dir < 4; ++dir)
+					{
+						if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
+							continue;
+						const int ax = x + rcGetDirOffsetX(dir);
+						const int ay = y + rcGetDirOffsetY(dir);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
+						if (was_eroded[ai] && guard.compact->areas[ai] == RC_NULL_AREA)
+						{
+							if (eroded_dist[ai] > 1)
+							{
+								eroded_nearest_region[ai] = region_id[si];
+								eroded_dist[ai] = 1;
+								bfs_queue.push_back(ai);
+							}
+						}
+					}
+				}
 			}
-			else
-				preserved++;
 		}
-		fprintf(stderr, "Nav: adaptive wall erosion: %d eroded, %d preserved (radius=%d)\n",
-			eroded, preserved, rc_config.walkableRadius);
+
+		/* BFS expansion through eroded cells */
+		int restored = 0;
+		std::vector<int> bridge_cells;
+		for (size_t qi = 0; qi < bfs_queue.size(); ++qi)
+		{
+			int si = bfs_queue[qi];
+			int my_dist = eroded_dist[si];
+			if (my_dist >= rc_config.walkableRadius * 4)
+				continue; /* limit growth to reasonable distance */
+
+			/* Find this cell's position */
+			int cx = 0, cy = 0;
+			for (int fy = 0; fy < h; ++fy)
+				for (int fx = 0; fx < w; ++fx)
+				{
+					const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
+					if (si >= (int)fc.index && si < (int)(fc.index + fc.count))
+					{ cx = fx; cy = fy; goto found_bfs; }
+				}
+			found_bfs:
+
+			{
+				const rcCompactSpan &s = guard.compact->spans[si];
+				for (int dir = 0; dir < 4; ++dir)
+				{
+					if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
+						continue;
+					const int ax = cx + rcGetDirOffsetX(dir);
+					const int ay = cy + rcGetDirOffsetY(dir);
+					const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
+
+					if (!was_eroded[ai])
+						continue;
+
+					if (eroded_nearest_region[ai] >= 0 &&
+						eroded_nearest_region[ai] != eroded_nearest_region[si])
+					{
+						/* Two different region fronts meet — this is a bridge! */
+						bridge_cells.push_back(si);
+						bridge_cells.push_back(ai);
+					}
+					else if (eroded_dist[ai] > my_dist + 1)
+					{
+						eroded_nearest_region[ai] = eroded_nearest_region[si];
+						eroded_dist[ai] = my_dist + 1;
+						bfs_queue.push_back(ai);
+					}
+				}
+			}
+		}
+
+		/* Restore only the bridge cells and trace back to regions */
+		for (size_t bi = 0; bi < bridge_cells.size(); ++bi)
+		{
+			int si = bridge_cells[bi];
+			if (was_eroded[si] && guard.compact->areas[si] == RC_NULL_AREA)
+			{
+				guard.compact->areas[si] = was_eroded[si];
+				restored++;
+			}
+		}
+
+		/* Also restore the BFS path from each bridge cell back to its region.
+		   Walk backward through eroded_dist to find the shortest path. */
+		for (size_t bi = 0; bi < bridge_cells.size(); ++bi)
+		{
+			int si = bridge_cells[bi];
+			/* Trace back toward the region by following decreasing eroded_dist */
+			int cur = si;
+			for (int step = 0; step < rc_config.walkableRadius * 2; ++step)
+			{
+				if (!was_eroded[cur] || eroded_dist[cur] <= 0)
+					break;
+				if (guard.compact->areas[cur] == RC_NULL_AREA)
+				{
+					guard.compact->areas[cur] = was_eroded[cur];
+					restored++;
+				}
+				/* Find neighbor with lower distance */
+				int cx2 = 0, cy2 = 0;
+				for (int fy = 0; fy < h; ++fy)
+					for (int fx = 0; fx < w; ++fx)
+					{
+						const rcCompactCell &fc = guard.compact->cells[fx + fy * w];
+						if (cur >= (int)fc.index && cur < (int)(fc.index + fc.count))
+						{ cx2 = fx; cy2 = fy; goto found_trace; }
+					}
+				found_trace:
+				{
+					const rcCompactSpan &s = guard.compact->spans[cur];
+					int best_dist = eroded_dist[cur];
+					int best_ni = -1;
+					for (int dir = 0; dir < 4; ++dir)
+					{
+						if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
+							continue;
+						const int ax = cx2 + rcGetDirOffsetX(dir);
+						const int ay = cy2 + rcGetDirOffsetY(dir);
+						const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
+						if (eroded_dist[ai] < best_dist)
+						{
+							best_dist = eroded_dist[ai];
+							best_ni = ai;
+						}
+					}
+					if (best_ni < 0) break;
+					cur = best_ni;
+				}
+			}
+		}
+
+		fprintf(stderr, "Nav: wall erosion: %d eroded, %d bridges found, %d restored → %d regions\n",
+			eroded, (int)bridge_cells.size(), restored, num_regions);
 	}
 	/* The custom erosion above changes walkable spans, so rebuild the
 	   distance field afterward. Regions and near-wall costs both consume
