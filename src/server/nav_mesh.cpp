@@ -952,18 +952,69 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			}
 		}
 
-		/* Erode spans too close to walls */
-		int eroded = 0;
+		/* Adaptive erosion: erode near-wall spans, but preserve narrow
+		   corridors. Compute a max-filtered version of the wall distance
+		   field: for each span, the max wd within erode_dist steps.
+		   This approximates the corridor half-width at each point.
+		   Only erode if the corridor is wide enough (local_max >= 2 * erode_dist). */
+
+		/* Max-filter the wall distance field using 2-pass Chamfer-like sweep.
+		   This propagates max values outward from high-wd cells. */
+		std::vector<unsigned short> wd_max(static_cast<size_t>(span_count), 0);
+		for (int si = 0; si < span_count; ++si)
+			wd_max[si] = wd[si];
+
+		/* Propagate max: repeat erode_dist/2 passes (each pass propagates 1 cell) */
+		int passes = rc_config.walkableRadius; /* number of 1-cell propagation passes */
+		for (int pass = 0; pass < passes; ++pass)
+		{
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					const rcCompactCell &c = guard.compact->cells[x + y * w];
+					for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+					{
+						if (guard.compact->areas[si] == RC_NULL_AREA)
+							continue;
+						const rcCompactSpan &s = guard.compact->spans[si];
+						for (int dir = 0; dir < 4; ++dir)
+						{
+							if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
+								continue;
+							const int ax = x + rcGetDirOffsetX(dir);
+							const int ay = y + rcGetDirOffsetY(dir);
+							const int ai = (int)guard.compact->cells[ax + ay * w].index + rcGetCon(s, dir);
+							if (wd_max[ai] > wd_max[si])
+								wd_max[si] = wd_max[ai];
+						}
+					}
+				}
+			}
+		}
+
+		/* Erode: near wall AND corridor is wide enough */
+		int eroded = 0, preserved = 0;
 		for (int si = 0; si < span_count; ++si)
 		{
-			if (guard.compact->areas[si] != RC_NULL_AREA && wd[si] < erode_dist)
+			if (guard.compact->areas[si] == RC_NULL_AREA)
+				continue;
+			if (wd[si] >= erode_dist)
+				continue; /* far from wall — keep */
+
+			/* wd_max[si] = max wall distance within ~erode_dist cells.
+			   If >= 2 * erode_dist, the corridor center is far enough from
+			   walls that eroding the edges still leaves a walkable center. */
+			if (wd_max[si] >= (unsigned short)(erode_dist * 5))
 			{
 				guard.compact->areas[si] = RC_NULL_AREA;
 				eroded++;
 			}
+			else
+				preserved++;
 		}
-		fprintf(stderr, "Nav: wall-only erosion: %d spans eroded (radius=%d)\n",
-			eroded, rc_config.walkableRadius);
+		fprintf(stderr, "Nav: adaptive wall erosion: %d eroded, %d preserved (radius=%d)\n",
+			eroded, preserved, rc_config.walkableRadius);
 	}
 	/* The custom erosion above changes walkable spans, so rebuild the
 	   distance field afterward. Regions and near-wall costs both consume
