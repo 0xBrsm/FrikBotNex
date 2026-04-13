@@ -155,15 +155,29 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 				(p[2]-nr.nearest_point[2])*(p[2]-nr.nearest_point[2])) : 0;
 			int is_hit = found && snap < 60;
 
-			/* Log transitions: hit→miss or miss→hit or new poly ref */
-			if (is_hit != last_hit || (is_hit && found && (unsigned long long)nr.poly_ref != prev_ref))
+			/* Also do a BSP hull trace to see what the engine says */
+			vec3_t ts = {p[0], p[1], p[2] + 64};
+			vec3_t te = {p[0], p[1], p[2] - 64};
+			vec3_t hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			trace_t tr = SV_Move(ts, hmins, hmaxs, te, MOVE_NOMONSTERS, NULL);
+			float hull_z = tr.endpos[2] - 24; /* origin → floor */
+			int hull_ok = !tr.allsolid && tr.fraction < 1.0f &&
+				fabsf(hull_z - p[2]) < 20;
+
+			/* Log transitions */
+			int cur_state = is_hit ? (hull_ok ? 1 : 3) : (hull_ok ? 2 : 0);
+			if (cur_state != last_hit || (is_hit && found && (unsigned long long)nr.poly_ref != prev_ref))
 			{
-				fprintf(stderr, "  t=%.2f (%.0f,%.0f) %s snap=%.0f ref=%llu\n",
-					t, p[0], p[1],
-					is_hit ? "HIT" : "MISS", snap,
+				const char *label;
+				if (is_hit && hull_ok) label = "BOTH_OK";
+				else if (is_hit && !hull_ok) label = "MESH_ONLY";
+				else if (!is_hit && hull_ok) label = "HULL_ONLY";
+				else label = "NEITHER";
+				fprintf(stderr, "  t=%.2f (%.0f,%.0f) %s snap=%.0f hull_z=%.0f ref=%llu\n",
+					t, p[0], p[1], label, snap, hull_z,
 					found ? nr.poly_ref : 0ULL);
 				if (found) prev_ref = (unsigned long long)nr.poly_ref;
-				last_hit = is_hit;
+				last_hit = cur_state;
 			}
 		}
 	}
