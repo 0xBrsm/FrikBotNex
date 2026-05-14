@@ -96,6 +96,91 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 	fprintf(stderr, "Nav: %s WAYPOINT VALIDATION: %d OK, %d PARTIAL, %d FAIL, %d MISS / %d total\n",
 		map->name, ok_count, partial_count, fail_count, miss_count, map->edge_count);
 
+	/* Off-mesh waypoint probe: for every waypoint that the navmesh can't
+	   snap to, hull-trace the BSP geometry to reveal whether floor exists,
+	   how it differs from waypoint Z, and how wide the standable surface
+	   is.  Narrow catwalks eaten by erosion show as floor present but
+	   width < 32u (bot hull). */
+	int probed_off = 0;
+	for (int wi = 0; wi < map->wp_count; wi++)
+	{
+		nav_mesh_nearest_result_t nr;
+		char nerr[96];
+		nerr[0] = '\0';
+		if (nav_mesh_find_nearest(mesh, map->wps[wi], &nr, nerr, sizeof(nerr)))
+			continue;
+
+		if (probed_off == 0)
+			fprintf(stderr, "Nav: %s OFF-MESH WAYPOINTS:\n", map->name);
+		probed_off++;
+		fprintf(stderr, "  [why: %s]\n", nerr[0] ? nerr : "no result");
+
+		vec3_t hmins = {-16,-16,-24}, hmaxs = {16,16,32};
+		/* Try Z+8 first (low ceiling tolerant), fall back to Z+64. */
+		vec3_t ts = {map->wps[wi][0], map->wps[wi][1], map->wps[wi][2] + 8};
+		vec3_t te = {ts[0], ts[1], ts[2] - 320};
+		trace_t tr = SV_Move(ts, hmins, hmaxs, te, MOVE_NOMONSTERS, NULL);
+		int floor_ok = !tr.allsolid && tr.fraction < 1.0f;
+		float floor_z = floor_ok ? tr.endpos[2] - 24 : -9999;
+
+		/* Measure headroom: ray (point hull) upward from waypoint. */
+		vec3_t pmins = {0,0,0}, pmaxs = {0,0,0};
+		vec3_t us = {map->wps[wi][0], map->wps[wi][1], map->wps[wi][2]};
+		vec3_t ue = {us[0], us[1], us[2] + 256};
+		trace_t tu = SV_Move(us, pmins, pmaxs, ue, MOVE_NOMONSTERS, NULL);
+		float ceil_dz = (!tu.allsolid && tu.fraction < 1.0f) ?
+			(tu.endpos[2] - map->wps[wi][2]) : 999;
+
+		if (!floor_ok)
+		{
+			/* Z+8 failed — try Z+64 (waypoint may be above tall solid). */
+			vec3_t ts2 = {map->wps[wi][0], map->wps[wi][1], map->wps[wi][2] + 64};
+			vec3_t te2 = {ts2[0], ts2[1], ts2[2] - 320};
+			trace_t tr2 = SV_Move(ts2, hmins, hmaxs, te2, MOVE_NOMONSTERS, NULL);
+			if (!tr2.allsolid && tr2.fraction < 1.0f)
+			{
+				floor_ok = 1;
+				floor_z = tr2.endpos[2] - 24;
+				fprintf(stderr, "  wp%d (%.0f,%.0f,%.0f) ceil_dz=%.0f floor_z=%.0f dz=%+.0f  (deep, hull blocked at Z+8)\n",
+					wi + 1, map->wps[wi][0], map->wps[wi][1], map->wps[wi][2],
+					ceil_dz, floor_z, floor_z - map->wps[wi][2]);
+				continue;
+			}
+			fprintf(stderr, "  wp%d (%.0f,%.0f,%.0f) NO_FLOOR allsolid=%d frac=%.2f ceil_dz=%.0f\n",
+				wi + 1, map->wps[wi][0], map->wps[wi][1], map->wps[wi][2],
+				tr.allsolid, tr.fraction, ceil_dz);
+			continue;
+		}
+
+		/* Sweep ±X, ±Y at floor_z+64 → floor_z-64, step 4u,
+		   record max extent where hull still lands within 8u of floor_z. */
+		static const float dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+		int extent[4] = {0,0,0,0};
+		for (int d = 0; d < 4; d++)
+		{
+			for (int step = 4; step <= 64; step += 4)
+			{
+				vec3_t ps = {map->wps[wi][0] + dirs[d][0] * step,
+					map->wps[wi][1] + dirs[d][1] * step,
+					floor_z + 64};
+				vec3_t pe = {ps[0], ps[1], floor_z - 64};
+				trace_t tp = SV_Move(ps, hmins, hmaxs, pe, MOVE_NOMONSTERS, NULL);
+				if (tp.allsolid || tp.fraction >= 1.0f) break;
+				float fz = tp.endpos[2] - 24;
+				if (fabsf(fz - floor_z) > 8) break;
+				extent[d] = step;
+			}
+		}
+
+		fprintf(stderr, "  wp%d (%.0f,%.0f,%.0f) floor=%.0f dz=%+.0f ceil_dz=%.0f  Xw=%d Yw=%d\n",
+			wi + 1, map->wps[wi][0], map->wps[wi][1], map->wps[wi][2],
+			floor_z, floor_z - map->wps[wi][2], ceil_dz,
+			extent[0] + extent[1] + 32, extent[2] + extent[3] + 32);
+	}
+	if (probed_off > 0)
+		fprintf(stderr, "Nav: %s OFF-MESH: %d waypoints probed\n",
+			map->name, probed_off);
+
 	/* For same-level PARTIAL edges, probe along the path to find
 	   the exact break point — where navmesh polys disappear. */
 	for (ei = 0; ei < map->edge_count; ei++)
