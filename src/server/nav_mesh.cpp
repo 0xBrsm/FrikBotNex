@@ -2232,6 +2232,32 @@ extern "C" int navigate(nav_corridor_t *c,
 			return 0;
 	}
 
+	/* Stale-corridor check: if the corridor surface is far ABOVE the
+	   actor (bot fell or was knocked off a ledge), movePosition keeps
+	   XY-tracking along the old level and feeds overhead corners the
+	   bot can never reach (dm4 bots pinned under walkways).  Replan in
+	   place from the actor's real poly toward the same target — failing
+	   the call instead causes goal-abandon churn on every early fall.
+	   One-sided: corridor BELOW the bot is normal mid-drop/jump state. */
+	if (have_snapped_pos
+		&& c->corridor.getPos()[1] - snapped_pos[1] > NAV_MESH_QUERY_CLIMB)
+	{
+		const dtPolyRef *opath = c->corridor.getPath();
+		int ocount = c->corridor.getPathCount();
+		dtPolyRef tgt_ref = (ocount > 0) ? opath[ocount - 1] : 0;
+		float tgt_pos[3];
+		dtPolyRef npath[NAV_MESH_MAX_PATH_REFS];
+		int ncount = 0;
+
+		memcpy(tgt_pos, c->corridor.getTarget(), sizeof(tgt_pos));
+		dtStatus rst = navmesh->query->findPath(snapped_ref, tgt_ref,
+			snapped_pos, tgt_pos, &c->filter, npath, &ncount, NAV_MESH_MAX_PATH_REFS);
+		if (dtStatusFailed(rst) || ncount < 1)
+			return 0;
+		c->corridor.reset(snapped_ref, snapped_pos);
+		c->corridor.setCorridor(tgt_pos, npath, ncount);
+	}
+
 	if (!c->corridor.isValid(8, navmesh->query, &c->filter))
 	{
 		if (!have_snapped_pos)
