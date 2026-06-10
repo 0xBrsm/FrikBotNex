@@ -1568,12 +1568,24 @@ static void PF_nav_find_goal(void)
 	bestcost = 999999.0f;
 	best = sv.edicts;
 
+	/* Failed-goal cooldown: QC marks the goal it stalled on; skip it so
+	   the deterministic scorer can't immediately re-pick it and recreate
+	   the same jam. */
+	edict_t *failed_goal = NULL;
+	{
+		eval_t *fg = GetEdictFieldValue(bot, "_failed_goal");
+		eval_t *fgt = GetEdictFieldValue(bot, "_failed_goal_time");
+		if (fg && fgt && fgt->_float > sv.time && fg->edict)
+			failed_goal = PROG_TO_EDICT(fg->edict);
+	}
+
 	int dbg_avail = 0, dbg_wanted = 0, dbg_pathed = 0, dbg_blocked = 0;
 
 	for (i = 0; i < nav_item_count; i++)
 	{
 		it = nav_item_cache[i].ent;
 		if (it->free) continue;
+		if (it == failed_goal) continue;
 
 		if ((int)it->v.flags & FL_ITEM)
 			if (!it->v.model) continue;

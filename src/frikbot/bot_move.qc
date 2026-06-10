@@ -46,6 +46,8 @@ this notice in its entirety.
 .float _progress_stall;   // frames with no improvement
 .entity _progress_tgt;    // goal the progress baseline belongs to
 .vector _progress_wp;     // corner the progress baseline belongs to
+.entity _failed_goal;     // goal abandoned after a stall (engine skips it)
+.float _failed_goal_time; // cooldown expiry for _failed_goal
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -365,6 +367,14 @@ void() bot_get =
 			bprint("\n");
 			self._progress_stall = 0;
 			self._progress_best = 99999;
+			// Cool the goal down: the scorer is deterministic, so an
+			// immediate re-pick chooses the same goal and re-creates
+			// the same jam (head-on bot deadlocks, unreachable perches).
+			if (self.target1.flags & FL_ITEM)
+			{
+				self._failed_goal = self.target1;
+				self._failed_goal_time = time + 10;
+			}
 			self.target1 = world;
 			return;
 		}
