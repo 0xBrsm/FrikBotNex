@@ -259,14 +259,15 @@ static int nav_mesh_build_regions(
 	rcCompactHeightfield *compact,
 	const rcConfig *config)
 {
-	/* Layer regions: designed for multi-layer (multi-floor) maps.
-	   Handles overlapping spans and narrow ledges better than
-	   watershed or monotone partitioning. */
-	return rcBuildLayerRegions(
+	/* Watershed (stock Recast): best poly quality on simple,
+	   single-layer maps like Quake DM geometry. Caller is
+	   responsible for rcBuildDistanceField. */
+	return rcBuildRegions(
 		ctx,
 		*compact,
 		0,
-		config->minRegionArea);
+		config->minRegionArea,
+		config->mergeRegionArea);
 }
 
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
@@ -762,10 +763,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	}
 
 	rcFilterLowHangingWalkableObstacles(&ctx, rc_config.walkableClimb, *guard.solid);
-	nav_heightfield_bridge_small_gaps(&ctx, guard.solid, &rc_config);
-	/* Use standard ledge filter for poly quality, then rely on
-	   erode-then-restore BFS (in compact heightfield) to reconnect
-	   any paths it breaks. */
+	/* Stock Recast pipeline (experiment/stock-recast):
+	   no gap-bridging, no custom ledge filter, no wall-only erosion. */
 	rcFilterLedgeSpans(&ctx, rc_config.walkableHeight, rc_config.walkableClimb, *guard.solid);
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
 #if 0
@@ -862,11 +861,15 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build compact heightfield");
 		return nullptr;
 	}
-	/* Wall-only erosion: erode walkable area from walls but NOT from ledge
-	   edges.  Standard erosion kills narrow ledges (DM4 platforms above
-	   lava) because it treats drop-offs the same as walls.  We build a
-	   custom distance field seeded only from wall borders, then erode
-	   spans that are too close to walls.  Ledge-adjacent spans survive. */
+	/* Stock erosion (experiment/stock-recast): erode walkable area
+	   uniformly from any border. Replaces the wall-only erosion +
+	   erode-then-restore BFS that lived here. */
+	if (!rcErodeWalkableArea(&ctx, rc_config.walkableRadius, *guard.compact))
+	{
+		nav_set_error(error, error_size, "Failed to erode walkable area");
+		return nullptr;
+	}
+#if 0
 	{
 		const int w = guard.compact->width;
 		const int h = guard.compact->height;
@@ -1252,8 +1255,9 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		fprintf(stderr, "Nav: wall erosion: %d eroded, %d bridges found, %d restored → %d regions\n",
 			eroded, (int)bridge_cells.size(), restored, num_regions);
 	}
-	/* The custom erosion above changes walkable spans, so rebuild the
-	   distance field afterward. Regions and near-wall costs both consume
+#endif /* custom wall-only erosion disabled — stock rcErodeWalkableArea above */
+	/* Stock erosion above changed walkable spans, so build the distance
+	   field. Regions (watershed) and near-wall costs both consume
 	   compact->dist and must see the post-erosion topology. */
 	if (!rcBuildDistanceField(&ctx, *guard.compact))
 	{
