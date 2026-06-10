@@ -1,5 +1,6 @@
 #include "nav_mesh.h"
 
+#include <cfloat>
 #include <cmath>
 #include <cstdarg>
 #include <cstdlib>
@@ -688,6 +689,149 @@ static void nav_heightfield_bridge_small_gaps(
 		fprintf(stderr, "Nav: bridged %d tiny raster gaps before ledge filtering\n", fills_applied);
 }
 
+
+/* Disable polys not connected to the largest mesh component.
+   Hull-1 extraction emits sliver floors (lintels, beams) that bots
+   reseed onto and then roam forever inside a 1-poly island.  Traversal
+   follows Detour link chains, which include off-mesh connections, so
+   ledges reachable only by jump/drop/teleport links stay enabled. */
+static void nav_mesh_disable_islands(dtNavMesh *mesh)
+{
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return;
+
+	const int npolys = tile->header->polyCount;
+	const dtPolyRef base = mesh->getPolyRefBase(tile);
+
+	std::vector<int> comp(npolys, -1);
+	std::vector<int> comp_size;
+	std::vector<int> stack;
+
+	for (int i = 0; i < npolys; i++)
+	{
+		if (comp[i] >= 0)
+			continue;
+		const int c = (int)comp_size.size();
+		comp_size.push_back(0);
+		comp[i] = c;
+		stack.clear();
+		stack.push_back(i);
+		while (!stack.empty())
+		{
+			const int pi = stack.back();
+			stack.pop_back();
+			comp_size[c]++;
+			const dtPoly *poly = &tile->polys[pi];
+			for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+			{
+				const dtPolyRef nref = tile->links[k].ref;
+				if (nref == 0)
+					continue;
+				unsigned int salt, it, ip;
+				mesh->decodePolyId(nref, salt, it, ip);
+				if ((int)ip >= npolys || comp[ip] >= 0)
+					continue;
+				comp[ip] = c;
+				stack.push_back((int)ip);
+			}
+		}
+	}
+
+	/* A junk sliver is a small unlinked component hovering just above
+	   main-mesh floor (door lintels, beams — hull-1 artifacts).  Real
+	   isolated areas (super-jump ledges, rooms awaiting plat/door links)
+	   ARE the floor: nothing walkable sits under them, so keep those for
+	   goal snapping and future links. */
+	const int kSliverMaxPolys = 4;
+	const float kSliverMaxHover = 48.0f;
+	/* Hull-1 expansion makes slivers overhang the floor below by up to
+	   the player half-width, so test containment with XZ slack.  Keep it
+	   under ~half-width: at 26u+ of slack, real window ledges (dm3 wp77)
+	   start matching neighboring floor and get wrongly culled. */
+	const float kSliverXZSlack = 20.0f;
+
+	int largest = 0;
+	for (int c = 1; c < (int)comp_size.size(); c++)
+		if (comp_size[c] > comp_size[largest])
+			largest = c;
+
+	/* Poly centroids + XZ bounds (recast coords: y is up). */
+	std::vector<float> ctr(npolys * 3);
+	std::vector<float> bb(npolys * 4); /* xmin xmax zmin zmax */
+	for (int i = 0; i < npolys; i++)
+	{
+		const dtPoly *poly = &tile->polys[i];
+		float cx = 0, cy = 0, cz = 0;
+		float xmin = FLT_MAX, xmax = -FLT_MAX, zmin = FLT_MAX, zmax = -FLT_MAX;
+		for (int vi = 0; vi < poly->vertCount; vi++)
+		{
+			const float *v = &tile->verts[poly->verts[vi] * 3];
+			cx += v[0]; cy += v[1]; cz += v[2];
+			if (v[0] < xmin) xmin = v[0];
+			if (v[0] > xmax) xmax = v[0];
+			if (v[2] < zmin) zmin = v[2];
+			if (v[2] > zmax) zmax = v[2];
+		}
+		ctr[i * 3 + 0] = cx / poly->vertCount;
+		ctr[i * 3 + 1] = cy / poly->vertCount;
+		ctr[i * 3 + 2] = cz / poly->vertCount;
+		bb[i * 4 + 0] = xmin; bb[i * 4 + 1] = xmax;
+		bb[i * 4 + 2] = zmin; bb[i * 4 + 3] = zmax;
+	}
+
+	int disabled = 0;
+	for (int c = 0; c < (int)comp_size.size(); c++)
+	{
+		if (c == largest || comp_size[c] > kSliverMaxPolys)
+			continue;
+
+		/* Every poly in the component must shadow main-mesh floor. */
+		bool all_hover = true;
+		for (int i = 0; i < npolys && all_hover; i++)
+		{
+			if (comp[i] != c)
+				continue;
+			bool floor_below = false;
+			for (int j = 0; j < npolys; j++)
+			{
+				if (comp[j] != largest)
+					continue;
+				if (ctr[i * 3 + 0] < bb[j * 4 + 0] - kSliverXZSlack ||
+				    ctr[i * 3 + 0] > bb[j * 4 + 1] + kSliverXZSlack ||
+				    ctr[i * 3 + 2] < bb[j * 4 + 2] - kSliverXZSlack ||
+				    ctr[i * 3 + 2] > bb[j * 4 + 3] + kSliverXZSlack)
+					continue;
+				const float drop = ctr[i * 3 + 1] - ctr[j * 3 + 1];
+				if (drop > 0.0f && drop <= kSliverMaxHover)
+				{
+					floor_below = true;
+					break;
+				}
+			}
+			if (!floor_below)
+				all_hover = false;
+		}
+		if (!all_hover)
+			continue;
+
+		for (int i = 0; i < npolys; i++)
+		{
+			if (comp[i] != c)
+				continue;
+			mesh->setPolyFlags(base | (dtPolyRef)i, 0);
+			disabled++;
+#ifdef NAV_ISLAND_DEBUG
+			fprintf(stderr, "Nav: sliver poly %d comp=%d size=%d at (%.0f %.0f %.0f)\n",
+				i, c, comp_size[c], ctr[i * 3], ctr[i * 3 + 2], ctr[i * 3 + 1]);
+#endif
+		}
+	}
+
+	if (disabled > 0)
+		fprintf(stderr, "Nav: disabled %d sliver polys hovering over main mesh (%d components, largest=%d)\n",
+			disabled, (int)comp_size.size(), comp_size[largest]);
+}
 
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts,
@@ -1622,6 +1766,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 				linked, unlinked);
 		}
 	}
+
+	nav_mesh_disable_islands(guard.runtime->navmesh);
 
 	/* Wide extents for goal/item snapping.
 	   Keep XZ tighter than the original 64u box to avoid snapping
