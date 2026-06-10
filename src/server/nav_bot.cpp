@@ -164,10 +164,13 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 
 	nav_mesh_setup_filter(&filter);
-	memcpy(tight, nav_mesh->query_half_extents_actor_origin, sizeof(tight));
 	nav_q2r(qpos, rc_pos);
 	*out_ref = 0;
-	status = query->findNearestPoly(rc_pos, tight, &filter, out_ref, out_nearest, &over_poly);
+	{
+		float center[3];
+		nav_mesh_actor_snap_box(nav_mesh, rc_pos, center, tight);
+		status = query->findNearestPoly(center, tight, &filter, out_ref, out_nearest, &over_poly);
+	}
 	if (dtStatusFailed(status) || *out_ref == 0)
 		return 0;
 

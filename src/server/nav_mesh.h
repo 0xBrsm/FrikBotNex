@@ -259,6 +259,12 @@ int nav_mesh_find_path(
 void nav_mesh_free_poly_records(nav_mesh_poly_record_t *records);
 void nav_mesh_destroy(nav_mesh_runtime_t *navmesh);
 
+/* Down-biased search box for snapping an actor origin to its floor poly
+   (floors are below the origin, never more than a step above).
+   rc_point/center/half_extents are Recast coords. */
+void nav_mesh_actor_snap_box(const nav_mesh_runtime_t *navmesh,
+	const float *rc_point, float *center, float *half_extents);
+
 /* ---- Path corridor (dtPathCorridor wrapper) ---- */
 
 typedef struct nav_corridor_s nav_corridor_t;

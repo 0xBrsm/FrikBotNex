@@ -278,6 +278,26 @@ static int nav_mesh_build_regions(
 		config->mergeRegionArea);
 }
 
+/* Actor-origin poly search box, biased downward.  Actors stand ON
+   floors: the nav surface sits ~22u below the origin and can never be
+   more than a step above it.  A symmetric box snaps wall-hugging actors
+   to ledge/pedestal polys overhead (the hull-1 shadow band next to tall
+   brushes has no floor polys), and paths from there skip required jump
+   links (dm6 armor1 pedestal, dm4 under-stair). */
+extern "C" void nav_mesh_actor_snap_box(const nav_mesh_runtime_t *navmesh,
+	const float *rc_point, float *center, float *half_extents)
+{
+	const float up = 8.0f;
+	const float down = navmesh->query_half_extents_actor_origin[1] + 32.0f;
+
+	center[0] = rc_point[0];
+	center[1] = rc_point[1] - (down - up) * 0.5f;
+	center[2] = rc_point[2];
+	half_extents[0] = navmesh->query_half_extents_actor_origin[0];
+	half_extents[1] = (up + down) * 0.5f;
+	half_extents[2] = navmesh->query_half_extents_actor_origin[2];
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -303,9 +323,19 @@ static int nav_mesh_find_nearest_internal(
 	extents = extents_override ? extents_override : navmesh->query_half_extents;
 
 	nav_quake_to_recast(point, recast_point);
+
+	float query_center[3] = {recast_point[0], recast_point[1], recast_point[2]};
+	float biased_half[3];
+	const float *query_half = extents;
+	if (extents == navmesh->query_half_extents_actor_origin)
+	{
+		nav_mesh_actor_snap_box(navmesh, recast_point, query_center, biased_half);
+		query_half = biased_half;
+	}
+
 	status = navmesh->query->findNearestPoly(
-		recast_point,
-		extents,
+		query_center,
+		query_half,
 		&filter,
 		nearest_ref,
 		nearest_pt,
@@ -2102,6 +2132,16 @@ struct nav_corridor_s
 {
 	dtPathCorridor corridor;
 	dtQueryFilter filter;
+	/* Off-mesh link in traversal: set when the corridor advances past a
+	   link, cleared when the actor reaches the far side or gets a new
+	   path.  While set, navigate() keeps steering at the link end with
+	   the link's type tag — otherwise the corridor advance (which fires
+	   36u early, per dtCrowd) loses the tag before the bot has jumped/
+	   dropped, leaving it staring at an unreachable lt=0 corner. */
+	dtPolyRef pending_link_ref = 0;
+	dtPolyRef pending_land_ref = 0;
+	float pending_start[3] = {0, 0, 0};
+	float pending_end[3] = {0, 0, 0};
 };
 
 static int nav_corridor_reseed_to_poly(nav_corridor_t *c, dtPolyRef poly_ref, const float *poly_pos)
@@ -2177,6 +2217,34 @@ extern "C" int nav_corridor_set(nav_corridor_t *c,
 
 	c->corridor.reset(polys[0], rc_start);
 	c->corridor.setCorridor(rc_target, polys, path_count);
+	c->pending_link_ref = 0;
+	return 1;
+}
+
+/* Average of a ground poly's vertices (Recast coords).  Returns 0 for
+   off-mesh connection polys — their "center" is mid-air. */
+static int nav_poly_center(const nav_mesh_runtime_t *navmesh,
+	dtPolyRef ref, float *center)
+{
+	const dtMeshTile *tile = nullptr;
+	const dtPoly *poly = nullptr;
+
+	if (dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(ref, &tile, &poly))
+		|| poly->vertCount == 0
+		|| poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+		return 0;
+	center[0] = center[1] = center[2] = 0;
+	for (int i = 0; i < poly->vertCount; i++)
+	{
+		const float *v = &tile->verts[poly->verts[i] * 3];
+		center[0] += v[0];
+		center[1] += v[1];
+		center[2] += v[2];
+	}
+	const float inv = 1.0f / (float)poly->vertCount;
+	center[0] *= inv;
+	center[1] *= inv;
+	center[2] *= inv;
 	return 1;
 }
 
@@ -2215,6 +2283,41 @@ extern "C" int navigate(nav_corridor_t *c,
 		navmesh->query_half_extents_actor_origin,
 		nullptr,
 		0);
+
+	/* Off-mesh link mid-traversal: the corridor is already past the link
+	   (advanced at the 36u trigger below), but the actor hasn't landed on
+	   the far side yet.  Keep steering at the link end with the type tag
+	   so QC keeps executing the jump/drop; the corridor stays frozen at
+	   the link end until arrival.  A failed traversal is recovered by
+	   QC's progress stall, which requests a new path (clears pending). */
+	if (c->pending_link_ref != 0)
+	{
+		/* Arrival must be 3D: near-vertical links (40u jump up a ledge)
+		   put the actor horizontally next to the end while still on the
+		   wrong level — a 2D test "arrives" instantly and re-loses the
+		   type tag this mechanism exists to keep. */
+		if (have_snapped_pos
+			&& (snapped_ref == c->pending_land_ref
+				|| dtVdist(snapped_pos, c->pending_end) < 24.0f))
+		{
+			c->pending_link_ref = 0;
+		}
+		else
+		{
+			/* Approach the link start first so jumps get their run-up
+			   geometry; only steer at the end once committed (close to
+			   the start, or already off the start level mid-traversal). */
+			const float *steer_to = c->pending_end;
+			if (have_snapped_pos
+				&& dtVdist2D(snapped_pos, c->pending_start) > 24.0f
+				&& fabsf(snapped_pos[1] - c->pending_start[1]) <= NAV_MESH_QUERY_CLIMB)
+				steer_to = c->pending_start;
+			nav_recast_to_quake(steer_to, corner_pos);
+			*corner_flags = DT_STRAIGHTPATH_OFFMESH_CONNECTION;
+			*corner_ref = static_cast<unsigned long long>(c->pending_link_ref);
+			return 1;
+		}
+	}
 
 	if (have_snapped_pos)
 	{
@@ -2282,7 +2385,7 @@ extern "C" int navigate(nav_corridor_t *c,
 	   Detour best practice (dtCrowd uses radius * 2.25 as trigger).
 	   The corner is still returned to QC so it can animate the traversal;
 	   on the NEXT call, the corridor is already past the link. */
-	if (flags[0] & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
+	if (flags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
 	{
 		float trigger = 16.0f * 2.25f; /* agent radius * 2.25 */
 		float dist2d = dtVdist2D(c->corridor.getPos(), corners);
@@ -2290,11 +2393,20 @@ extern "C" int navigate(nav_corridor_t *c,
 		{
 			dtPolyRef advance_refs[2];
 			float rc_start[3], rc_end[3];
-			c->corridor.moveOverOffmeshConnection(
-				refs[0], advance_refs, rc_start, rc_end, navmesh->query);
-			/* Corridor is now past the link.  Next navigate() call will
-			   see post-link waypoints.  Return the link start corner to
-			   QC this frame so it can execute the traversal action. */
+			if (c->corridor.moveOverOffmeshConnection(
+				refs[0], advance_refs, rc_start, rc_end, navmesh->query))
+			{
+				/* Corridor is now past the link.  Track the traversal so
+				   subsequent calls keep steering at the link END with the
+				   type tag until the actor lands on the far side (see
+				   pending check above).  Return the end this frame too so
+				   the run-up/jump aims across the gap, not at the lip. */
+				c->pending_link_ref = refs[0];
+				c->pending_land_ref = (c->corridor.getPathCount() > 0)
+					? c->corridor.getPath()[0] : 0;
+				dtVcopy(c->pending_start, rc_start);
+				dtVcopy(c->pending_end, rc_end);
+			}
 		}
 	}
 
@@ -2303,6 +2415,34 @@ extern "C" int navigate(nav_corridor_t *c,
 		float h = 0;
 		if (dtStatusSucceed(navmesh->query->getPolyHeight(refs[0], corners, &h)))
 			corners[1] = h; /* Recast Y = height */
+	}
+
+	/* Edge-hugging fallback: hull-1 widening (16u) plus raster dilation
+	   (one cell) extends polys past the physically standable edge, and the
+	   funnel pulls its string along that phantom border.  On stairways the
+	   corner ends up far overhead while the straight line to it runs beside
+	   the actual treads (dm6 armorInv staircase: 4 bots queued at 100% stk).
+	   When the corner is a climb the bot cannot make and is not an off-mesh
+	   link, steer through the next corridor poly's center instead — centers
+	   sit in the physically walkable interior, and the corridor keeps
+	   advancing poly by poly until the corner is reachable again. */
+	if (have_snapped_pos
+		&& !(flags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
+		&& corners[1] - snapped_pos[1] > NAV_MESH_QUERY_CLIMB
+		&& c->corridor.getPathCount() > 1)
+	{
+		float center[3];
+		dtPolyRef next_ref = c->corridor.getPath()[1];
+
+		if (nav_poly_center(navmesh, next_ref, center))
+		{
+			float h = 0;
+			if (dtStatusSucceed(navmesh->query->getPolyHeight(next_ref, center, &h)))
+				center[1] = h;
+			dtVcopy(corners, center);
+			flags[0] = 0;
+			refs[0] = next_ref;
+		}
 	}
 
 	/* Periodically optimize corridor */
