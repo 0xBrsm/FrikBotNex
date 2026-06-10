@@ -200,6 +200,7 @@ QUAKE_OBJS = \
 BOT_OBJS = \
 	$(BUILD_DIR)/net_bot.o \
 	$(BUILD_DIR)/nav_bot.o \
+	$(BUILD_DIR)/nav_hull.o \
 	$(BUILD_DIR)/nav_mesh.o \
 	$(BUILD_DIR)/nav_val.o
 
@@ -270,6 +271,11 @@ $(BUILD_DIR)/%.o: %.c
 
 # Bot nav (C++ — accesses both Quake engine and Detour directly)
 $(BUILD_DIR)/nav_bot.o: nav_bot.cpp
+	@mkdir -p $(BUILD_DIR)
+	@echo "  CXX $<"
+	$(CXX) $(CXXFLAGS) -I. -c $< -o $@
+
+$(BUILD_DIR)/nav_hull.o: nav_hull.cpp
 	@mkdir -p $(BUILD_DIR)
 	@echo "  CXX $<"
 	$(CXX) $(CXXFLAGS) -I. -c $< -o $@

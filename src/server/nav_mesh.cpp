@@ -18,6 +18,13 @@
 
 #define NAV_MESH_GOAL_SNAP_MAX_Z 128.0f
 
+/* Vertical tolerance for snapping entity origins to floor polys.
+   Entity origins sit up to ~24u above the floor (player origin is
+   feet+24); keep this independent of config->walkable_height, which
+   with hull-1 geometry is the residual hull gap (8u), not a player
+   dimension. */
+#define NAV_MESH_QUERY_CLIMB 56.0f
+
 /* Shared error-formatting helper. */
 extern "C" void nav_set_error(char *error, size_t error_size, const char *format, ...)
 {
@@ -861,10 +868,11 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build compact heightfield");
 		return nullptr;
 	}
-	/* Stock erosion (experiment/stock-recast): erode walkable area
-	   uniformly from any border. Replaces the wall-only erosion +
-	   erode-then-restore BFS that lived here. */
-	if (!rcErodeWalkableArea(&ctx, rc_config.walkableRadius, *guard.compact))
+	/* Stock erosion. With hull-1 geometry the agent is a point
+	   (walkable_radius 0) and erosion is skipped entirely — the clip
+	   hull already encodes player clearance. */
+	if (rc_config.walkableRadius > 0 &&
+		!rcErodeWalkableArea(&ctx, rc_config.walkableRadius, *guard.compact))
 	{
 		nav_set_error(error, error_size, "Failed to erode walkable area");
 		return nullptr;
@@ -1496,12 +1504,12 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	params.detailTriCount = guard.detail_mesh->ntris;
 	params.walkableHeight = config->walkable_height;
 	params.walkableRadius = config->walkable_radius;
-	/* Use walkable_height (not walkable_climb) for the Detour tile params.
+	/* Query-time vertical tolerance, NOT the raster walkable height.
 	   This controls the Y search extent when linking off-mesh connections
 	   to nearby ground polys. Off-mesh endpoints are authored from entity
 	   origins, not guaranteed foot-contact points, so the search must cover
 	   origin-to-surface separation even when the navmesh itself is on the floor. */
-	params.walkableClimb = config->walkable_height;
+	params.walkableClimb = NAV_MESH_QUERY_CLIMB;
 	rcVcopy(params.bmin, guard.poly_mesh->bmin);
 	rcVcopy(params.bmax, guard.poly_mesh->bmax);
 	params.cs = rc_config.cs;
@@ -1627,7 +1635,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	   than a foot point on the floor, so Y must cover that origin-to-surface
 	   offset while still staying below the next floor above. */
 	guard.runtime->query_half_extents_actor_origin[0] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
-	guard.runtime->query_half_extents_actor_origin[1] = config->walkable_height;
+	guard.runtime->query_half_extents_actor_origin[1] = NAV_MESH_QUERY_CLIMB;
 	guard.runtime->query_half_extents_actor_origin[2] = fmaxf(config->walkable_radius * 1.5f, 24.0f);
 
 	/* Store link metadata for userId lookup during path following. */

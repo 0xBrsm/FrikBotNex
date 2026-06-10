@@ -18,6 +18,7 @@ extern "C" {
 }
 
 #include "nav_bot.h"
+#include "nav_hull.h"
 #include "nav_mesh.h"
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
@@ -44,14 +45,16 @@ extern ddef_t *ED_FindGlobal(char *name);
 
 /* ---- Recast config ---- */
 
-/* cell_size=4 per Recast author (agentRadius / 3..4 for indoor).
-   Quake agent radius is 16, so cs=4 gives 4-cell erosion. */
+/* Geometry comes from clip hull 1 (see nav_hull.cpp), which qbsp
+   pre-expanded by the player box.  The agent is therefore a POINT:
+   walkable_radius 0 (no erosion), and walkable_height is the hull-gap
+   left after expansion (real gap minus 56), not the player height. */
 #define NAV_CELL_SIZE                 4.0f
 #define NAV_CELL_HEIGHT               2.0f
 #define NAV_WALKABLE_SLOPE_ANGLE     45.0f
-#define NAV_WALKABLE_HEIGHT          56.0f
+#define NAV_WALKABLE_HEIGHT           8.0f
 #define NAV_WALKABLE_CLIMB           18.0f
-#define NAV_WALKABLE_RADIUS          16.0f
+#define NAV_WALKABLE_RADIUS           0.0f
 #define NAV_MAX_EDGE_LEN            192.0f
 #define NAV_MAX_SIMPLIFICATION_ERROR  1.3f
 #define NAV_MIN_REGION_SIZE           2
@@ -221,11 +224,7 @@ static void nav_default_config(nav_mesh_build_config_t *config)
 
 /* ---- BSP geometry extraction ---- */
 
-static int nav_count_face_tris(model_t *m);
-
-/* Static brush entities whose surfaces belong in the navmesh.
-   Moving entities (func_plat, func_train, func_door) are excluded —
-   they get off-mesh links instead (or nothing, for doors). */
+/* Brush entities whose clip hulls belong in the navmesh. */
 static int nav_is_brush_entity(char *classname)
 {
 	return !strncasecmp(classname, "func_wall", 9)
@@ -235,168 +234,33 @@ static int nav_is_brush_entity(char *classname)
 		|| !strncasecmp(classname, "func_plat", 9);
 }
 
-/* Count triangles from static brush entity submodels (func_wall etc.)
-   These share the worldmodel vertex pool — just different surface ranges. */
-static int nav_count_brush_entity_tris(model_t *worldmodel)
-{
-	int i, total = 0;
-	for (i = 1; i < sv.num_edicts; i++)
-	{
-		edict_t *e = EDICT_NUM(i);
-		model_t *m;
-		if (e->free) continue;
-		if (!nav_is_brush_entity(pr_strings + (int)e->v.classname)) continue;
-		m = sv.models[(int)e->v.modelindex];
-		if (!m || m == worldmodel) continue;
-		total += nav_count_face_tris(m);
-	}
-	return total;
-}
-
-/* Emit triangles from brush entity submodels.
-   Uses the same vertex pool as worldmodel — indices are already valid. */
-static void nav_emit_brush_entity_tris(
-	model_t *worldmodel, int *tris, int *tri_write)
-{
-	int i, si, ei, ec, fe;
-	int *fv = NULL;
-	int fc = 0;
-
-	for (i = 1; i < sv.num_edicts; i++)
-	{
-		edict_t *e = EDICT_NUM(i);
-		model_t *m;
-		int first, num;
-
-		if (e->free) continue;
-		if (!nav_is_brush_entity(pr_strings + (int)e->v.classname)) continue;
-		m = sv.models[(int)e->v.modelindex];
-		if (!m || m == worldmodel) continue;
-
-		first = m->firstmodelsurface;
-		num = m->nummodelsurfaces;
-
-		for (si = 0; si < num; si++)
-		{
-			msurface_t *s = &m->surfaces[first + si];
-			if (s->texinfo && (s->texinfo->flags & TEX_SPECIAL)) continue;
-			if (s->texinfo && s->texinfo->texture &&
-				(s->texinfo->texture->name[0] == '*') &&
-				(!strncasecmp(s->texinfo->texture->name, "*lava", 5) ||
-				 !strncasecmp(s->texinfo->texture->name, "*slime", 6)))
-				continue;
-			ec = s->numedges;
-			if (ec < 3) continue;
-			if (ec > fc) { fv = (int *)realloc(fv, (size_t)ec * sizeof(int)); fc = ec; }
-
-			fe = s->firstedge;
-			for (ei = 0; ei < ec; ei++)
-			{
-				int se = worldmodel->surfedges[fe + ei];
-				int v = (se >= 0) ? worldmodel->edges[se].v[0]
-						  : worldmodel->edges[-se].v[1];
-				fv[ei] = v;
-			}
-			for (ei = 1; ei < ec - 1; ei++)
-			{
-				tris[(*tri_write)++] = fv[0];
-				tris[(*tri_write)++] = fv[ei];
-				tris[(*tri_write)++] = fv[ei + 1];
-			}
-		}
-	}
-	free(fv);
-}
-
-static int nav_count_face_tris(model_t *m)
-{
-	int first = m->firstmodelsurface, num = m->nummodelsurfaces;
-	int i, total = 0;
-	for (i = 0; i < num; i++)
-	{
-		msurface_t *s = &m->surfaces[first + i];
-		if (s->texinfo && (s->texinfo->flags & TEX_SPECIAL)) continue;
-		if (s->numedges < 3) continue;
-		total += s->numedges - 2;
-	}
-	return total;
-}
-
+/* Polygonize clip hull 1 of the world plus static brush entities.
+   See nav_hull.cpp for why hull geometry instead of render faces. */
 static int nav_extract_bsp(model_t *worldmodel,
 	float **out_verts, int *out_vert_count,
 	int **out_tris, int *out_tri_count)
 {
-	int world_verts, brush_tris, total_verts, total_tris;
-	float *verts;
-	int *tris, *fv;
-	int fc, first, num, si, vi, wi;
+	int i;
 
 	*out_verts = NULL; *out_vert_count = 0;
 	*out_tris = NULL;  *out_tri_count = 0;
 	if (!worldmodel) return 0;
 
-	world_verts = worldmodel->numvertexes;
-	if (world_verts <= 0) return 0;
+	nav_hull_begin();
+	nav_hull_add_model(worldmodel, NULL);
 
-	brush_tris = nav_count_brush_entity_tris(worldmodel);
-	total_verts = world_verts;
-	total_tris = nav_count_face_tris(worldmodel) + brush_tris;
-	if (total_tris <= 0) return 0;
-
-	verts = (float *)malloc((size_t)total_verts * 3 * sizeof(float));
-	tris = (int *)malloc((size_t)total_tris * 3 * sizeof(int));
-	if (!verts || !tris) { free(verts); free(tris); return 0; }
-
-	for (vi = 0; vi < world_verts; vi++)
+	for (i = 1; i < sv.num_edicts; i++)
 	{
-		verts[vi*3+0] = worldmodel->vertexes[vi].position[0];
-		verts[vi*3+1] = worldmodel->vertexes[vi].position[1];
-		verts[vi*3+2] = worldmodel->vertexes[vi].position[2];
+		edict_t *e = EDICT_NUM(i);
+		model_t *m;
+		if (e->free) continue;
+		if (!nav_is_brush_entity(pr_strings + (int)e->v.classname)) continue;
+		m = sv.models[(int)e->v.modelindex];
+		if (!m || m == worldmodel) continue;
+		nav_hull_add_model(m, e->v.origin);
 	}
 
-	first = worldmodel->firstmodelsurface;
-	num = worldmodel->nummodelsurfaces;
-	fv = NULL; fc = 0; wi = 0;
-
-	for (si = 0; si < num; si++)
-	{
-		msurface_t *s = &worldmodel->surfaces[first + si];
-		int ec, fe, ei;
-
-		if (s->texinfo && (s->texinfo->flags & TEX_SPECIAL)) continue;
-		/* Skip lava/slime surfaces — bots must not walk on them */
-		if (s->texinfo && s->texinfo->texture &&
-			(s->texinfo->texture->name[0] == '*') &&
-			(!strncasecmp(s->texinfo->texture->name, "*lava", 5) ||
-			 !strncasecmp(s->texinfo->texture->name, "*slime", 6)))
-			continue;
-		ec = s->numedges;
-		if (ec < 3) continue;
-		if (ec > fc) { fv = (int *)realloc(fv, (size_t)ec * sizeof(int)); fc = ec; }
-
-		fe = s->firstedge;
-		for (ei = 0; ei < ec; ei++)
-		{
-			int se = worldmodel->surfedges[fe + ei];
-			int v = (se >= 0) ? worldmodel->edges[se].v[0]
-					  : worldmodel->edges[-se].v[1];
-			if (v < 0 || v >= world_verts) { free(fv); free(verts); free(tris); return 0; }
-			fv[ei] = v;
-		}
-		for (ei = 1; ei < ec - 1; ei++)
-		{
-			tris[wi++] = fv[0];
-			tris[wi++] = fv[ei];
-			tris[wi++] = fv[ei + 1];
-		}
-	}
-
-	nav_emit_brush_entity_tris(worldmodel, tris, &wi);
-
-	free(fv);
-	*out_verts = verts;  *out_vert_count = total_verts;
-	*out_tris = tris;    *out_tri_count = wi / 3;
-	return 1;
+	return nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count);
 }
 
 /* ---- Teleporter off-mesh links ---- */
