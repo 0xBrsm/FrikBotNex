@@ -302,8 +302,8 @@ void() bot_get =
 	// progress check: not getting closer to corner? abandon.
 	// Off-mesh links get 3x timeout (bot may be doing controlled approach).
 	{
-		local vector flat;
-		local float xy_dist;
+		local vector flat, rt;
+		local float xy_dist, fr, fl;
 		flat = wp - self.origin;
 		flat_z = 0;
 		xy_dist = vlen(flat);
@@ -326,8 +326,43 @@ void() bot_get =
 		else
 			self._progress_stall = self._progress_stall + 1;
 
+		// Shoulder probes: the steering corner can hug an obstacle the
+		// center traceline slips past (open door panels, plat edges) —
+		// the bot's 32u-wide box grinds on its corner with zero slide.
+		// When progress stops, trace both shoulders and veer toward the
+		// clear side; wall-slide physics takes over from there.
+		if (self._progress_stall > 4 && link_type == 0
+			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
+		{
+			rt_x = self.b_wishdir_y;
+			rt_y = 0 - self.b_wishdir_x;
+			rt_z = 0;
+			traceline(self.origin + rt * 16,
+				self.origin + rt * 16 + self.b_wishdir * 48, TRUE, self);
+			fr = trace_fraction;
+			traceline(self.origin - rt * 16,
+				self.origin - rt * 16 + self.b_wishdir * 48, TRUE, self);
+			fl = trace_fraction;
+			if (fr < fl - 0.1)
+				self.b_wishdir = normalize(self.b_wishdir - rt * 0.8);
+			else if (fl < fr - 0.1)
+				self.b_wishdir = normalize(self.b_wishdir + rt * 0.8);
+		}
+
 		if (self._progress_stall > (1 / cvar("sys_ticrate")))
 		{
+			// TEMP DEBUG: stall position dump
+			bprint("STALL ");
+			bprint(self.netname);
+			bprint(" at ");
+			bprint(vtos(self.origin));
+			bprint(" wp ");
+			bprint(vtos(wp));
+			bprint(" lt ");
+			bprint(ftos(link_type));
+			bprint(" tgt ");
+			bprint(self.target1.classname);
+			bprint("\n");
 			self._progress_stall = 0;
 			self._progress_best = 99999;
 			self.target1 = world;
