@@ -225,13 +225,30 @@ static void nav_default_config(nav_mesh_build_config_t *config)
 /* ---- BSP geometry extraction ---- */
 
 /* Brush entities whose clip hulls belong in the navmesh. */
-static int nav_is_brush_entity(char *classname)
+/* QC spawn code renames brush entities (doors.qc/plats.qc):
+   func_door & func_door_secret -> "door", func_plat -> "plat",
+   func_train -> "train".  Nav builds after spawn, so match the
+   renamed forms.
+
+   Doors are special: thin horizontal slabs (dm2 water covers, dm6
+   secret-door platform) are floors bots stand on and must be in the
+   mesh.  Tall doors block passages bots path through (they open on
+   touch), so those stay out.
+
+   Plats are deliberately excluded: baking the plat body at its
+   resting position fragments the surrounding mesh (dm3 lost edges),
+   and plat traversal is the off-mesh link system's job. */
+#define NAV_DOOR_FLOOR_MAX_THICKNESS 32.0f
+
+static int nav_is_brush_entity(edict_t *e)
 {
+	char *classname = pr_strings + (int)e->v.classname;
+	if (!strcasecmp(classname, "door"))
+		return (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS;
 	return !strncasecmp(classname, "func_wall", 9)
 		|| !strncasecmp(classname, "func_episodegate", 16)
 		|| !strncasecmp(classname, "func_bossgate", 13)
-		|| !strncasecmp(classname, "func_door", 9)
-		|| !strncasecmp(classname, "func_plat", 9);
+		|| !strcasecmp(classname, "train");
 }
 
 /* Polygonize clip hull 1 of the world plus static brush entities.
@@ -254,9 +271,9 @@ static int nav_extract_bsp(model_t *worldmodel,
 		edict_t *e = EDICT_NUM(i);
 		model_t *m;
 		if (e->free) continue;
-		if (!nav_is_brush_entity(pr_strings + (int)e->v.classname)) continue;
 		m = sv.models[(int)e->v.modelindex];
 		if (!m || m == worldmodel) continue;
+		if (!nav_is_brush_entity(e)) continue;
 		nav_hull_add_model(m, e->v.origin);
 	}
 
