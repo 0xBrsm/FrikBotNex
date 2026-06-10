@@ -98,6 +98,12 @@ struct nav_mesh_runtime_s
 
 void nav_mesh_setup_filter(dtQueryFilter *filter);
 
+/* Floor-capped actor snap: nearest poly whose surface point is no more
+   than 8u above the actor origin (Recast coords).  Returns 1 if found. */
+int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
+	const dtQueryFilter *filter, const float *rc_point,
+	dtPolyRef *out_ref, float *out_pt, bool *out_over);
+
 /* Blocked poly table: paths through these polys are rejected post-findPath.
    No virtual dispatch — just a flat array checked after pathfinding. */
 #define NAV_MAX_BLOCKED_POLYS 256

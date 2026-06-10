@@ -298,6 +298,54 @@ extern "C" void nav_mesh_actor_snap_box(const nav_mesh_runtime_t *navmesh,
 	half_extents[2] = navmesh->query_half_extents_actor_origin[2];
 }
 
+/* Floor-capped actor snap.  findNearestPoly selects candidates by poly
+   BOUNDS overlap, so a down-biased box can still return a surface point
+   well above the actor (shelf poly whose bbox dips into the box — dm6
+   armor pedestal snapped bots +24u onto the shelf, skipping the jump
+   link).  Query candidates with the biased box, then reject any whose
+   closest surface point is above origin+8: a real floor is ~22u below
+   the origin, never above it. */
+int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
+	const dtQueryFilter *filter, const float *rc_point,
+	dtPolyRef *out_ref, float *out_pt, bool *out_over)
+{
+	float center[3], half[3];
+	dtPolyRef polys[128];
+	int n = 0;
+
+	nav_mesh_actor_snap_box(navmesh, rc_point, center, half);
+	if (dtStatusFailed(navmesh->query->queryPolygons(
+			center, half, filter, polys, &n, 128)))
+		return 0;
+
+	const float max_y = rc_point[1] + 8.0f;
+	float best_d = FLT_MAX;
+	*out_ref = 0;
+	if (out_over)
+		*out_over = false;
+
+	for (int i = 0; i < n; i++)
+	{
+		float pt[3];
+		bool over = false;
+		if (dtStatusFailed(navmesh->query->closestPointOnPoly(
+				polys[i], rc_point, pt, &over)))
+			continue;
+		if (pt[1] > max_y)
+			continue;
+		float d = dtVdistSqr(rc_point, pt);
+		if (d < best_d)
+		{
+			best_d = d;
+			*out_ref = polys[i];
+			dtVcopy(out_pt, pt);
+			if (out_over)
+				*out_over = over;
+		}
+	}
+	return *out_ref != 0;
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -324,26 +372,36 @@ static int nav_mesh_find_nearest_internal(
 
 	nav_quake_to_recast(point, recast_point);
 
-	float query_center[3] = {recast_point[0], recast_point[1], recast_point[2]};
-	float biased_half[3];
-	const float *query_half = extents;
 	if (extents == navmesh->query_half_extents_actor_origin)
 	{
-		nav_mesh_actor_snap_box(navmesh, recast_point, query_center, biased_half);
-		query_half = biased_half;
+		bool over = false;
+		if (!nav_mesh_actor_floor_snap(navmesh, &filter, recast_point,
+				nearest_ref, nearest_pt, &over))
+		{
+			nav_set_error(error, error_size, "No floor polygon at actor position");
+			*nearest_ref = 0;
+			memset(nearest_pt, 0, sizeof(float) * 3);
+			if (is_over_poly != nullptr)
+				*is_over_poly = false;
+			return 0;
+		}
+		if (is_over_poly != nullptr)
+			*is_over_poly = over;
 	}
-
-	status = navmesh->query->findNearestPoly(
-		query_center,
-		query_half,
-		&filter,
-		nearest_ref,
-		nearest_pt,
-		is_over_poly);
-	if (dtStatusFailed(status))
+	else
 	{
-		nav_set_error(error, error_size, "Detour findNearestPoly failed");
-		return 0;
+		status = navmesh->query->findNearestPoly(
+			recast_point,
+			extents,
+			&filter,
+			nearest_ref,
+			nearest_pt,
+			is_over_poly);
+		if (dtStatusFailed(status))
+		{
+			nav_set_error(error, error_size, "Detour findNearestPoly failed");
+			return 0;
+		}
 	}
 	if (*nearest_ref != 0)
 	{

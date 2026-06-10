@@ -154,11 +154,9 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
 static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *qpos, dtPolyRef *out_ref, float *out_nearest)
 {
 	dtQueryFilter filter;
-	float tight[3];
 	float rc_pos[3];
 	float test[3];
 	bool over_poly = false;
-	dtStatus status;
 
 	if (query == NULL || nav_mesh == NULL || qpos == NULL || out_ref == NULL || out_nearest == NULL)
 		return 0;
@@ -166,12 +164,7 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 	nav_mesh_setup_filter(&filter);
 	nav_q2r(qpos, rc_pos);
 	*out_ref = 0;
-	{
-		float center[3];
-		nav_mesh_actor_snap_box(nav_mesh, rc_pos, center, tight);
-		status = query->findNearestPoly(center, tight, &filter, out_ref, out_nearest, &over_poly);
-	}
-	if (dtStatusFailed(status) || *out_ref == 0)
+	if (!nav_mesh_actor_floor_snap(nav_mesh, &filter, rc_pos, out_ref, out_nearest, &over_poly))
 		return 0;
 
 	nav_r2q(out_nearest, test);
