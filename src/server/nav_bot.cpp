@@ -554,56 +554,13 @@ static int nav_link_callback(
 		short_probe[1] = mid[1] + norm[1] * 8.0f;
 		short_probe[2] = mid[2];
 		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
-		{
-			static int wall_rej_lower = 0;
-			if (mid[2] < -100 && mid[2] > -160) wall_rej_lower++;
 			continue;
-		}
-		/* Count lower edges that pass wall check */
-		{
-			static int lower_pass = 0;
-			if (mid[2] < -100 && mid[2] > -160)
-			{
-				lower_pass++;
-				if (lower_pass <= 3)
-					fprintf(stderr, "Nav: LOWER_PASS edge=(%.0f %.0f %.0f) norm=(%.2f %.2f)\n",
-						mid[0], mid[1], mid[2], norm[0], norm[1]);
-			}
-		}
 
 		/* ---- Drops: find all floors below ---- */
 		{
 			float floors[8];
 			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
 			int nfloors = nav_heightfield_floors_below(hf, mid, mid[2], min_z, floors, 8);
-			/* Also check outward from edge along normal for floors below */
-			if (nfloors == 0 && mid[2] < -100 && mid[2] > -160)
-			{
-				float out_probe[3];
-				float out_z;
-				int d;
-				for (d = 8; d <= 64; d += 8)
-				{
-					out_probe[0] = mid[0] + norm[0] * d;
-					out_probe[1] = mid[1] + norm[1] * d;
-					out_probe[2] = mid[2];
-					int nf2 = nav_heightfield_floors_below(hf, out_probe, mid[2], mid[2] - NAV_DROP_HEIGHT_MAX, floors, 8);
-					if (nf2 > 0)
-					{
-						static int dbg3 = 0;
-						if (dbg3 < 5)
-						{
-							fprintf(stderr, "Nav: LOWER_OUT edge=(%.0f %.0f %.0f) probe_dist=%d floors=%d",
-								mid[0], mid[1], mid[2], d, nf2);
-							for (int di = 0; di < nf2; di++)
-								fprintf(stderr, " z=%.0f", floors[di]);
-							fprintf(stderr, "\n");
-							dbg3++;
-						}
-						break;
-					}
-				}
-			}
 
 			for (int fi = 0; fi < nfloors; fi++)
 			{
@@ -655,6 +612,21 @@ static int nav_link_callback(
 				/* Verify landing is clear */
 				if (hf && nav_heightfield_is_blocked(hf, end, floors[fi]))
 					continue;
+
+				/* Full-length BSP traces.  The 16u heightfield probes above
+				   miss thick walls (dm4 x=192 wall: link probed through it)
+				   and landings tucked under the start floor. */
+				if (!nav_trace_clear_at_height(mid, end, mid[2] + 24.0f, NULL))
+					continue;
+				{
+					vec3_t fs, fe, zero3 = {0, 0, 0};
+					trace_t tr;
+					fs[0] = end[0]; fs[1] = end[1]; fs[2] = mid[2] + 24.0f;
+					fe[0] = end[0]; fe[1] = end[1]; fe[2] = floors[fi] + 4.0f;
+					tr = SV_Move(fs, zero3, zero3, fe, MOVE_NOMONSTERS, NULL);
+					if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
+						continue; /* fall column obstructed */
+				}
 
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
 
@@ -899,7 +871,7 @@ void Nav_BuildForMap(void)
 	memset(error, 0, sizeof(error));
 	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
 		&config, entity_links, entity_count, &summary,
-		NULL, NULL, /* link callback disabled — drops cause stuck bots */
+		nav_jump_links_cvar.value ? nav_link_callback : NULL, NULL,
 		error, sizeof(error));
 
 	if (nav_mesh == NULL)
@@ -1608,7 +1580,10 @@ static void PF_nav_path_steer(void)
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
 		if (lt > 0)
 		{
-			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f + (float)lt;
+			/* Multiplicative encoding so QC can recover both type and
+			   corner z: z' = z + 10000*(1+type).  Additive (+10000+type)
+			   was ambiguous — type and z can't be separated. */
+			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f * (1.0f + (float)lt);
 			nav_bot_link_ref[slot] = ref;
 		}
 	}

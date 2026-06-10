@@ -44,6 +44,8 @@ this notice in its entirety.
 // ---- Progress tracking (single recovery system) ----
 .float _progress_best;    // best XY distance to corner seen this goal
 .float _progress_stall;   // frames with no improvement
+.entity _progress_tgt;    // goal the progress baseline belongs to
+.vector _progress_wp;     // corner the progress baseline belongs to
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -211,12 +213,12 @@ void() bot_get =
 		return;
 	}
 
-	// decode off-mesh link type from Z encoding
+	// decode off-mesh link type from Z encoding: z' = z + 10000*(1+type)
 	link_type = 0;
 	if (wp_z > 9000)
 	{
-		link_type = wp_z - 10000;
-		wp_z = wp_z - 10000 - link_type;
+		link_type = rint(wp_z / 10000) - 1;
+		wp_z = wp_z - (link_type + 1) * 10000;
 	}
 
 	// single-authority steering: walk toward the nav corner
@@ -233,55 +235,32 @@ void() bot_get =
 	// off-mesh link actions
 	if (link_type == 3) // AI_DROP
 	{
-		local vector linfo, flat_to_wp;
-		local float approach_speed, dist_to_edge;
-
-		linfo = nav_link_info();
-		approach_speed = linfo_x;
-		if (approach_speed < 10) approach_speed = 10;
+		// Walk off the ledge at full speed. The link's required_speed is
+		// the MINIMUM horizontal speed to clear the gap — never throttle
+		// below it (and Quake friction freezes anything under ~100 ups).
+		// Flatten steering so the corner's -z doesn't kill horizontal speed.
+		local vector flat_to_wp;
 
 		flat_to_wp = wp - self.origin;
 		flat_to_wp_z = 0;
-		dist_to_edge = vlen(flat_to_wp);
-
-		// DBG: log drop approach
-		{
-			static float _drop_dbg_time;
-			if (time > _drop_dbg_time)
-			{
-				_drop_dbg_time = time + 0.5;
-				bprint("["); bprint(self.netname);
-				bprint("] DROP: wp="); bprint(vtos(wp));
-				bprint(" pos="); bprint(vtos(self.origin));
-				bprint(" xy="); bprint(ftos(rint(dist_to_edge)));
-				bprint(" dz="); bprint(ftos(rint(wp_z - self.origin_z)));
-				bprint(" wishdir="); bprint(vtos(self.b_wishdir));
-				bprint("\n");
-			}
-		}
-
-		// Within 64u of edge: scale wishdir to control speed
-		if (dist_to_edge < 64)
-		{
-			local float scale;
-			scale = approach_speed / sv_maxspeed;
-			if (scale > 1) scale = 1;
-			self.b_wishdir = normalize(flat_to_wp) * scale;
-		}
+		if (vlen(flat_to_wp) > 0.1)
+			self.b_wishdir = normalize(flat_to_wp);
 	}
 	else if (link_type == 2) // AI_JUMP
 	{
-		// Run at required speed and jump at the edge
-		local vector jinfo, jflat;
+		// Run at the edge and jump. Window must be wider than the
+		// corridor's 36u link-advance trigger, or the corner changes
+		// before the bot ever gets within jumping range.
+		local vector jflat;
 		local float jdist;
 
-		jinfo = nav_link_info();
 		jflat = wp - self.origin;
 		jflat_z = 0;
 		jdist = vlen(jflat);
+		if (jdist > 0.1)
+			self.b_wishdir = normalize(jflat);
 
-		// Jump when close to edge and on ground
-		if (jdist < 16 && (self.flags & FL_ONGROUND))
+		if (jdist < 64 && (self.flags & FL_ONGROUND))
 			self.button2 = TRUE;
 	}
 	else if (link_type == 7) // AI_SUPER_JUMP
@@ -328,6 +307,16 @@ void() bot_get =
 		flat = wp - self.origin;
 		flat_z = 0;
 		xy_dist = vlen(flat);
+
+		// new goal or new corner: reset the baseline, otherwise the
+		// previous corner's (small) best distance forces a false stall
+		if (self.target1 != self._progress_tgt || vlen(wp - self._progress_wp) > 32)
+		{
+			self._progress_tgt = self.target1;
+			self._progress_wp = wp;
+			self._progress_best = 99999;
+			self._progress_stall = 0;
+		}
 
 		if (xy_dist < self._progress_best - 1)
 		{
