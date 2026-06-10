@@ -193,6 +193,12 @@ void() bot_build_movevect =
 	spd = sv_maxspeed * 2;
 	self.movevect_x = (self.b_wishdir * v_forward) * spd;
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
+	// swimming: send the vertical component as upmove so the bot can
+	// actually descend/ascend (SV_WaterMove adds cmd.upmove to wishvel)
+	if (self.waterlevel > 1)
+		self.movevect_z = self.b_wishdir_z * spd;
+	else
+		self.movevect_z = 0;
 };
 
 // ---- Navigation ----
@@ -244,7 +250,10 @@ void() bot_get =
 		local vector flat_to_wp;
 
 		flat_to_wp = wp - self.origin;
-		flat_to_wp_z = 0;
+		// swimming: keep the vertical component — the drop "edge" is
+		// underwater and the bot must swim down to the link end
+		if (self.waterlevel < 2)
+			flat_to_wp_z = 0;
 		if (vlen(flat_to_wp) > 0.1)
 			self.b_wishdir = normalize(flat_to_wp);
 	}
@@ -307,7 +316,10 @@ void() bot_get =
 		local vector flat, rt;
 		local float xy_dist, fr, fl;
 		flat = wp - self.origin;
-		flat_z = 0;
+		// swimming: progress is 3D (descending to an underwater corner
+		// makes no XY progress at all)
+		if (self.waterlevel < 2)
+			flat_z = 0;
 		xy_dist = vlen(flat);
 
 		// new goal or new corner: reset the baseline, otherwise the
@@ -362,6 +374,13 @@ void() bot_get =
 			bprint(vtos(wp));
 			bprint(" lt ");
 			bprint(ftos(link_type));
+			bprint(" wl ");
+			bprint(ftos(self.waterlevel));
+			bprint(" og ");
+			if (self.flags & FL_ONGROUND)
+				bprint("1");
+			else
+				bprint("0");
 			bprint(" tgt ");
 			bprint(self.target1.classname);
 			bprint("\n");
