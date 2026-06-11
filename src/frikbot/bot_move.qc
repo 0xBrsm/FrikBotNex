@@ -46,6 +46,9 @@ this notice in its entirety.
 .float _progress_stall;   // frames with no improvement
 .entity _progress_tgt;    // goal the progress baseline belongs to
 .vector _progress_wp;     // corner the progress baseline belongs to
+.float _nav_pin;          // next net-displacement check (corner-independent)
+.vector _nav_pin_org;     // position at last check
+.float _nav_pin_strikes;  // consecutive dead 2s windows
 .entity _failed_goal;     // goal abandoned after a stall (engine skips it)
 .float _failed_goal_time; // cooldown expiry for _failed_goal
 
@@ -464,6 +467,40 @@ void() bot_get =
 				// the lane clears (dm6: bot parked on the corner poly
 				// froze the queue behind it indefinitely).
 				self.b_wishdir = normalize(rt);
+			}
+		}
+
+		// Net-displacement pin check: the stall counter above resets
+		// whenever the steering corner moves >32u, and at a ledge edge
+		// navigate() can flip between two corners forever (e1m1 slime
+		// pool: corner alternated -428/-526 every few frames, stall
+		// never reached the limit, bot pinned 140+ seconds). Corners
+		// lie; the bot's own position doesn't — measure 2s windows
+		// like the combat pin does.
+		if (time > self._nav_pin)
+		{
+			local vector nav_moved;
+			nav_moved = self.origin - self._nav_pin_org;
+			nav_moved_z = 0;
+			if (self._nav_pin > 0 && vlen(nav_moved) < 24
+				&& self.b_wishdir != '0 0 0')
+				self._nav_pin_strikes = self._nav_pin_strikes + 1;
+			else
+				self._nav_pin_strikes = 0;
+			self._nav_pin_org = self.origin;
+			self._nav_pin = time + 2;
+			if (self._nav_pin_strikes > 1)
+			{
+				self._nav_pin_strikes = 0;
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				if (self.target1.flags & FL_ITEM)
+				{
+					self._failed_goal = self.target1;
+					self._failed_goal_time = time + 10;
+				}
+				self.target1 = world;
+				return;
 			}
 		}
 
