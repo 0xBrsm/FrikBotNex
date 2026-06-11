@@ -33,6 +33,7 @@ static const nav_stall_probe_t nav_stall_probes[] = {
 	{"e1m1", {976, 1812, -408},  {896, 1840, -526}}, /* Lore at door t10 */
 	{"dm6",  {1533, -484, 40},   {1736, -344, 144}}, /* 4-bot pile-up -> armorInv */
 	{"dm6",  {152, -1920, 40},   {56, -2008, 64}},   /* pedestal pin -> armor1 */
+	{"dm6",  {197.6f, -1909.2f, 40}, {192, -1908, 18}}, /* Erwin snap-rank pin */
 };
 
 static void Nav_StallProbes(const nav_mesh_runtime_t *mesh, const char *mapname)
@@ -59,6 +60,41 @@ static void Nav_StallProbes(const nav_mesh_runtime_t *mesh, const char *mapname)
 		fprintf(stderr, "  start snap (%.0f,%.0f,%.0f) dz=%+.0f ref=%llu\n",
 			ns.nearest_point[0], ns.nearest_point[1], ns.nearest_point[2],
 			ns.nearest_point[2] - pr->s[2], (unsigned long long)ns.poly_ref);
+
+		/* Actor-snap candidate dump: every poly in the biased box with
+		   old (3D-nearest) and new (horizontal-first) scores. */
+		{
+			float rc[3] = {pr->s[0], pr->s[2], pr->s[1]};
+			float center[3], half[3];
+			dtPolyRef cand[64];
+			int cn = 0;
+			nav_mesh_actor_snap_box(mesh, rc, center, half);
+			if (dtStatusSucceed(mesh->query->queryPolygons(
+					center, half, &filter, cand, &cn, 64)))
+			{
+				for (int ci = 0; ci < cn; ci++)
+				{
+					float pt[3];
+					bool over = false;
+					if (dtStatusFailed(mesh->query->closestPointOnPoly(
+							cand[ci], rc, pt, &over)))
+						continue;
+					float dx = pt[0] - rc[0];
+					float dyv = pt[1] - rc[1];
+					float dz = pt[2] - rc[2];
+					float horiz = sqrtf(dx * dx + dz * dz);
+					float dy = pt[1] - (rc[1] - 24.0f);
+					fprintf(stderr,
+						"  actorcand ref=%llu pt=(%.0f,%.0f,%.0f) horiz=%.1f dy=%+.1f old=%.1f new=%.1f%s%s\n",
+						(unsigned long long)cand[ci], pt[0], pt[2], pt[1],
+						horiz, dy,
+						sqrtf(dx * dx + dyv * dyv + dz * dz),
+						horiz * 4.0f + fabsf(dy),
+						over ? " OVER" : "",
+						(pt[1] > rc[1] + 8.0f) ? " CAPPED" : "");
+				}
+			}
+		}
 		if (!nav_mesh_find_nearest(mesh, pr->e, &ne, nerr, sizeof(nerr)))
 		{
 			fprintf(stderr, "  end MISS: %s\n", nerr);

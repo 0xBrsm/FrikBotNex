@@ -304,7 +304,15 @@ extern "C" void nav_mesh_actor_snap_box(const nav_mesh_runtime_t *navmesh,
    armor pedestal snapped bots +24u onto the shelf, skipping the jump
    link).  Query candidates with the biased box, then reject any whose
    closest surface point is above origin+8: a real floor is ~22u below
-   the origin, never above it. */
+   the origin, never above it.
+
+   Ranking is horizontal-first, not 3D-nearest: hull widening extends
+   ledge polys 16-24u sideways, so a bot standing on a low floor next
+   to a 26u rim is often 3D-closer to the rim's edge (lateral ~16u)
+   than to its own floor (24u straight down).  Snapping to the rim
+   builds corridors the bot can't physically walk (e2m1 moat rim pin).
+   Weight lateral distance 4x and measure vertical distance from the
+   expected feet level (origin - 24) so the poly underfoot wins. */
 int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
 	const dtQueryFilter *filter, const float *rc_point,
 	dtPolyRef *out_ref, float *out_pt, bool *out_over)
@@ -333,7 +341,10 @@ int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
 			continue;
 		if (pt[1] > max_y)
 			continue;
-		float d = dtVdistSqr(rc_point, pt);
+		float dx = pt[0] - rc_point[0];
+		float dz = pt[2] - rc_point[2];
+		float dy = pt[1] - (rc_point[1] - 24.0f);
+		float d = sqrtf(dx * dx + dz * dz) * 4.0f + fabsf(dy);
 		if (d < best_d)
 		{
 			best_d = d;
