@@ -67,6 +67,11 @@ extern ddef_t *ED_FindGlobal(char *name);
 /* Jump/drop link detection */
 #define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
 #define NAV_JUMP_HEIGHT_MAX         48.0f  /* max jump-up height in Quake */
+/* Drops have no walkableClimb floor: a contour boundary edge means the
+   surfaces did NOT connect, so even a small clear fall needs a link (dm4
+   GL pocket: 8u drop over an unwalkable hull-bevel ridge).  Keep above
+   contour simplification error so an edge can't "drop" onto itself. */
+#define NAV_DROP_HEIGHT_MIN          6.0f
 #define NAV_DROP_HEIGHT_MAX        128.0f  /* max drop-down height */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
@@ -550,18 +555,62 @@ static int nav_link_callback(
 		short_probe[1] = mid[1] + norm[1] * 8.0f;
 		short_probe[2] = mid[2];
 		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
+		{
 			continue;
+		}
+
+		/* Hull standability: hull-1 extraction emits bevel faces that
+		   rasterize as thin phantom shelves (e1m3 z=-134: 4u thick, 70u
+		   above the real floor) — mesh and links form on floor that
+		   cannot support a player.  Landings are fall-column traced
+		   already; starts are not.  Sweep the PLAYER HULL down at the
+		   edge: real hull-1 floor catches it (including legit 16u brush
+		   overhang), a phantom shelf lets it fall through.  startsolid
+		   is inconclusive (cramped rims under stairs, dm4 pocket) —
+		   only a CLEAN miss proves there is no floor. */
+		{
+			vec3_t ds, de, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+			trace_t tr;
+			ds[0] = mid[0]; ds[1] = mid[1]; ds[2] = mid[2] + 26.0f;
+			de[0] = mid[0]; de[1] = mid[1]; de[2] = mid[2];
+			tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+			if (!tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f)
+			{
+				continue;
+			}
+		}
 
 		/* ---- Drops: find all floors below ---- */
 		{
 			float floors[8];
 			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
-			int nfloors = nav_heightfield_floors_below(hf, mid, mid[2], min_z, floors, 8);
+			float max_z = mid[2] - NAV_DROP_HEIGHT_MIN;
+			int nfloors = 0;
+			/* Probe outward too: a thin unwalkable ridge at the boundary
+			   (hull bevel artifact) hides the landing from the edge column. */
+			const float probe_offs[3] = {0.0f, 12.0f, 20.0f};
+			for (int pi = 0; pi < 3; pi++)
+			{
+				float pp[3], pf[8];
+				int pn, ti;
+				pp[0] = mid[0] + norm[0] * probe_offs[pi];
+				pp[1] = mid[1] + norm[1] * probe_offs[pi];
+				pp[2] = mid[2];
+				pn = nav_heightfield_floors_below(hf, pp, max_z, min_z, pf, 8);
+				for (ti = 0; ti < pn && nfloors < 8; ti++)
+				{
+					int dup = 0;
+					for (int di = 0; di < nfloors; di++)
+						if (fabsf(floors[di] - pf[ti]) < 2.0f) { dup = 1; break; }
+					if (!dup)
+						floors[nfloors++] = pf[ti];
+				}
+			}
 
 			for (int fi = 0; fi < nfloors; fi++)
 			{
 				float drop_height = mid[2] - floors[fi];
-				if (drop_height < NAV_JUMP_HEIGHT_MIN)
+				if (drop_height < NAV_DROP_HEIGHT_MIN)
 					continue;
 
 				/* Verify drop is physically possible: check that there's no solid
@@ -573,9 +622,74 @@ static int nav_link_callback(
 					probe_xy[1] = mid[1] + norm[1] * 16.0f;
 					probe_xy[2] = 0;
 					if (nav_heightfield_is_blocked(hf, probe_xy, mid[2]))
+					{
 						continue; /* wall at edge height blocks the drop */
+					}
 					if (nav_heightfield_is_blocked(hf, probe_xy, floors[fi]))
+					{
 						continue; /* solid at landing height */
+					}
+				}
+
+				/* Lane step check: the bot RUNS from the edge to the fall
+				   point — anything taller than a step (18u) in the lane
+				   stops it on the ground (point traces at +24 sail over
+				   20u parapets).  Solid spans reaching above mid+18 at any
+				   lane sample mean the run is impossible. */
+				{
+					int lane_blocked = 0;
+					for (float loff = 0.0f; loff <= 16.0f; loff += 4.0f)
+					{
+						float lp[3];
+						lp[0] = mid[0] + norm[0] * loff;
+						lp[1] = mid[1] + norm[1] * loff;
+						lp[2] = 0;
+						if (nav_heightfield_is_blocked(hf, lp, mid[2] + 18.0f))
+						{
+							lane_blocked = 1;
+							break;
+						}
+					}
+					if (lane_blocked)
+					{
+						continue;
+					}
+				}
+
+				/* Approach footing: the bot runs up to the edge from
+				   behind, so there must be REAL floor there.  The
+				   heightfield can't tell — phantom extraction shelves
+				   live in it (e1m3 (36,-388,-134): bot walks the shelf
+				   toward the rim, falls through into a 64u pit it can't
+				   path out of).  Sweep the player hull down at each
+				   approach point: real hull-1 floor catches it, a
+				   phantom shelf is a clean miss.  startsolid alone is
+				   inconclusive (cramped rim, dm4 pocket) and counts as
+				   footing; allsolid means the approach corridor is
+				   inside hull-1 wall — the bot can never stand there
+				   (e1m3 trap rim: allsolid at every offset, yet the
+				   heightfield shows a walkable shelf). */
+				{
+					int footing = 0;
+					for (float boff = 12.0f; boff <= 28.0f; boff += 8.0f)
+					{
+						vec3_t ds, de, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+						trace_t tr;
+						ds[0] = mid[0] - norm[0] * boff;
+						ds[1] = mid[1] - norm[1] * boff;
+						ds[2] = mid[2] + 26.0f;
+						de[0] = ds[0]; de[1] = ds[1]; de[2] = mid[2];
+						tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+						if (!tr.allsolid && (tr.startsolid || tr.fraction < 1.0f))
+						{
+							footing = 1;
+							break;
+						}
+					}
+					if (!footing)
+					{
+						continue;
+					}
 				}
 
 				/* Fall time from physics: t = sqrt(2h / g) */
@@ -591,8 +705,12 @@ static int nav_link_callback(
 				else
 					speed = gap / fall_time;
 
-				if (speed > maxspeed)
-					continue; /* unreachable at max run speed */
+				/* Half run speed, not max: the steering corner sits AT the
+				   edge, so the bot may arrive slow with no runway — a gap
+				   needing a flat-out sprint drops it into the chasm instead
+				   of the landing (dm1 (142,1558): 108u gap, 212 u/s). */
+				if (speed > maxspeed * 0.5f)
+					continue; /* needs more run-up than traversal guarantees */
 
 				/* Landing position: edge + normal * landing_dist */
 				float land_dist = speed * fall_time;
@@ -607,13 +725,17 @@ static int nav_link_callback(
 
 				/* Verify landing is clear */
 				if (hf && nav_heightfield_is_blocked(hf, end, floors[fi]))
+				{
 					continue;
+				}
 
 				/* Full-length BSP traces.  The 16u heightfield probes above
 				   miss thick walls (dm4 x=192 wall: link probed through it)
 				   and landings tucked under the start floor. */
 				if (!nav_trace_clear_at_height(mid, end, mid[2] + 24.0f, NULL))
+				{
 					continue;
+				}
 				{
 					vec3_t fs, fe, zero3 = {0, 0, 0};
 					trace_t tr;
@@ -621,15 +743,29 @@ static int nav_link_callback(
 					fe[0] = end[0]; fe[1] = end[1]; fe[2] = floors[fi] + 4.0f;
 					tr = SV_Move(fs, zero3, zero3, fe, MOVE_NOMONSTERS, NULL);
 					if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
+					{
 						continue; /* fall column obstructed */
+					}
 				}
 
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
 
 				/* Reverse: if drop height is within jump reach, also create
 				   a jump link from the landing floor back up to the edge.
-				   The bot jumps from below the ledge up to the top. */
-				if (drop_height <= peak)
+				   The bot jumps from below the ledge up to the top.
+				   Micro-drops (< jump min) stay one-way: they exist to
+				   ESCAPE artifact pockets, and nothing routes into one.
+				   No reverse jump out of liquid: jump impulse doesn't
+				   apply while swimming, so bots just nose the lip (dm5
+				   pool, 20 stalls/run).  Surface links handle water exit. */
+				int land_in_liquid;
+				{
+					vec3_t lc;
+					lc[0] = end[0]; lc[1] = end[1]; lc[2] = floors[fi] + 24.0f;
+					land_in_liquid = (SV_PointContents(lc) <= CONTENTS_WATER);
+				}
+				if (!land_in_liquid &&
+					drop_height >= NAV_JUMP_HEIGHT_MIN && drop_height <= peak)
 				{
 					float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * drop_height;
 					if (disc >= 0)
@@ -647,7 +783,13 @@ static int nav_link_callback(
 			}
 		}
 
-		/* ---- Jumps: scan outward for floors above within jump reach ---- */
+		/* ---- Jumps: scan outward for floors above within jump reach ----
+		   Disabled for now: inverted edge normals kept this scan inert
+		   since it was written (0 links on every map), so enabling it
+		   alongside the normal fix is an untested behavior change —
+		   first suite with it live regressed e1m2/e1m3.  Re-enable as
+		   its own change with its own suite run. */
+#if 0
 		{
 			float step;
 
@@ -693,6 +835,7 @@ static int nav_link_callback(
 				break; /* found a jump at this edge, don't create duplicates */
 			}
 		}
+#endif
 	}
 
 	/* Log wall rejection stats for lower corridor */
@@ -1433,6 +1576,7 @@ static void PF_nav_path_steer(void)
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;
+
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
 

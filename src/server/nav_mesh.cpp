@@ -788,7 +788,6 @@ static void nav_heightfield_bridge_small_gaps(
 		fprintf(stderr, "Nav: bridged %d tiny raster gaps before ledge filtering\n", fills_applied);
 }
 
-
 /* Disable polys not connected to the largest mesh component.
    Hull-1 extraction emits sliver floors (lintels, beams) that bots
    reseed onto and then roam forever inside a 1-poly island.  Traversal
@@ -803,38 +802,47 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 	const int npolys = tile->header->polyCount;
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 
-	std::vector<int> comp(npolys, -1);
-	std::vector<int> comp_size;
-	std::vector<int> stack;
-
+	/* Union-find over links, ignoring direction: a pocket whose only
+	   connection is a one-way escape drop still reaches the main mesh,
+	   so it is navigable — not junk. */
+	std::vector<int> uf(npolys);
+	for (int i = 0; i < npolys; i++)
+		uf[i] = i;
+	auto uf_find = [&](int x) {
+		while (uf[x] != x)
+		{
+			uf[x] = uf[uf[x]];
+			x = uf[x];
+		}
+		return x;
+	};
 	for (int i = 0; i < npolys; i++)
 	{
-		if (comp[i] >= 0)
-			continue;
-		const int c = (int)comp_size.size();
-		comp_size.push_back(0);
-		comp[i] = c;
-		stack.clear();
-		stack.push_back(i);
-		while (!stack.empty())
+		const dtPoly *poly = &tile->polys[i];
+		for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
 		{
-			const int pi = stack.back();
-			stack.pop_back();
-			comp_size[c]++;
-			const dtPoly *poly = &tile->polys[pi];
-			for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-			{
-				const dtPolyRef nref = tile->links[k].ref;
-				if (nref == 0)
-					continue;
-				unsigned int salt, it, ip;
-				mesh->decodePolyId(nref, salt, it, ip);
-				if ((int)ip >= npolys || comp[ip] >= 0)
-					continue;
-				comp[ip] = c;
-				stack.push_back((int)ip);
-			}
+			const dtPolyRef nref = tile->links[k].ref;
+			if (nref == 0)
+				continue;
+			unsigned int salt, it, ip;
+			mesh->decodePolyId(nref, salt, it, ip);
+			if ((int)ip >= npolys)
+				continue;
+			uf[uf_find(i)] = uf_find((int)ip);
 		}
+	}
+	std::vector<int> comp(npolys, -1);
+	std::vector<int> comp_size;
+	for (int i = 0; i < npolys; i++)
+	{
+		const int r = uf_find(i);
+		if (comp[r] < 0)
+		{
+			comp[r] = (int)comp_size.size();
+			comp_size.push_back(0);
+		}
+		comp[i] = comp[r];
+		comp_size[comp[i]]++;
 	}
 
 	/* A junk sliver is a small unlinked component hovering just above
@@ -1012,11 +1020,47 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		return nullptr;
 	}
 
+	/* Merge spans separated by a sub-walkable air gap: nothing can stand
+	   in a gap shorter than walkableHeight, so the two solids are one
+	   surface whose top is the UPPER span (hull-1 bevel expansion emits
+	   thin shelves a few units above real floors; the low-height filter
+	   then kills the real floor and the shelf becomes an unlinked island
+	   — dm4 GL alcove).  Walkability follows the surviving top surface.
+	   Unlinked spans go back on no freelist: the heightfield pool frees
+	   them wholesale. */
+	{
+		const int w = guard.solid->width, h = guard.solid->height;
+
+		for (int ci = 0; ci < w * h; ci++)
+		{
+			for (rcSpan *s = guard.solid->spans[ci]; s != nullptr && s->next != nullptr; )
+			{
+				if ((int)s->next->smin - (int)s->smax < rc_config.walkableHeight)
+				{
+					rcSpan *up = s->next;
+					/* Walkability follows the surviving top surface, but a
+					   thin unwalkable shelf (sloped bevel face) within climb
+					   of a walkable floor is standable — same promotion the
+					   low-hanging filter would have applied pre-merge. */
+					if ((int)up->smax - (int)s->smax > rc_config.walkableClimb || up->area > s->area)
+						s->area = up->area;
+					s->smax = up->smax;
+					s->next = up->next;
+
+				}
+				else
+					s = s->next;
+			}
+		}
+
+	}
+
 	rcFilterLowHangingWalkableObstacles(&ctx, rc_config.walkableClimb, *guard.solid);
 	/* Stock Recast pipeline (experiment/stock-recast):
 	   no gap-bridging, no custom ledge filter, no wall-only erosion. */
 	rcFilterLedgeSpans(&ctx, rc_config.walkableHeight, rc_config.walkableClimb, *guard.solid);
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
+
 #if 0
 	/* Custom ledge filter: only remove a span if it has NO walkable
 	   neighbor at a similar height. The standard rcFilterLedgeSpans
@@ -1579,6 +1623,37 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 				else
 				{
 					edge.normal[0] = edge.normal[1] = edge.normal[2] = 0;
+				}
+
+				/* Contour winding doesn't reliably give the outward side
+				   (outer vs hole contours wind oppositely), so verify
+				   against the heightfield: the region interior always has
+				   walkable floor at edge height, the region-0 outside never
+				   does.  If the normal side has such a floor, flip. */
+				if (len > 0.001f && guard.compact != nullptr)
+				{
+					const float px = (ax + bx) * 0.5f + edge.normal[0] * 6.0f;
+					const float pz = (az + bz) * 0.5f + edge.normal[1] * 6.0f;
+					const float py = (ay + by) * 0.5f;
+					const int gx = (int)((px - rc_config.bmin[0]) / rc_config.cs);
+					const int gz = (int)((pz - rc_config.bmin[2]) / rc_config.cs);
+					if (gx >= 0 && gx < guard.compact->width && gz >= 0 && gz < guard.compact->height)
+					{
+						const float climb = rc_config.walkableClimb * rc_config.ch;
+						const rcCompactCell &cc = guard.compact->cells[gx + gz * guard.compact->width];
+						for (unsigned int si = cc.index, sn = cc.index + cc.count; si < sn; si++)
+						{
+							if (guard.compact->areas[si] == RC_NULL_AREA)
+								continue;
+							const float sy = rc_config.bmin[1] + guard.compact->spans[si].y * rc_config.ch;
+							if (fabsf(sy - py) <= climb)
+							{
+								edge.normal[0] = -edge.normal[0];
+								edge.normal[1] = -edge.normal[1];
+								break;
+							}
+						}
+					}
 				}
 				contour_edges.push_back(edge);
 			}
@@ -2640,7 +2715,7 @@ extern "C" int nav_heightfield_floor_z(const nav_heightfield_t *hf,
 }
 
 extern "C" int nav_heightfield_floors_below(const nav_heightfield_t *hf,
-	const float *point, float edge_z, float min_z,
+	const float *point, float max_z, float min_z,
 	float *out_floors, int max_floors)
 {
 	float rc_point[3];
@@ -2656,18 +2731,14 @@ extern "C" int nav_heightfield_floors_below(const nav_heightfield_t *hf,
 	if (gx < 0 || gx >= hf->compact->width || gz < 0 || gz >= hf->compact->height)
 		return 0;
 
-	/* Recast Y = Quake Z.  Collect walkable spans below edge_z and above min_z. */
-	float rc_edge = edge_z;
-	float rc_min = min_z;
-	float climb = (float)hf->config.walkableClimb * hf->config.ch;
-
+	/* Recast Y = Quake Z.  Collect walkable spans between min_z and max_z. */
 	const rcCompactCell &cell = hf->compact->cells[gx + gz * hf->compact->width];
 	for (int si = (int)cell.index, sn = (int)(cell.index + cell.count); si < sn; ++si)
 	{
 		if (hf->compact->areas[si] == RC_NULL_AREA)
 			continue;
 		float span_y = hf->config.bmin[1] + (float)hf->compact->spans[si].y * hf->config.ch;
-		if (span_y > rc_edge - climb || span_y < rc_min)
+		if (span_y > max_z || span_y < min_z)
 			continue;
 		if (count < max_floors)
 			out_floors[count++] = span_y; /* Recast Y = Quake Z */
