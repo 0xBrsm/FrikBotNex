@@ -315,11 +315,60 @@ void() bot_get =
 			self.button2 = TRUE;
 		}
 	}
-	else if (link_type == 4 || link_type == 5) // AI_PLAT / AI_TRAIN
+	else if (link_type == 4 || link_type == 5) // AI_PLAT_BOTTOM / AI_RIDE_TRAIN
 	{
+		// Riding: standing on a moving lift/train makes zero XY progress
+		// by design — hold position so we don't pace off the edge. The
+		// abandon timeout below gets an 8x window for these links (a
+		// full wait + ride cycle), but never a free pass: an outright
+		// reset here turned every plat-adjacent stall into a permanent
+		// pin (dm2: bot frozen at 100%stk while the busy plat cycled).
 		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-		if (trace_ent != world && trace_ent.velocity != '0 0 0')
-			self.b_wishdir = '0 0 0';
+		if (trace_ent != world
+			&& (trace_ent.classname == "plat" || trace_ent.classname == "train"))
+		{
+			if (trace_ent.velocity != '0 0 0')
+				self.b_wishdir = '0 0 0';
+		}
+		else if (link_type == 4)
+		{
+			// Not aboard. If the plat serving this link is ABOVE the
+			// corner we're heading for, hold at the shaft lip — walking
+			// to the exact center means dropping into the pit under it
+			// (and blocking its return). Position, not state: a bot at
+			// the TOP lip must board a top-parked plat or walk off over
+			// a lowered one, never stand waiting (dm2: 8s top-lip
+			// freezes). The 8x abandon window below covers the wait; a
+			// dead plat (targeted, never triggered) still times out.
+			local entity pl, bestpl;
+			local vector pc;
+			local float pd, bestpd;
+
+			bestpl = world;
+			bestpd = 99999;
+			pl = find(world, classname, "plat");
+			while (pl != world)
+			{
+				pc = (pl.absmin + pl.absmax) * 0.5;
+				pc_z = wp_z;
+				pd = vlen(pc - wp);
+				if (pd < bestpd)
+				{
+					bestpd = pd;
+					bestpl = pl;
+				}
+				pl = find(pl, classname, "plat");
+			}
+			if (bestpl != world && bestpd < 128
+				&& bestpl.absmax_z > wp_z + 32
+				&& self.origin_z < bestpl.absmax_z)
+			{
+				pc = wp - self.origin;
+				pc_z = 0;
+				if (vlen(pc) < 80)
+					self.b_wishdir = '0 0 0';
+			}
+		}
 	}
 	else if (link_type == 6) // AI_DOORFLAG
 	{
@@ -403,7 +452,14 @@ void() bot_get =
 			}
 		}
 
-		if (self._progress_stall > (1 / cvar("sys_ticrate")))
+		local float stall_limit;
+		stall_limit = 1 / cvar("sys_ticrate");
+		// lift links: zero XY progress is normal while waiting for and
+		// riding the plat — budget a full return + ride cycle (~8s)
+		// before declaring the goal dead
+		if (link_type == 4 || link_type == 5)
+			stall_limit = stall_limit * 8;
+		if (self._progress_stall > stall_limit)
 		{
 			// TEMP DEBUG: stall position dump
 			bprint("STALL ");

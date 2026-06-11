@@ -339,8 +339,9 @@ static int nav_collect_teleporters(nav_off_mesh_link_t **out_links)
 
 /* ---- Platform link detection ---- */
 
-/* Scan func_plat entities.  Create bidirectional links between top and
-   bottom positions.  Bot rides the platform to traverse. */
+/* Scan plat entities (func_plat renames itself "plat" at spawn).
+   Create bidirectional links between top and bottom standing surfaces.
+   Bot rides the platform to traverse. */
 static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 {
 	int i, n = 0, cap = 16;
@@ -352,17 +353,23 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 	for (i = 1; i < sv.num_edicts; i++)
 	{
 		edict_t *e = EDICT_NUM(i);
-		float top_z, bot_z, travel;
+		eval_t *pos1, *pos2, *spd;
+		float top_z, bot_z, speed, travel;
 		if (e->free) continue;
-		if (strcasecmp(pr_strings + (int)e->v.classname, "func_plat")) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")) continue;
 
-		/* pos1 = top, pos2 = bottom (set by plat spawn code) */
-		top_z = e->v.origin[2]; /* plats start at top */
-		if (e->v.size[2] > 8)
-			bot_z = top_z - e->v.size[2] + 8;
-		else
-			bot_z = top_z - 64;
-		travel = (top_z - bot_z) / (150.0f);
+		/* pos1 = top, pos2 = bottom (QC fields, set by plat spawn code).
+		   Link endpoints are where the bot STANDS: brush top surface
+		   (pos z + maxs z), which is flush with the floor at each stop. */
+		pos1 = GetEdictFieldValue(e, "pos1");
+		pos2 = GetEdictFieldValue(e, "pos2");
+		if (!pos1 || !pos2) continue;
+		top_z = pos1->vector[2] + e->v.maxs[2];
+		bot_z = pos2->vector[2] + e->v.maxs[2];
+
+		spd = GetEdictFieldValue(e, "speed");
+		speed = (spd && spd->_float > 0) ? spd->_float : 150.0f;
+		travel = (top_z - bot_z) / speed;
 
 		if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
 
@@ -379,6 +386,9 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		links[n].height_delta = top_z - bot_z;
 		links[n].wait_time = travel;
 		links[n].required_speed = 0;
+		if (nav_debug_cvar.value)
+			Con_Printf("Nav: plat link (%.0f %.0f) z %.0f -> %.0f spd %.0f\n",
+				links[n].start[0], links[n].start[1], bot_z, top_z, speed);
 		n++;
 	}
 
@@ -403,7 +413,7 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 		edict_t *e = EDICT_NUM(i);
 		const char *tgt;
 		if (e->free) continue;
-		if (strcasecmp(pr_strings + (int)e->v.classname, "func_train")) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "train")) continue;
 
 		/* Walk the path_corner chain */
 		tgt = e->v.target ? pr_strings + (int)e->v.target : "";
@@ -435,14 +445,17 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 				nname = next_pc->v.targetname ? pr_strings + (int)next_pc->v.targetname : "";
 				if (strcmp(pctgt, nname)) continue;
 
-				/* Create link between this path_corner and next */
+				/* Create link between this path_corner and next.
+				   Trains move so their MINS corner sits at the path_corner
+				   (func_train_find: origin = corner - mins), so the bot
+				   stands at corner + size/2 XY, corner z + size z. */
 				if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
-				links[n].start[0] = pc->v.origin[0];
-				links[n].start[1] = pc->v.origin[1];
-				links[n].start[2] = pc->v.origin[2];
-				links[n].end[0] = next_pc->v.origin[0];
-				links[n].end[1] = next_pc->v.origin[1];
-				links[n].end[2] = next_pc->v.origin[2];
+				links[n].start[0] = pc->v.origin[0] + e->v.size[0] * 0.5f;
+				links[n].start[1] = pc->v.origin[1] + e->v.size[1] * 0.5f;
+				links[n].start[2] = pc->v.origin[2] + e->v.size[2];
+				links[n].end[0] = next_pc->v.origin[0] + e->v.size[0] * 0.5f;
+				links[n].end[1] = next_pc->v.origin[1] + e->v.size[1] * 0.5f;
+				links[n].end[2] = next_pc->v.origin[2] + e->v.size[2];
 				dist = sqrt((links[n].end[0]-links[n].start[0])*(links[n].end[0]-links[n].start[0])
 					+ (links[n].end[1]-links[n].start[1])*(links[n].end[1]-links[n].start[1])
 					+ (links[n].end[2]-links[n].start[2])*(links[n].end[2]-links[n].start[2]));
@@ -999,10 +1012,26 @@ void Nav_BuildForMap(void)
 	entity_count = 0;
 	entity_links = NULL;
 
-	/* Only teleporters for now — plats/trains need runtime ride behavior */
 	entity_count = nav_collect_teleporters(&entity_links);
-
-	Con_Printf("Nav: %d teleporter links\n", entity_count);
+	{
+		nav_off_mesh_link_t *plat_links = NULL, *train_links = NULL;
+		int plat_count = nav_collect_platform_links(&plat_links);
+		int train_count = nav_collect_train_links(&train_links);
+		if (plat_count + train_count > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + plat_count + train_count) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, plat_links,
+				(size_t)plat_count * sizeof(*entity_links));
+			memcpy(entity_links + entity_count + plat_count, train_links,
+				(size_t)train_count * sizeof(*entity_links));
+		}
+		free(plat_links);
+		free(train_links);
+		Con_Printf("Nav: %d teleporter, %d plat, %d train links\n",
+			entity_count, plat_count, train_count);
+		entity_count += plat_count + train_count;
+	}
 
 	/* Single-pass build: entity links provided upfront, jump/drop links
 	   detected mid-build via callback after contours are ready. */
