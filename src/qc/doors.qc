@@ -664,6 +664,7 @@ void () fd_secret_move2 =
 // Wait here until time to go back...
 void () fd_secret_move3 =
 {
+	nav_unblock(self);
 	sound(self, CHAN_VOICE, self.noise3, 1, ATTN_NORM);
 	if (!(self.spawnflags & SECRET_OPEN_ONCE))
 	{
@@ -689,6 +690,8 @@ void () fd_secret_move5 =
 
 void () fd_secret_move6 =
 {
+	// sliding back into the frame — doorway is occupied again
+	nav_block(self);
 	sound(self, CHAN_VOICE, self.noise2, 1, ATTN_NORM);
 	SUB_CalcMove(self.oldorigin, self.speed, fd_secret_done);
 };
