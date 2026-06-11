@@ -234,10 +234,15 @@ void() bot_get =
 	// (up to 24u below origin), and normalizing the 3D vector both
 	// starves the horizontal push (near a low corner most of the unit
 	// vector points down) and tilts the shoulder probes into the floor.
-	// Swimming keeps z — that's the only case with vertical control.
+	// Swimming keeps z — that's the only case with vertical control —
+	// but measured from the FEET (origin-24), where corners live: there
+	// is no step-up while swimming, so a terrace lip above the feet yet
+	// below the origin must steer UP to clear, not level into the lip.
 	steer = wp - self.origin;
 	if (self.waterlevel < 2)
 		steer_z = 0;
+	else
+		steer_z = steer_z + 24;
 	if (vlen(steer) > 0.1)
 		self.b_wishdir = normalize(steer);
 	else
@@ -257,10 +262,12 @@ void() bot_get =
 		local vector flat_to_wp;
 
 		flat_to_wp = wp - self.origin;
-		// swimming: keep the vertical component — the drop "edge" is
-		// underwater and the bot must swim down to the link end
+		// swimming: keep the vertical component (feet-referenced) — the
+		// drop "edge" is underwater and the bot must swim to the link end
 		if (self.waterlevel < 2)
 			flat_to_wp_z = 0;
+		else
+			flat_to_wp_z = flat_to_wp_z + 24;
 		if (vlen(flat_to_wp) > 0.1)
 			self.b_wishdir = normalize(flat_to_wp);
 	}
@@ -323,10 +330,12 @@ void() bot_get =
 		local vector flat, rt;
 		local float xy_dist, fr, fl;
 		flat = wp - self.origin;
-		// swimming: progress is 3D (descending to an underwater corner
-		// makes no XY progress at all)
+		// swimming: progress is 3D, feet-referenced (descending to an
+		// underwater corner makes no XY progress at all)
 		if (self.waterlevel < 2)
 			flat_z = 0;
+		else
+			flat_z = flat_z + 24;
 		xy_dist = vlen(flat);
 
 		// new goal or new corner: reset the baseline, otherwise the
