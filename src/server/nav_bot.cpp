@@ -761,6 +761,32 @@ static int nav_link_callback(
 					}
 				}
 
+				/* Hull-truth the fall column.  The point/voxel checks above
+				   pass through slots the heightfield sees as open but a
+				   player can't fit (e1m1 pool ledge: sub-hull gap between
+				   walkway and wall spawned a phantom drop that pinned bots
+				   on the lip).  Sweep the real player hull down; it can't
+				   sit closer than its half-width to the drop face, so clamp
+				   the column at least 18u out — step-off landings end up
+				   there anyway once the hull clips the wall. */
+				{
+					vec3_t fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+					trace_t tr;
+					float col_dist = land_dist;
+					if (col_dist < 18.0f)
+						col_dist = 18.0f;
+					fs[0] = mid[0] + norm[0] * col_dist;
+					fs[1] = mid[1] + norm[1] * col_dist;
+					fs[2] = mid[2] + 26.0f;
+					fe[0] = fs[0]; fe[1] = fs[1]; fe[2] = floors[fi] + 24.0f;
+					tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
+					if (tr.startsolid || tr.allsolid
+						|| tr.endpos[2] > floors[fi] + 36.0f)
+					{
+						continue; /* player hull can't ride the column down */
+					}
+				}
+
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
 
 				/* Reverse: if drop height is within jump reach, also create
