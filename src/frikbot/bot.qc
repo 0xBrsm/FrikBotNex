@@ -15,6 +15,11 @@
 .float b_wep_commit_time;
 .float b_combat_state;
 .float b_combat_time;
+.float _combat_pin;        // next pin-window check time
+.vector _pin_org;          // position at start of pin window
+.float _pin_strikes;       // consecutive low-displacement windows
+.entity _failed_enemy;     // foe abandoned after a combat pin
+.float _failed_enemy_time; // re-acquire cooldown expiry for _failed_enemy
 .float _m_goals_reached;
 
 // goal weights (set by act_normal at spawn)

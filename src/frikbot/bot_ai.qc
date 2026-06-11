@@ -322,6 +322,7 @@ void() BotAI =
 		self.b_ambush_time = 0;
 		self.b_combat_time = 0;
 		self.b_combat_state = CSTATE_NONE;
+		self._combat_pin = 0;
 		self.b_react_time = 0;
 		self.b_wep_commit_time = 0;
 		bot_opp_model_reset();

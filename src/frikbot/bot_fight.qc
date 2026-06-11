@@ -345,6 +345,7 @@ void() bot_find_enemy =
 		{
 			if (foe != self && foe.modelindex != 0 && foe.health > 0)
 				if (!(teamplay && self.team == foe.team))
+				if (!(foe == self._failed_enemy && time < self._failed_enemy_time))
 				{
 					tsz = bot_size_player(foe) + vlen(foe.origin - self.origin) * 0.5;
 					if (tsz < foesz)
@@ -367,9 +368,14 @@ void() bot_find_enemy =
 	else if (!self.enemy)
 		self.b_react_time = 0;
 
-	// new enemy: start the LOS grace clock
+	// new enemy: start the LOS grace clock, fresh pin window
 	if (self.enemy)
+	{
 		self.b_combat_time = time;
+		self._combat_pin = time + 2;
+		self._pin_org = self.origin;
+		self._pin_strikes = 0;
+	}
 
 	// ambush first-strike
 	if (self.b_ambush_time > 0 && self.enemy)
@@ -551,6 +557,39 @@ void() bot_fight_style =
 		self.b_react_time = time;
 	else if ((time - self.b_react_time) > 1.0)
 	{ bot_drop_enemy(); return; }
+
+	// Combat pin recovery: combat movement has no stall tracking, so a
+	// bot whose pursuit grinds into a wall (far-pursuit movedir has no
+	// strafe component to slide with) camps there as long as the enemy
+	// stays visible — and becomes a body that blocks nav bots queuing
+	// behind it. Velocity can't detect this (blocked strafe flips every
+	// 0.1s, so the bot oscillates at full speed); measure net
+	// displacement over 2s windows instead. Two consecutive dead
+	// windows: disengage, cool this foe so the scan doesn't re-acquire
+	// it next frame, and let nav movement (which has stall recovery)
+	// carry the bot somewhere new.
+	if (time > self._combat_pin)
+	{
+		local vector pin_moved;
+		pin_moved = self.origin - self._pin_org;
+		pin_moved_z = 0; // jumping in place is not progress
+		if (self._combat_pin > 0
+			&& vlen(pin_moved) < 24
+			&& !(self.enemy.flags & FL_MONSTER))
+			self._pin_strikes = self._pin_strikes + 1;
+		else
+			self._pin_strikes = 0;
+		self._pin_org = self.origin;
+		self._combat_pin = time + 2;
+		if (self._pin_strikes > 1)
+		{
+			self._pin_strikes = 0;
+			self._failed_enemy = self.enemy;
+			self._failed_enemy_time = time + 5;
+			bot_drop_enemy();
+			return;
+		}
+	}
 
 	bot_opp_model_update();
 	foedist = self.sense_enemy_dist;
