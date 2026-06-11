@@ -229,8 +229,15 @@ void() bot_get =
 		wp_z = wp_z - (link_type + 1) * 10000;
 	}
 
-	// single-authority steering: walk toward the nav corner
+	// single-authority steering: walk toward the nav corner.
+	// On ground the vertical is dead weight: corners sit at feet level
+	// (up to 24u below origin), and normalizing the 3D vector both
+	// starves the horizontal push (near a low corner most of the unit
+	// vector points down) and tilts the shoulder probes into the floor.
+	// Swimming keeps z — that's the only case with vertical control.
 	steer = wp - self.origin;
+	if (self.waterlevel < 2)
+		steer_z = 0;
 	if (vlen(steer) > 0.1)
 		self.b_wishdir = normalize(steer);
 	else
@@ -345,6 +352,10 @@ void() bot_get =
 		// the bot's 32u-wide box grinds on its corner with zero slide.
 		// When progress stops, trace both shoulders and veer toward the
 		// clear side; wall-slide physics takes over from there.
+		// Probes must see entity boxes (nomonsters FALSE): two bots
+		// meeting head-on pin each other box-to-box, and a probe that
+		// skips SOLID_SLIDEBOX reports "all clear" through the blocker
+		// (dm6 pedestal corner: 3-bot train frozen 35+ seconds).
 		if (self._progress_stall > 4 && link_type == 0
 			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
 		{
@@ -352,15 +363,24 @@ void() bot_get =
 			rt_y = 0 - self.b_wishdir_x;
 			rt_z = 0;
 			traceline(self.origin + rt * 16,
-				self.origin + rt * 16 + self.b_wishdir * 48, TRUE, self);
+				self.origin + rt * 16 + self.b_wishdir * 48, FALSE, self);
 			fr = trace_fraction;
 			traceline(self.origin - rt * 16,
-				self.origin - rt * 16 + self.b_wishdir * 48, TRUE, self);
+				self.origin - rt * 16 + self.b_wishdir * 48, FALSE, self);
 			fl = trace_fraction;
 			if (fr < fl - 0.1)
 				self.b_wishdir = normalize(self.b_wishdir - rt * 0.8);
 			else if (fl < fr - 0.1)
 				self.b_wishdir = normalize(self.b_wishdir + rt * 0.8);
+			else if (fr < 0.5)
+			{
+				// Both shoulders blocked at the same depth: a body (or
+				// flat wall) dead ahead — asymmetry veer can't fire, so
+				// side-step square right and let the stall reset once
+				// the lane clears (dm6: bot parked on the corner poly
+				// froze the queue behind it indefinitely).
+				self.b_wishdir = normalize(rt);
+			}
 		}
 
 		if (self._progress_stall > (1 / cvar("sys_ticrate")))
@@ -383,6 +403,23 @@ void() bot_get =
 				bprint("0");
 			bprint(" tgt ");
 			bprint(self.target1.classname);
+			// blocker probe: what does a monster-aware trace hit ahead?
+			{
+				local vector bdir;
+				bdir = wp - self.origin;
+				bdir_z = 0;
+				bdir = normalize(bdir);
+				traceline(self.origin, self.origin + bdir * 48, FALSE, self);
+				bprint(" blk ");
+				bprint(ftos(trace_fraction));
+				if (trace_ent != world)
+				{
+					bprint(" ");
+					bprint(trace_ent.classname);
+					bprint("/");
+					bprint(trace_ent.netname);
+				}
+			}
 			bprint("\n");
 			self._progress_stall = 0;
 			self._progress_best = 99999;
