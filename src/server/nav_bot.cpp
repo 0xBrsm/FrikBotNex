@@ -1930,22 +1930,31 @@ static void nav_build_block_map(void)
 		if (!Nav_DoorStartsBlocked(e))
 			continue;
 
-		/* Find polys in the door's floor footprint.
-		   Use bottom of door bbox with thin vertical slice to avoid
-		   matching polys on other floors above/below the doorway. */
+		/* Find polys in the door's footprint.  Use the full bbox vertical
+		   span (+16u pad): door brushes often extend well below the
+		   walkable floor (e1m1 t10 bottoms out 112u under it), so a thin
+		   slice at absmin misses every floor poly.  Polys on unrelated
+		   floors can't match — the AABB only reaches what the door
+		   actually spans. */
 		float center[3], rc_center[3], extents[3];
 		center[0] = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
 		center[1] = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
-		center[2] = e->v.absmin[2]; /* floor of door */
+		center[2] = (e->v.absmin[2] + e->v.absmax[2]) * 0.5f;
 		nav_q2r(center, rc_center);
 
 		extents[0] = (e->v.absmax[0] - e->v.absmin[0]) * 0.5f;
-		extents[1] = 32.0f; /* Recast Y = Quake Z, thin vertical slice */
+		extents[1] = (e->v.absmax[2] - e->v.absmin[2]) * 0.5f + 16.0f; /* Recast Y = Quake Z */
 		extents[2] = (e->v.absmax[1] - e->v.absmin[1]) * 0.5f;
 
 		dtPolyRef polys[NAV_MAX_ENTITY_POLYS];
 		int poly_count = 0;
 		query->queryPolygons(rc_center, extents, &filter, polys, &poly_count, NAV_MAX_ENTITY_POLYS);
+
+		if (nav_debug_cvar.value)
+			Con_Printf("Nav: door %s (%.0f %.0f %.0f)-(%.0f %.0f %.0f) -> %d polys\n",
+				e->v.targetname ? pr_strings + (int)e->v.targetname : "-",
+				e->v.absmin[0], e->v.absmin[1], e->v.absmin[2],
+				e->v.absmax[0], e->v.absmax[1], e->v.absmax[2], poly_count);
 
 		if (poly_count > 0)
 		{
