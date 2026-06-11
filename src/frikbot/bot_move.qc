@@ -285,8 +285,16 @@ void() bot_get =
 		if (jdist > 0.1)
 			self.b_wishdir = normalize(jflat);
 
+		// Don't commit the jump into a blocked lane: a bot body (or
+		// wall) between here and the link start just bounces the
+		// jumper in place, and airborne frames can't steer around it
+		// (dm6 pedestal: Max pogoed on Erwin for 22% of the run).
 		if (jdist < 64 && (self.flags & FL_ONGROUND))
-			self.button2 = TRUE;
+		{
+			traceline(self.origin, wp + '0 0 24', FALSE, self);
+			if (trace_fraction == 1)
+				self.button2 = TRUE;
+		}
 	}
 	else if (link_type == 7) // AI_SUPER_JUMP
 	{
@@ -365,7 +373,10 @@ void() bot_get =
 		// meeting head-on pin each other box-to-box, and a probe that
 		// skips SOLID_SLIDEBOX reports "all clear" through the blocker
 		// (dm6 pedestal corner: 3-bot train frozen 35+ seconds).
-		if (self._progress_stall > 4 && link_type == 0
+		// Jump links recover too: while still walking the approach, a
+		// blocked jumper needs the same veer/side-step as flat ground
+		// (the jump itself is gated on a clear lane above).
+		if (self._progress_stall > 4 && (link_type == 0 || link_type == 2)
 			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
 		{
 			rt_x = self.b_wishdir_y;
