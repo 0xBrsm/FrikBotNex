@@ -370,16 +370,6 @@ void() bot_get =
 			}
 		}
 	}
-	else if (link_type == 6) // AI_DOORFLAG
-	{
-		traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
-		if (trace_ent != world && trace_ent.classname == "door")
-			if (trace_ent.health > 0)
-			{
-				self.enemy = trace_ent;
-				self.button0 = TRUE;
-			}
-	}
 
 	// progress check: not getting closer to corner? abandon.
 	// Off-mesh links get 3x timeout (bot may be doing controlled approach).
@@ -412,6 +402,31 @@ void() bot_get =
 		}
 		else
 			self._progress_stall = self._progress_stall + 1;
+
+		// A shootable door in the lane is an invitation, not a wall:
+		// make it the enemy — combat aim already knows how to shoot
+		// BSP movers, and opening doors clear takedamage, releasing
+		// the lock. (Touch doors open themselves, key doors open on
+		// touch if we hold the key; the goal picker never routes us
+		// through a door nobody here can open.)
+		if (self._progress_stall > 4 && !self.enemy
+			&& self.b_wishdir != '0 0 0')
+		{
+			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
+			if (trace_ent != world && trace_ent.classname == "door"
+				&& trace_ent.health > 0 && trace_ent.takedamage)
+			{
+				self.enemy = trace_ent;
+				// arm the combat clocks like bot_find_enemy does —
+				// stale ones make bot_fight_style drop the door on
+				// the very next frame (e1m1: 1024 acquire/drop loops)
+				self.b_react_time = time;
+				self.b_combat_time = time;
+				self._combat_pin = time + 2;
+				self._pin_org = self.origin;
+				self._pin_strikes = 0;
+			}
+		}
 
 		// Shoulder probes: the steering corner can hug an obstacle the
 		// center traceline slips past (open door panels, plat edges) —

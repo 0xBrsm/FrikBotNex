@@ -373,7 +373,10 @@ void() BotAI =
 	// validate current enemy
 	if (self.enemy)
 	{
-		if (self.enemy.health <= 0 || !self.enemy.takedamage || bot_nocombat)
+		// bot_nocombat means "don't fight players" — shootable doors are
+		// navigation, the lock must survive nav-testing mode
+		if (self.enemy.health <= 0 || !self.enemy.takedamage
+			|| (bot_nocombat && self.enemy.classname != "door"))
 			self.enemy = world;
 	}
 	// only scan when we don't have one (scratch1 disables combat)

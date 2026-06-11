@@ -1688,6 +1688,36 @@ static void nav_ent_pos(edict_t *ent, float *pos)
 		pos[2] = ent->v.absmin[2];
 }
 
+/* Classify a path against the blocked-door table for a specific bot:
+   0 = clear, 1 = blocked by something the bot can't open, 2 = blocked
+   only by doors the bot can open itself.  Shootable doors (health > 0,
+   which includes secret doors) open to gunfire; key doors open on touch
+   when the bot carries the key.  Doors waiting on a button or trigger
+   elsewhere count as impassable until opener chains are wired up. */
+static int nav_path_block_class(const dtPolyRef *path, int path_count, edict_t *bot)
+{
+	int cls = 0;
+	for (int i = 0; i < nav_block_map_count; i++)
+	{
+		edict_t *e;
+		int hit = 0;
+		if (!nav_block_map[i].is_blocked) continue;
+		for (int p = 0; p < nav_block_map[i].poly_count && !hit; p++)
+			for (int q = 0; q < path_count; q++)
+				if (nav_block_map[i].polys[p] == path[q]) { hit = 1; break; }
+		if (!hit) continue;
+		e = nav_block_map[i].ent;
+		if (e->v.health > 0)
+			cls = 2;
+		else if ((int)e->v.items != 0
+			&& ((int)bot->v.items & (int)e->v.items) == (int)e->v.items)
+			cls = 2;
+		else
+			return 1;
+	}
+	return cls;
+}
+
 /* ---- nav_find_goal: pick best item, pathfind, cache path ---- */
 
 extern "C" dfunction_t *ED_FindFunction(char *name);
@@ -1805,14 +1835,18 @@ static void PF_nav_find_goal(void)
 
 		dbg_pathed++;
 
-		if (nav_blocked.path_blocked(path, path_count))
 		{
-			dbg_blocked++;
-			continue;
+			int bc = nav_path_block_class(path, path_count, bot);
+			if (bc == 1)
+			{
+				dbg_blocked++;
+				continue;
+			}
+			dist = (float)path_count * 48.0f;
+			cost = (1.0f - want) * dist;
+			if (bc == 2)
+				cost += 200.0f; /* opening the door costs a moment */
 		}
-
-		dist = (float)path_count * 48.0f;
-		cost = (1.0f - want) * dist;
 
 		/* Log each reachable item's cost breakdown */
 		{
@@ -1886,7 +1920,7 @@ static void PF_nav_find_goal(void)
 				bot_ref, roam_ref, bot_nearest, roam_rc,
 				&plain_filter, path, &path_count, NAV_MESH_MAX_PATH_REFS);
 			if (dtStatusSucceed(ps) && path_count > 0
-				&& !nav_blocked.path_blocked(path, path_count))
+				&& nav_path_block_class(path, path_count, bot) != 1)
 			{
 				{
 					float rdx = roam_rc[0] - bot_nearest[0];
