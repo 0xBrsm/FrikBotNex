@@ -99,7 +99,10 @@ void() bot_aim =
 	if (self.b_aim_delay == 0)
 		self.b_aim_delay = time;
 
-	if (self.enemy.solid == SOLID_BSP)
+	// bmodel movers AND box-solid shoot-triggers live at origin '0 0 0' —
+	// aim at the brush center, not the world origin
+	if (self.enemy.solid == SOLID_BSP
+		|| (self.enemy.solid == SOLID_BBOX && !(self.enemy.flags & FL_CLIENT)))
 	{
 		view = realorigin(self.enemy) - self.origin;
 	}
@@ -373,15 +376,37 @@ void() BotAI =
 	// validate current enemy
 	if (self.enemy)
 	{
-		// bot_nocombat means "don't fight players" — shootable doors are
-		// navigation, the lock must survive nav-testing mode
+		// bot_nocombat means "don't fight players" — shootable doors,
+		// buttons and triggers are navigation, those locks must
+		// survive nav-testing mode
 		if (self.enemy.health <= 0 || !self.enemy.takedamage
-			|| (bot_nocombat && self.enemy.classname != "door"))
+			|| (bot_nocombat && (self.enemy.flags & FL_CLIENT)))
 			self.enemy = world;
 	}
 	// only scan when we don't have one (scratch1 disables combat)
 	if (!self.enemy && !bot_nocombat)
 		bot_find_enemy();
+
+	// a shootable opener as the goal (button with health, shoot-trigger
+	// like e1m6 t31): touching can't fire these — once we're close,
+	// make it the enemy and let combat aim gun it down
+	if (!self.enemy && self.target1
+		&& !(self.target1.flags & FL_ITEM)
+		&& !(self.target1.flags & FL_CLIENT)
+		&& self.target1.health > 0 && self.target1.takedamage)
+	{
+		local vector _oc;
+		_oc = (self.target1.absmin + self.target1.absmax) * 0.5;
+		if (vlen(_oc - self.origin) < 256)
+		{
+			self.enemy = self.target1;
+			self.b_react_time = time;
+			self.b_combat_time = time;
+			self._combat_pin = time + 2;
+			self._pin_org = self.origin;
+			self._pin_strikes = 0;
+		}
+	}
 
 	// --- act: fight, navigate, or roam ---
 	if (self.enemy)
@@ -411,10 +436,37 @@ void() BotAI =
 			}
 		}
 
-		// clear target if item was picked up (model gone)
+		// clear target if item was picked up — items only: triggers are
+		// born with an empty model string (InitTrigger), and a fired
+		// trigger_once frees itself (classname goes empty too)
 		if (self.target1)
-			if (self.target1.model == string_null)
-				self.target1 = world;
+		{
+			if (self.target1.flags & FL_ITEM)
+			{
+				if (self.target1.model == string_null)
+					self.target1 = world;
+			}
+			else if (self.target1.classname == ""
+				|| self.target1.solid == SOLID_NOT)
+				self.target1 = world; // fired/freed opener — errand done
+		}
+
+		// a pressed button is a finished errand — drop it and re-pick;
+		// the door it opened clears the block map on the next goal pass
+		if (self.target1.classname == "func_button"
+			&& self.target1.state != STATE_BOTTOM)
+			self.target1 = world;
+
+		// walk-through trigger goal: standing inside means it fired —
+		// done, re-pick (trigger_multiple stays alive after firing)
+		if (self.target1.solid == SOLID_TRIGGER
+			&& self.origin_x > self.target1.absmin_x - 16
+			&& self.origin_x < self.target1.absmax_x + 16
+			&& self.origin_y > self.target1.absmin_y - 16
+			&& self.origin_y < self.target1.absmax_y + 16
+			&& self.origin_z > self.target1.absmin_z - 24
+			&& self.origin_z < self.target1.absmax_z + 24)
+			self.target1 = world;
 
 		if (self.target1)
 			bot_get();

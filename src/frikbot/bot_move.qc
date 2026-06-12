@@ -51,6 +51,8 @@ this notice in its entirety.
 .float _nav_pin_strikes;  // consecutive dead 2s windows
 .entity _failed_goal;     // goal abandoned after a stall (engine skips it)
 .float _failed_goal_time; // cooldown expiry for _failed_goal
+.float _nav_backoff;      // until this time, walk _backoff_dir instead
+.vector _backoff_dir;     // retreat direction (give a moving door room)
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -216,6 +218,16 @@ void() bot_get =
 
 	if (!self.target1)
 		return;
+
+	// Backing off: we were standing in a moving door's lane (secret
+	// doors slide through the spot bots queue at — e2m4: door fired,
+	// then ground against the waiting crowd forever). Step away and
+	// let it finish before resuming the corridor.
+	if (time < self._nav_backoff)
+	{
+		self.b_wishdir = self._backoff_dir;
+		return;
+	}
 
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
@@ -416,7 +428,9 @@ void() bot_get =
 			&& self.b_wishdir != '0 0 0')
 		{
 			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
-			if (trace_ent != world && trace_ent.classname == "door"
+			if (trace_ent != world
+				&& (trace_ent.classname == "door"
+					|| trace_ent.classname == "func_button")
 				&& trace_ent.health > 0 && trace_ent.takedamage)
 			{
 				self.enemy = trace_ent;
@@ -489,6 +503,32 @@ void() bot_get =
 				self._nav_pin_strikes = 0;
 			self._nav_pin_org = self.origin;
 			self._nav_pin = time + 2;
+			// Pinned with a shootable mover toward the corner? Shoot it
+			// open instead of abandoning. The stall>4 trigger above never
+			// fires here: bouncing off the door keeps inching xy_dist
+			// closer, resetting the counter (e2m4 secret door, 81% stk).
+			if (self._nav_pin_strikes > 0 && !self.enemy)
+			{
+				local vector pdir;
+				pdir = wp - self.origin;
+				pdir_z = 0;
+				pdir = normalize(pdir);
+				traceline(self.origin, self.origin + pdir * 64, TRUE, self);
+				if (trace_ent != world
+					&& (trace_ent.classname == "door"
+						|| trace_ent.classname == "func_button")
+					&& trace_ent.health > 0 && trace_ent.takedamage)
+				{
+					self.enemy = trace_ent;
+					self.b_react_time = time;
+					self.b_combat_time = time;
+					self._combat_pin = time + 2;
+					self._pin_org = self.origin;
+					self._pin_strikes = 0;
+					self._nav_pin_strikes = 0;
+					return;
+				}
+			}
 			if (self._nav_pin_strikes > 1)
 			{
 				self._nav_pin_strikes = 0;
@@ -546,9 +586,50 @@ void() bot_get =
 					bprint(trace_ent.classname);
 					bprint("/");
 					bprint(trace_ent.netname);
+					bprint(" hp ");
+					bprint(ftos(trace_ent.health));
+					bprint(" td ");
+					bprint(ftos(trace_ent.takedamage));
 				}
 			}
 			bprint("\n");
+			// The probe just told us what's in the lane — if it's a
+			// shootable mover, gun it open instead of abandoning. The
+			// stall>4 hook above misses this case: bouncing off the
+			// door keeps inching xy_dist closer, resetting the counter
+			// before it reaches 5 (e2m4 secret door, 81% stk; e1m6
+			// Max's button parked behind a shoot-door).
+			if (!self.enemy && trace_ent != world
+				&& (trace_ent.classname == "door"
+					|| trace_ent.classname == "func_button")
+				&& trace_ent.health > 0 && trace_ent.takedamage)
+			{
+				self.enemy = trace_ent;
+				self.b_react_time = time;
+				self.b_combat_time = time;
+				self._combat_pin = time + 2;
+				self._pin_org = self.origin;
+				self._pin_strikes = 0;
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				return;
+			}
+			// A door that's MOVING is a door we're standing on: secret
+			// doors slide through the queue spot, grinding against the
+			// crowd forever (e2m4: fd_secret_use cleared takedamage,
+			// then the slide never finished — td 0, hp 10000, 120
+			// stalls). Step back, give it room, keep the goal.
+			if (trace_ent != world && trace_ent.classname == "door"
+				&& trace_ent.velocity != '0 0 0')
+			{
+				self._nav_backoff = time + 0.8;
+				self._backoff_dir = normalize(self.origin
+					- (trace_ent.absmin + trace_ent.absmax) * 0.5);
+				self._backoff_dir_z = 0;
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				return;
+			}
 			self._progress_stall = 0;
 			self._progress_best = 99999;
 			// Cool the goal down: the scorer is deterministic, so an

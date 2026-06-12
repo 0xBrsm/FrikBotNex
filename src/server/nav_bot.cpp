@@ -1719,10 +1719,13 @@ static void nav_ent_pos(edict_t *ent, float *pos)
    only by doors the bot can open itself.  Shootable doors (health > 0,
    which includes secret doors) open to gunfire; key doors open on touch
    when the bot carries the key.  Doors waiting on a button or trigger
-   elsewhere count as impassable until opener chains are wired up. */
-static int nav_path_block_class(const dtPolyRef *path, int path_count, edict_t *bot)
+   elsewhere report the blocking door via blocker_out so the goal picker
+   can chase the opener instead. */
+static int nav_path_block_class(const dtPolyRef *path, int path_count,
+	edict_t *bot, edict_t **blocker_out)
 {
 	int cls = 0;
+	if (blocker_out) *blocker_out = NULL;
 	for (int i = 0; i < nav_block_map_count; i++)
 	{
 		edict_t *e;
@@ -1739,9 +1742,72 @@ static int nav_path_block_class(const dtPolyRef *path, int path_count, edict_t *
 			&& ((int)bot->v.items & (int)e->v.items) == (int)e->v.items)
 			cls = 2;
 		else
+		{
+			if (blocker_out) *blocker_out = e;
 			return 1;
+		}
 	}
 	return cls;
+}
+
+/* ---- Opener chains: who do I press to open this door? ---- */
+
+static void nav_brush_center(edict_t *ent, float *pos)
+{
+	pos[0] = (ent->v.absmin[0] + ent->v.absmax[0]) * 0.5f;
+	pos[1] = (ent->v.absmin[1] + ent->v.absmax[1]) * 0.5f;
+	pos[2] = (ent->v.absmin[2] + ent->v.absmax[2]) * 0.5f;
+}
+
+/* Trigger brushes a bot fires just by stepping into them.  Counters and
+   relays are use-only — they have no touch and must be climbed instead. */
+static int nav_opener_walkthrough(const char *cn)
+{
+	return !strcmp(cn, "trigger_once")
+		|| !strcmp(cn, "trigger_multiple")
+		|| !strcmp(cn, "trigger_secret")
+		|| !strcmp(cn, "trigger_onlyregistered");
+}
+
+/* Climb the targetname chain from a blocked door to something a bot can
+   actually act on: an unpressed func_button (touch or shoot) or a
+   walk-through trigger brush.  Counters and relays recurse upward, so a
+   3-button trigger_counter hands out its buttons one unpressed press at
+   a time.  Monster-fired chains dead-end naturally (monsters aren't
+   buttons and have nothing targeting them). */
+static edict_t *nav_door_opener(edict_t *ent, int depth)
+{
+	const char *tn;
+	if (depth > 4) return NULL;
+	if (!ent->v.targetname) return NULL;
+	tn = pr_strings + (int)ent->v.targetname;
+	if (!tn[0]) return NULL;
+
+	for (int i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *e = EDICT_NUM(i);
+		const char *cn;
+		if (e->free || !e->v.target) continue;
+		if (strcmp(pr_strings + (int)e->v.target, tn)) continue;
+		cn = pr_strings + (int)e->v.classname;
+		if (!strcmp(cn, "func_button"))
+		{
+			/* pressable only while at rest at the bottom; a wait -1
+			   button parked at the top already gave its one press */
+			eval_t *st = GetEdictFieldValue(e, "state");
+			if (st && st->_float == 1 /* STATE_BOTTOM */)
+				return e;
+			continue;
+		}
+		if (nav_opener_walkthrough(cn))
+			return e;
+		if (!strncmp(cn, "trigger_", 8))
+		{
+			edict_t *up = nav_door_opener(e, depth + 1);
+			if (up) return up;
+		}
+	}
+	return NULL;
 }
 
 /* ---- nav_find_goal: pick best item, pathfind, cache path ---- */
@@ -1862,10 +1928,80 @@ static void PF_nav_find_goal(void)
 		dbg_pathed++;
 
 		{
-			int bc = nav_path_block_class(path, path_count, bot);
+			edict_t *blocker = NULL;
+			int bc = nav_path_block_class(path, path_count, bot, &blocker);
 			if (bc == 1)
 			{
-				dbg_blocked++;
+				/* Door somebody has to open: chase the opener instead.
+				   The button inherits the prize's want — pressing it IS
+				   progress toward the item — plus a detour surcharge.
+				   Once the door opens, the block clears and the next
+				   goal pass routes straight through. */
+				edict_t *opener = blocker ? nav_door_opener(blocker, 0) : NULL;
+				int routed = 0;
+				if (opener && opener != failed_goal)
+				{
+					float oq[3], orc[3], onear[3];
+					float oext[3] = {64.0f, 128.0f, 64.0f};
+					dtPolyRef oref = 0;
+					nav_brush_center(opener, oq);
+					nav_q2r(oq, orc);
+					query->findNearestPoly(orc, oext, &plain_filter, &oref, onear);
+					if (oref != 0)
+					{
+						dtPolyRef opath[NAV_MESH_MAX_PATH_REFS];
+						int ocount = 0;
+						dtStatus os = query->findPath(
+							bot_ref, oref, bot_nearest, onear,
+							&plain_filter, opath, &ocount, NAV_MESH_MAX_PATH_REFS);
+						edict_t *oblk = NULL;
+						int ook = 0;
+						if (!dtStatusFailed(os) && ocount > 0
+							&& !(dtStatusDetail(os, DT_PARTIAL_RESULT)
+								&& opath[ocount - 1] != oref))
+						{
+							int obc = nav_path_block_class(opath, ocount, bot, &oblk);
+							if (obc != 1)
+								ook = 1;
+							else if (oblk == blocker)
+							{
+								/* A walk-through trigger can sit in the
+								   doorway itself: its path is "blocked" by
+								   the very door it opens — fine, it fires
+								   from the near side. But only if its
+								   volume overlaps the door's. A trigger
+								   entirely BEYOND the door (start gate:
+								   door x -207..-185, trigger x -167..-153)
+								   is unreachable from this side — picking
+								   it parks the bot grinding the door face. */
+								ook = 1;
+								for (int ax = 0; ax < 3; ax++)
+									if (opener->v.absmin[ax] > blocker->v.absmax[ax]
+										|| opener->v.absmax[ax] < blocker->v.absmin[ax])
+										ook = 0;
+							}
+						}
+						if (ook)
+						{
+							dist = (float)ocount * 48.0f;
+							cost = (1.0f - want) * dist + 400.0f;
+							if (cost < bestcost)
+							{
+								bestcost = cost;
+								best = opener;
+								best_path_count = ocount;
+								memcpy(best_path, opath, (size_t)ocount * sizeof(dtPolyRef));
+								memcpy(best_goal_rc, onear, sizeof(float) * 3);
+							}
+							routed = 1;
+							fprintf(stderr, "  GOAL %s via opener %s polys=%d cost=%.0f\n",
+								pr_strings + (int)it->v.classname,
+								pr_strings + (int)opener->v.classname, ocount, cost);
+						}
+					}
+				}
+				if (!routed)
+					dbg_blocked++;
 				continue;
 			}
 			dist = (float)path_count * 48.0f;
@@ -1946,7 +2082,7 @@ static void PF_nav_find_goal(void)
 				bot_ref, roam_ref, bot_nearest, roam_rc,
 				&plain_filter, path, &path_count, NAV_MESH_MAX_PATH_REFS);
 			if (dtStatusSucceed(ps) && path_count > 0
-				&& nav_path_block_class(path, path_count, bot) != 1)
+				&& nav_path_block_class(path, path_count, bot, NULL) != 1)
 			{
 				{
 					float rdx = roam_rc[0] - bot_nearest[0];
