@@ -938,6 +938,30 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 	if (disabled > 0)
 		fprintf(stderr, "Nav: disabled %d sliver polys hovering over main mesh (%d components, largest=%d)\n",
 			disabled, (int)comp_size.size(), comp_size[largest]);
+
+	/* DIAGNOSTIC (no behaviour change): catalogue orphan components that
+	   survived the conservative cull -- these are reachable-in-game areas the
+	   navmesh failed to LINK.  Print size + centroid so we can find the missing
+	   drop/jump/etc. link for each.  Skip 1-2 poly slivers (junk noise). */
+	for (int c = 0; c < (int)comp_size.size(); c++)
+	{
+		if (c == largest || comp_size[c] < 3)
+			continue;
+		double cx = 0, cy = 0, cz = 0;
+		int n = 0;
+		for (int i = 0; i < npolys; i++)
+		{
+			if (comp[i] != c)
+				continue;
+			cx += ctr[i * 3 + 0];
+			cy += ctr[i * 3 + 1];
+			cz += ctr[i * 3 + 2];
+			n++;
+		}
+		if (n > 0)
+			fprintf(stderr, "Nav: ORPHAN comp size=%d at quake (%.0f %.0f %.0f)\n",
+				comp_size[c], cx / n, cz / n, cy / n);
+	}
 }
 
 extern "C" int nav_mesh_sever_phantom_edges(

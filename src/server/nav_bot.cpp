@@ -72,7 +72,11 @@ extern ddef_t *ED_FindGlobal(char *name);
    GL pocket: 8u drop over an unwalkable hull-bevel ridge).  Keep above
    contour simplification error so an edge can't "drop" onto itself. */
 #define NAV_DROP_HEIGHT_MIN          6.0f
-#define NAV_DROP_HEIGHT_MAX        128.0f  /* max drop-down height */
+/* Quake players survive long falls (damage only past ~265u, death past
+   ~800u), and whole lower regions are reached by dropping in.  Capping at
+   128u orphaned them from the mesh.  Reach deep enough to link those drops;
+   the fall-column hull-truth + lane checks still gate each candidate. */
+#define NAV_DROP_HEIGHT_MAX        320.0f  /* max drop-down height */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
