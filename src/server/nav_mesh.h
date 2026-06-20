@@ -245,6 +245,17 @@ nav_mesh_runtime_t *nav_mesh_build(
 	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
 
+/* Player-hull trace between two Quake-coord points.
+   Returns nonzero if the swept player box is blocked, 0 if clear. */
+typedef int (*nav_mesh_edge_trace_t)(const float *a, const float *b, void *user);
+
+/* Post-build pass: sever ground poly adjacencies that the mesh reports as
+   walkable but a player hull cannot actually traverse (sub-cell-thin walls
+   the heightfield bridged).  Returns the number of edges severed. */
+int nav_mesh_sever_phantom_edges(
+	nav_mesh_runtime_t *navmesh,
+	nav_mesh_edge_trace_t trace, void *user);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,

@@ -141,6 +141,27 @@ static int nav_trace_clear_vertical(const float *xy, float top_z, float bot_z)
 	return !trace.allsolid && !trace.startsolid && trace.fraction >= 0.99f;
 }
 
+/* Player-hull world probe for nav_mesh_sever_phantom_edges.
+   When a == b: point test -- nonzero if the box at that point is embedded in
+   solid (a wall sits there).  Otherwise: swept test -- nonzero if the box is
+   blocked moving a -> b; a start embedded in solid is ambiguous, report clear. */
+static int nav_edge_trace_blocked(const float *a, const float *b, void *user)
+{
+	vec3_t hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+	vec3_t ts, te;
+	trace_t tr;
+	(void)user;
+
+	VectorCopy(a, ts);
+	VectorCopy(b, te);
+	tr = SV_Move(ts, hmins, hmaxs, te, MOVE_NOMONSTERS, NULL);
+	if (a[0] == b[0] && a[1] == b[1] && a[2] == b[2])
+		return tr.startsolid || tr.allsolid;
+	if (tr.startsolid)
+		return 0;
+	return tr.allsolid || tr.fraction < 1.0f;
+}
+
 static int nav_trace_clear_at_height(const float *start, const float *end, float z, edict_t *passedict)
 {
 	vec3_t trace_start;
@@ -198,6 +219,7 @@ static int nav_build_attempted = 0;
 static struct model_s *nav_built_for_model = NULL;
 static cvar_t nav_enabled_cvar = {"nav_enabled", "0"};
 static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
+static cvar_t nav_edge_validate_cvar = {"nav_edge_validate", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "1"};
 
 /* debug visualization state */
@@ -1078,6 +1100,11 @@ void Nav_BuildForMap(void)
 	free(verts);
 	free(tris);
 	free(entity_links);
+
+	/* Cut mesh adjacencies a player hull can't actually cross (sub-cell-thin
+	   walls the rasterizer bridged) before anything queries the graph. */
+	if (nav_edge_validate_cvar.value)
+		nav_mesh_sever_phantom_edges(nav_mesh, nav_edge_trace_blocked, NULL);
 
 	nav_build_block_map();
 
@@ -2294,6 +2321,7 @@ void Nav_RegisterBuiltins(void)
 
 	Cvar_RegisterVariable(&nav_enabled_cvar);
 	Cvar_RegisterVariable(&nav_jump_links_cvar);
+	Cvar_RegisterVariable(&nav_edge_validate_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }

@@ -940,6 +940,132 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 			disabled, (int)comp_size.size(), comp_size[largest]);
 }
 
+extern "C" int nav_mesh_sever_phantom_edges(
+	nav_mesh_runtime_t *navmesh,
+	nav_mesh_edge_trace_t trace, void *user)
+{
+	if (navmesh == nullptr || navmesh->navmesh == nullptr || trace == nullptr)
+		return 0;
+
+	dtNavMesh *mesh = navmesh->navmesh;
+	/* The non-const getTile is private; reach the public const overload, then
+	   cast off const to edit links — we own the tile data (DT_TILE_FREE_DATA). */
+	const dtMeshTile *ctile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (ctile == nullptr || ctile->header == nullptr)
+		return 0;
+	dtMeshTile *tile = const_cast<dtMeshTile *>(ctile);
+
+	/* Polys [0, ground) are real floor; [ground, polyCount) are off-mesh
+	   connection polys we leave alone (already hull-truth gated at build). */
+	const int ground = tile->header->offMeshBase;
+
+	/* Player origin stands 24u above its feet (hull mins.z = -24); a STEPSIZE
+	   step-up clears legitimate stairs/ledges within walkableClimb. */
+	const float kStand = 24.0f;
+	const float kStep  = 18.0f;
+
+	std::vector<float> ctr(ground * 3, 0.0f); /* recast coords, y up */
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *poly = &tile->polys[i];
+		float cx = 0, cy = 0, cz = 0;
+		for (int vi = 0; vi < poly->vertCount; vi++)
+		{
+			const float *v = &tile->verts[poly->verts[vi] * 3];
+			cx += v[0]; cy += v[1]; cz += v[2];
+		}
+		ctr[i * 3 + 0] = cx / poly->vertCount;
+		ctr[i * 3 + 1] = cy / poly->vertCount;
+		ctr[i * 3 + 2] = cz / poly->vertCount;
+	}
+
+	int severed = 0;
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *poly = &tile->polys[i];
+		for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			dtLink &link = tile->links[k];
+			if (link.ref == 0)
+				continue;
+			/* Off-mesh links from this poly carry edge == 0xff (>= vertCount). */
+			if (link.edge >= poly->vertCount)
+				continue;
+			unsigned int salt, it, ip;
+			mesh->decodePolyId(link.ref, salt, it, ip);
+			if ((int)ip >= ground || (int)ip == i)
+				continue;
+			if ((int)ip < i)
+				continue; /* drive each adjacency once from the lower index */
+
+			float e0[3], e1[3];
+			nav_recast_to_quake(&tile->verts[poly->verts[link.edge] * 3], e0);
+			nav_recast_to_quake(&tile->verts[poly->verts[(link.edge + 1) % poly->vertCount] * 3], e1);
+			const float mx = 0.5f * (e0[0] + e1[0]);
+			const float my = 0.5f * (e0[1] + e1[1]);
+			const float mz = 0.5f * (e0[2] + e1[2]);
+
+			float qi[3], qj[3];
+			nav_recast_to_quake(&ctr[i * 3], qi);
+			nav_recast_to_quake(&ctr[ip * 3], qj);
+
+			/* Sweep the real crossing in two segments, centroid -> shared-edge
+			   midpoint -> centroid.  Each leg lies inside one convex poly, so it
+			   never clips geometry off the route.  Surface pass rides each floor
+			   (ramps/flats stay clear); step pass one step-height above the
+			   higher floor lets a riser or low ledge tops out below (stays clear). */
+			float a_lo[3] = {qi[0], qi[1], qi[2] + kStand};
+			float m_lo[3] = {mx, my, mz + kStand};
+			float b_lo[3] = {qj[0], qj[1], qj[2] + kStand};
+			bool walkable = !trace(a_lo, m_lo, user) && !trace(m_lo, b_lo, user);
+			if (!walkable)
+			{
+				float topZ = qi[2] > qj[2] ? qi[2] : qj[2];
+				if (mz > topZ) topZ = mz;
+				topZ += kStand + kStep;
+				float a_hi[3] = {qi[0], qi[1], topZ};
+				float m_hi[3] = {mx, my, topZ};
+				float b_hi[3] = {qj[0], qj[1], topZ};
+				walkable = !trace(a_hi, m_hi, user) && !trace(m_hi, b_hi, user);
+			}
+			if (walkable)
+				continue; /* a player can cross the border -> genuinely walkable */
+
+			/* The sweep can clip a corner that isn't truly on the border (false
+			   "blocked").  Confirm an actual wall sits on the edge: drop a player
+			   box on the midpoint, feet just above the higher floor.  Only sever
+			   when BOTH agree -- their false positives don't overlap. */
+			float feet = (qi[2] > qj[2] ? qi[2] : qj[2]) + 1.0f;
+			float pbox[3] = {mx, my, feet + kStand};
+			if (!trace(pbox, pbox, user))
+				continue; /* no wall embedded on the border -> keep the edge */
+
+			/* Both heights blocked: a wall sits on the shared edge.  Zero the
+			   link both directions; dtNavMeshQuery skips links with ref == 0. */
+			link.ref = 0;
+			for (unsigned int k2 = tile->polys[ip].firstLink;
+				k2 != DT_NULL_LINK; k2 = tile->links[k2].next)
+			{
+				if (tile->links[k2].ref == 0)
+					continue;
+				unsigned int s2, t2, p2;
+				mesh->decodePolyId(tile->links[k2].ref, s2, t2, p2);
+				if ((int)p2 == i)
+				{
+					tile->links[k2].ref = 0;
+					break;
+				}
+			}
+			severed++;
+		}
+	}
+
+	if (severed > 0)
+		fprintf(stderr, "Nav: severed %d phantom poly edges (mesh-walkable, hull-blocked)\n",
+			severed);
+	return severed;
+}
+
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts,
 	int vertex_count,
