@@ -234,11 +234,30 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 		{
 			partial_count++;
 			float dz = map->wps[bi][2] - map->wps[ai][2];
-			fprintf(stderr, "  PARTIAL wp%d->wp%d (%.0f,%.0f,%.0f)->(%.0f,%.0f,%.0f) dz=%.0f polys=%d\n",
+			/* Classify the gap: hull-walk + step from A's snap toward B.  If a
+			   player box reaches B's XY, the floor is continuous and the mesh
+			   merely failed to LINK it (adjacency gap); otherwise it needs a
+			   jump (|dz| small/up) or a drop (B lower). */
+			const char *kind;
+			{
+				vec3_t a, b, mn = {-16,-16,-24}, mx = {16,16,32};
+				trace_t tr;
+				float ddx = map->wps[bi][0]-map->wps[ai][0];
+				float ddy = map->wps[bi][1]-map->wps[ai][1];
+				float h = sqrtf(ddx*ddx+ddy*ddy);
+				a[0]=map->wps[ai][0]; a[1]=map->wps[ai][1]; a[2]=map->wps[ai][2]+24+18;
+				b[0]=map->wps[bi][0]; b[1]=map->wps[bi][1]; b[2]=map->wps[bi][2]+24+18;
+				tr = SV_Move(a, mn, mx, b, MOVE_NOMONSTERS, NULL);
+				if (tr.fraction > 0.97f) kind = "ADJ-GAP(walkable)";
+				else if (dz < -48.0f)    kind = "DROP";
+				else if (h <= 216.0f)    kind = "JUMP";
+				else                     kind = "FAR";
+			}
+			fprintf(stderr, "  PARTIAL wp%d->wp%d (%.0f,%.0f,%.0f)->(%.0f,%.0f,%.0f) dz=%.0f h=%.0f polys=%d [%s]\n",
 				ai + 1, bi + 1,
 				map->wps[ai][0], map->wps[ai][1], map->wps[ai][2],
 				map->wps[bi][0], map->wps[bi][1], map->wps[bi][2],
-				dz, pc);
+				dz, sqrtf((map->wps[bi][0]-map->wps[ai][0])*(map->wps[bi][0]-map->wps[ai][0])+(map->wps[bi][1]-map->wps[ai][1])*(map->wps[bi][1]-map->wps[ai][1])), pc, kind);
 		}
 		else
 			ok_count++;

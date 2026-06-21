@@ -161,18 +161,19 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
 	return !trace.allsolid && !trace.startsolid && trace.fraction >= 1.0f;
 }
 
-/* Physics check for an orphan-connecting jump (nav_mesh_compute_orphan_jumps).
-   from/to are Quake FOOT points (poly floor centroids).  Covers jump-up,
-   horizontal gap-jump, and across-and-down in ONE model via real Quake run-
-   jump physics, so it isn't limited to floors-above the way the old scan was.
-   Nonzero if a player can make it (and its reverse): reachable height + run
-   distance, both ends standable, clear apex arc. */
-static int nav_jump_validate(const float *from, const float *to, void *user)
+/* Decide how a player could traverse from 'from' to 'to' (Quake FOOT points,
+   navmesh poly centroids), for nav_mesh_compute_orphan_jumps.  Returns the link
+   type, or 0 if none:
+     AI_WALK -- continuous floor the mesh failed to LINK (a player hull walks +
+                steps straight across); bidirectional, the safest connection.
+     AI_JUMP -- run-jump (up / across / across-and-down), bidirectional.
+   Endpoints are walkable by construction, so no standability re-check. */
+static int nav_link_validate(const float *from, const float *to, void *user)
 {
 	vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32}, zero = {0, 0, 0};
 	vec3_t ts, te;
 	trace_t tr;
-	float dz, adz, dx, dy, hd, disc, airtime, reqspeed;
+	float dz, adz, dx, dy, hd, disc, airtime;
 	const float g = 800.0f;                 /* sv_gravity */
 	const float v0 = NAV_JUMP_IMPULSE;       /* 270, jump up-velocity */
 	const float maxspeed = 320.0f;           /* ground run speed */
@@ -183,27 +184,29 @@ static int nav_jump_validate(const float *from, const float *to, void *user)
 	hd = sqrt(dx * dx + dy * dy);
 	if (hd < 8.0f)
 		return 0;
-
-	/* The link is bidirectional, so the HARDER (upward) direction governs:
-	   a jump must clear |dz| against gravity.  Beyond the apex (v0^2/2g ~45u)
-	   no jump reaches.  Air time at that |dz| sets the max run distance. */
 	adz = dz < 0 ? -dz : dz;
+
+	/* WALK: a player box sweeps level from 'from' to 'to' (lifted one step) and
+	   reaches it -> the floor is continuous and only the mesh adjacency is
+	   missing.  Step height bounds the climb. */
+	if (adz <= NAV_JUMP_HEIGHT_MIN)
+	{
+		ts[0] = from[0]; ts[1] = from[1]; ts[2] = from[2] + 24 + 18;
+		te[0] = to[0]; te[1] = to[1]; te[2] = to[2] + 24 + 18;
+		tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
+		if (!tr.startsolid && tr.fraction > 0.97f)
+			return AI_WALK;
+	}
+
+	/* JUMP: bidirectional, so the harder (upward) direction governs -- clear
+	   |dz| against gravity (apex v0^2/2g ~45u), run distance <= maxspeed *
+	   air time, and the apex arc must be wall-free. */
 	disc = v0 * v0 - 2.0f * g * adz;
 	if (disc < 0.0f)
-		return 0; /* |dz| above jump apex -- unreachable by a jump */
-	airtime = (v0 + sqrt(disc)) / g;        /* time to rise and fall back to |dz| */
-	reqspeed = hd / airtime;
-	if (reqspeed > maxspeed)
-		return 0; /* gap too wide to clear at run speed */
-
-	/* Both endpoints are navmesh poly centroids -> walkable by construction
-	   (hull-1 derived), so a standability re-check is redundant (and was
-	   buggy: a floor exactly at foot level reads as fraction>=1 == clean miss).
-	   The only thing left to rule out is a wall in the flight path. */
-	(void)pmins; (void)pmaxs;
-
-	/* Arc clear: trace level at the jump apex (~45u above the higher end)
-	   over the gap; a wall there would stop the leap. */
+		return 0;
+	airtime = (v0 + sqrt(disc)) / g;
+	if (hd / airtime > maxspeed)
+		return 0;
 	{
 		float apexz = (to[2] > from[2] ? to[2] : from[2]) + 45.0f + 24.0f;
 		ts[0] = from[0]; ts[1] = from[1]; ts[2] = apexz;
@@ -212,8 +215,7 @@ static int nav_jump_validate(const float *from, const float *to, void *user)
 		if (tr.fraction < 1.0f)
 			return 0;
 	}
-
-	return 1;
+	return AI_JUMP;
 }
 
 static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *qpos, dtPolyRef *out_ref, float *out_nearest)
@@ -1153,7 +1155,7 @@ void Nav_BuildForMap(void)
 	if (nav_jump_links_cvar.value)
 	{
 		nav_off_mesh_link_t *ojumps = NULL;
-		int noj = nav_mesh_compute_orphan_jumps(nav_mesh, nav_jump_validate, NULL, &ojumps);
+		int noj = nav_mesh_compute_orphan_jumps(nav_mesh, nav_link_validate, NULL, &ojumps);
 		if (noj > 0)
 		{
 			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,

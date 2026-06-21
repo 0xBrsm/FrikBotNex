@@ -28,6 +28,8 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define AI_DOORFLAG       6   /* door: wait or trigger */
 #define AI_SUPER_JUMP     7   /* rocket jump: RL aim down fire+jump */
 #define AI_SURFACE        8   /* water: swim up to surface */
+#define AI_WALK           9   /* walk across: continuous floor the mesh failed
+                                 to link; bot just walks to the link end */
 
 /* Detour area types for cost weighting */
 #define NAV_AREA_WALK      0   /* walking + teleporters (cost 1.0) */

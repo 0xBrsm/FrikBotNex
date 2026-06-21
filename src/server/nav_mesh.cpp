@@ -859,46 +859,63 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 		nav_recast_to_quake(c, &q[i * 3]);
 	}
 
-	/* For each stranded component, find the cheapest hull-validated jump-up
-	   from a main-mesh poly (lower) to one of its polys (higher).  Generous
-	   geometric pre-filter; validate() enforces the real jump physics. */
+	/* Connect components to the main mesh in WAVES (Prim-style growth): a
+	   cluster of orphans walkably/jumpably chained off the main area links one
+	   hop at a time -- pass 1 connects whatever reaches main directly, pass 2
+	   whatever reaches a pass-1 poly, and so on.  Linking only orphan->main
+	   (one pass) can't chain such clusters in.  validate() picks walk vs jump
+	   per pair; both are bidirectional. */
+	std::vector<char> conn(csize.size(), 0);
+	conn[largest] = 1;
 	std::vector<nav_off_mesh_link_t> jumps;
-	for (int c = 0; c < (int)csize.size(); c++)
+	bool progress = true;
+	while (progress)
 	{
-		if (c == largest) continue;
-		float bestcost = 1e9f; int bestM = -1, bestO = -1;
-		for (int o = 0; o < ground; o++)
+		progress = false;
+		for (int c = 0; c < (int)csize.size(); c++)
 		{
-			if (comp[o] != c) continue;
-			for (int m = 0; m < ground; m++)
+			if (conn[c]) continue;
+			float bestcost = 1e9f, bestStart[3] = {0,0,0}, bestEnd[3] = {0,0,0};
+			int bestType = 0;
+			for (int o = 0; o < ground; o++)
 			{
-				if (comp[m] != largest) continue;
-				const float *qo = &q[o * 3], *qm = &q[m * 3];
-				float dz = qo[2] - qm[2];
-				float adz = dz < 0 ? -dz : dz;
-				float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
-				float hd = sqrtf(dx * dx + dy * dy);
-				/* Generous pre-filter (jump apex ~45u either way, max run-jump
-				   reach ~260u); validate() applies exact run-jump physics. */
-				if (adz > 48.0f) continue;
-				if (hd > 280.0f || hd < 8.0f) continue;
-				float cost = hd + adz;
-				if (cost >= bestcost) continue;
-				if (validate(qm, qo, user)) { bestcost = cost; bestM = m; bestO = o; }
+				if (comp[o] != c) continue;
+				for (int m = 0; m < ground; m++)
+				{
+					if (!conn[comp[m]]) continue; /* link to an already-connected poly */
+					const float *qo = &q[o * 3], *qm = &q[m * 3];
+					float dz = qo[2] - qm[2];
+					float adz = dz < 0 ? -dz : dz;
+					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
+					float hd = sqrtf(dx * dx + dy * dy);
+					if (adz > 48.0f) continue;
+					if (hd > 280.0f || hd < 8.0f) continue;
+					float cost = hd + adz;
+					if (cost >= bestcost) continue;
+					int t = validate(qm, qo, user);
+					if (t)
+					{
+						bestcost = cost; bestType = t;
+						bestStart[0] = qm[0]; bestStart[1] = qm[1]; bestStart[2] = qm[2];
+						bestEnd[0] = qo[0]; bestEnd[1] = qo[1]; bestEnd[2] = qo[2];
+					}
+				}
 			}
-		}
-		if (bestM >= 0)
-		{
-			nav_off_mesh_link_t lk;
-			memset(&lk, 0, sizeof(lk));
-			lk.start[0] = q[bestM * 3]; lk.start[1] = q[bestM * 3 + 1]; lk.start[2] = q[bestM * 3 + 2];
-			lk.end[0] = q[bestO * 3]; lk.end[1] = q[bestO * 3 + 1]; lk.end[2] = q[bestO * 3 + 2];
-			lk.radius = 32.0f;
-			lk.bidirectional = 1;
-			lk.link_type = AI_JUMP;
-			lk.height_delta = lk.end[2] - lk.start[2];
-			lk.required_speed = 0;
-			jumps.push_back(lk);
+			if (bestType)
+			{
+				nav_off_mesh_link_t lk;
+				memset(&lk, 0, sizeof(lk));
+				lk.start[0] = bestStart[0]; lk.start[1] = bestStart[1]; lk.start[2] = bestStart[2];
+				lk.end[0] = bestEnd[0]; lk.end[1] = bestEnd[1]; lk.end[2] = bestEnd[2];
+				lk.radius = 32.0f;
+				lk.bidirectional = 1;                /* walk + jump are both 2-way */
+				lk.link_type = bestType;
+				lk.height_delta = lk.end[2] - lk.start[2];
+				lk.required_speed = 0;
+				jumps.push_back(lk);
+				conn[c] = 1;
+				progress = true;
+			}
 		}
 	}
 
