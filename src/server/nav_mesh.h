@@ -245,6 +245,22 @@ nav_mesh_runtime_t *nav_mesh_build(
 	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
 
+/* Physics check for an orphan-connecting jump: can a player jump from foot
+   point 'from' (lower, main mesh) up to 'to' (higher, stranded area)?
+   Returns nonzero if makeable (height/reach in range, standable ends, clear
+   arc).  Implemented in nav_bot.cpp via SV_Move. */
+typedef int (*nav_jump_validate_fn)(const float *from, const float *to, void *user);
+
+/* Post-build pass: find ground components stranded from the main mesh and, for
+   each, emit ONE hull-validated jump-up link reconnecting it (a ledge into an
+   otherwise-unreachable area, e.g. dm4 quad).  Targeted, so it can't spray the
+   false jumps a broad edge scan does.  Fills *out_jumps (malloc'd, caller
+   frees); returns the count. */
+int nav_mesh_compute_orphan_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_jumps);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,

@@ -788,6 +788,131 @@ static void nav_heightfield_bridge_small_gaps(
 		fprintf(stderr, "Nav: bridged %d tiny raster gaps before ledge filtering\n", fills_applied);
 }
 
+extern "C" int nav_mesh_compute_orphan_jumps(
+	nav_mesh_runtime_t *nav,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_jumps)
+{
+	*out_jumps = nullptr;
+	if (nav == nullptr || nav->navmesh == nullptr || validate == nullptr)
+		return 0;
+	dtNavMesh *mesh = nav->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return 0;
+	const int ground = tile->header->offMeshBase;
+	if (ground <= 0)
+		return 0;
+
+	/* union-find over ground polys using the full current graph (ground
+	   adjacencies + every off-mesh connection) -> who is already reachable. */
+	std::vector<int> uf(ground);
+	for (int i = 0; i < ground; i++) uf[i] = i;
+	auto ff = [&](int x) { while (uf[x] != x) { uf[x] = uf[uf[x]]; x = uf[x]; } return x; };
+	auto uni = [&](int a, int b) { if (a >= 0 && b >= 0) uf[ff(a)] = ff(b); };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground) uni(i, (int)np);
+		}
+	}
+	for (int pi = ground; pi < tile->header->polyCount; pi++)
+	{
+		const dtPoly *P = &tile->polys[pi];
+		int ep[2] = {-1, -1}, ne = 0;
+		for (unsigned int k = P->firstLink; k != DT_NULL_LINK && ne < 2; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground) ep[ne++] = (int)np;
+		}
+		uni(ep[0], ep[1]);
+	}
+
+	std::vector<int> comp(ground, -1), csize;
+	for (int i = 0; i < ground; i++)
+	{
+		int r = ff(i);
+		if (comp[r] < 0) { comp[r] = (int)csize.size(); csize.push_back(0); }
+		comp[i] = comp[r]; csize[comp[i]]++;
+	}
+	int largest = 0;
+	for (size_t c = 1; c < csize.size(); c++)
+		if (csize[c] > csize[largest]) largest = (int)c;
+
+	/* Quake-coord poly centroids. */
+	std::vector<float> q(ground * 3);
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		float c[3] = {0, 0, 0};
+		for (int v = 0; v < p->vertCount; v++)
+		{
+			const float *vp = &tile->verts[p->verts[v] * 3];
+			c[0] += vp[0]; c[1] += vp[1]; c[2] += vp[2];
+		}
+		c[0] /= p->vertCount; c[1] /= p->vertCount; c[2] /= p->vertCount;
+		nav_recast_to_quake(c, &q[i * 3]);
+	}
+
+	/* For each stranded component, find the cheapest hull-validated jump-up
+	   from a main-mesh poly (lower) to one of its polys (higher).  Generous
+	   geometric pre-filter; validate() enforces the real jump physics. */
+	std::vector<nav_off_mesh_link_t> jumps;
+	for (int c = 0; c < (int)csize.size(); c++)
+	{
+		if (c == largest) continue;
+		float bestcost = 1e9f; int bestM = -1, bestO = -1;
+		for (int o = 0; o < ground; o++)
+		{
+			if (comp[o] != c) continue;
+			for (int m = 0; m < ground; m++)
+			{
+				if (comp[m] != largest) continue;
+				const float *qo = &q[o * 3], *qm = &q[m * 3];
+				float dz = qo[2] - qm[2];
+				float adz = dz < 0 ? -dz : dz;
+				float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
+				float hd = sqrtf(dx * dx + dy * dy);
+				/* Generous pre-filter (jump apex ~45u either way, max run-jump
+				   reach ~260u); validate() applies exact run-jump physics. */
+				if (adz > 48.0f) continue;
+				if (hd > 280.0f || hd < 8.0f) continue;
+				float cost = hd + adz;
+				if (cost >= bestcost) continue;
+				if (validate(qm, qo, user)) { bestcost = cost; bestM = m; bestO = o; }
+			}
+		}
+		if (bestM >= 0)
+		{
+			nav_off_mesh_link_t lk;
+			memset(&lk, 0, sizeof(lk));
+			lk.start[0] = q[bestM * 3]; lk.start[1] = q[bestM * 3 + 1]; lk.start[2] = q[bestM * 3 + 2];
+			lk.end[0] = q[bestO * 3]; lk.end[1] = q[bestO * 3 + 1]; lk.end[2] = q[bestO * 3 + 2];
+			lk.radius = 32.0f;
+			lk.bidirectional = 1;
+			lk.link_type = AI_JUMP;
+			lk.height_delta = lk.end[2] - lk.start[2];
+			lk.required_speed = 0;
+			jumps.push_back(lk);
+		}
+	}
+
+	if (jumps.empty())
+		return 0;
+	nav_off_mesh_link_t *out = (nav_off_mesh_link_t *)malloc(jumps.size() * sizeof(nav_off_mesh_link_t));
+	if (out == nullptr)
+		return 0;
+	memcpy(out, jumps.data(), jumps.size() * sizeof(nav_off_mesh_link_t));
+	*out_jumps = out;
+	fprintf(stderr, "Nav: computed %d orphan-connecting jump links\n", (int)jumps.size());
+	return (int)jumps.size();
+}
+
 /* Disable polys not connected to the largest mesh component.
    Hull-1 extraction emits sliver floors (lintels, beams) that bots
    reseed onto and then roam forever inside a 1-poly island.  Traversal

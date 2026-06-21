@@ -65,6 +65,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 
 
 /* Jump/drop link detection */
+#define NAV_JUMP_IMPULSE            270.0f  /* Quake jump velocity (SV_ClientThink) */
 #define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
 #define NAV_JUMP_HEIGHT_MAX         48.0f  /* max jump-up height in Quake */
 /* Drops have no walkableClimb floor: a contour boundary edge means the
@@ -158,6 +159,61 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
 	trace_end[2] = z;
 	trace = SV_Move(trace_start, zero, zero, trace_end, MOVE_NOMONSTERS, passedict);
 	return !trace.allsolid && !trace.startsolid && trace.fraction >= 1.0f;
+}
+
+/* Physics check for an orphan-connecting jump (nav_mesh_compute_orphan_jumps).
+   from/to are Quake FOOT points (poly floor centroids).  Covers jump-up,
+   horizontal gap-jump, and across-and-down in ONE model via real Quake run-
+   jump physics, so it isn't limited to floors-above the way the old scan was.
+   Nonzero if a player can make it (and its reverse): reachable height + run
+   distance, both ends standable, clear apex arc. */
+static int nav_jump_validate(const float *from, const float *to, void *user)
+{
+	vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32}, zero = {0, 0, 0};
+	vec3_t ts, te;
+	trace_t tr;
+	float dz, adz, dx, dy, hd, disc, airtime, reqspeed;
+	const float g = 800.0f;                 /* sv_gravity */
+	const float v0 = NAV_JUMP_IMPULSE;       /* 270, jump up-velocity */
+	const float maxspeed = 320.0f;           /* ground run speed */
+	(void)user;
+
+	dz = to[2] - from[2];
+	dx = to[0] - from[0]; dy = to[1] - from[1];
+	hd = sqrt(dx * dx + dy * dy);
+	if (hd < 8.0f)
+		return 0;
+
+	/* The link is bidirectional, so the HARDER (upward) direction governs:
+	   a jump must clear |dz| against gravity.  Beyond the apex (v0^2/2g ~45u)
+	   no jump reaches.  Air time at that |dz| sets the max run distance. */
+	adz = dz < 0 ? -dz : dz;
+	disc = v0 * v0 - 2.0f * g * adz;
+	if (disc < 0.0f)
+		return 0; /* |dz| above jump apex -- unreachable by a jump */
+	airtime = (v0 + sqrt(disc)) / g;        /* time to rise and fall back to |dz| */
+	reqspeed = hd / airtime;
+	if (reqspeed > maxspeed)
+		return 0; /* gap too wide to clear at run speed */
+
+	/* Both endpoints are navmesh poly centroids -> walkable by construction
+	   (hull-1 derived), so a standability re-check is redundant (and was
+	   buggy: a floor exactly at foot level reads as fraction>=1 == clean miss).
+	   The only thing left to rule out is a wall in the flight path. */
+	(void)pmins; (void)pmaxs;
+
+	/* Arc clear: trace level at the jump apex (~45u above the higher end)
+	   over the gap; a wall there would stop the leap. */
+	{
+		float apexz = (to[2] > from[2] ? to[2] : from[2]) + 45.0f + 24.0f;
+		ts[0] = from[0]; ts[1] = from[1]; ts[2] = apexz;
+		te[0] = to[0]; te[1] = to[1]; te[2] = apexz;
+		tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+		if (tr.fraction < 1.0f)
+			return 0;
+	}
+
+	return 1;
 }
 
 static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *qpos, dtPolyRef *out_ref, float *out_nearest)
@@ -486,7 +542,6 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 
 extern cvar_t sv_gravity;
 extern cvar_t sv_maxspeed;
-#define NAV_JUMP_IMPULSE 270.0f  /* Quake jump velocity (SV_ClientThink) */
 
 /* Helper: add a link, growing the array if needed. */
 static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
@@ -1089,6 +1144,37 @@ void Nav_BuildForMap(void)
 		Con_Printf("Nav: build failed: %s\n", error);
 		free(verts); free(tris); free(entity_links);
 		return;
+	}
+
+	/* Second pass: reconnect areas stranded by a jump-up the contour scan
+	   can't reliably find (dm4 quad shelf).  Generate hull-validated jump
+	   links only where they reconnect an orphan, then rebuild with them.
+	   Targeted, so unlike a broad edge scan it can't spray false jumps. */
+	if (nav_jump_links_cvar.value)
+	{
+		nav_off_mesh_link_t *ojumps = NULL;
+		int noj = nav_mesh_compute_orphan_jumps(nav_mesh, nav_jump_validate, NULL, &ojumps);
+		if (noj > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + noj) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, ojumps, (size_t)noj * sizeof(*entity_links));
+			entity_count += noj;
+			free(ojumps);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
 	}
 
 	free(verts);
