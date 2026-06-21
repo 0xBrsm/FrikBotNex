@@ -1764,13 +1764,17 @@ static void nav_brush_center(edict_t *ent, float *pos)
 }
 
 /* Trigger brushes a bot fires just by stepping into them.  Counters and
-   relays are use-only — they have no touch and must be climbed instead. */
+   relays are use-only — they have no touch and must be climbed instead.
+   trigger_onlyregistered/changelevel are level-flow gates, NOT door openers:
+   chasing them sent bots across the start hub to "open" the registration gate
+   guarding the episode alcoves, where they pinned forever (and stepping into
+   the changelevel beyond would END the match).  Leave such gated items to
+   dead-end as unreachable so the picker rejects them. */
 static int nav_opener_walkthrough(const char *cn)
 {
 	return !strcmp(cn, "trigger_once")
 		|| !strcmp(cn, "trigger_multiple")
-		|| !strcmp(cn, "trigger_secret")
-		|| !strcmp(cn, "trigger_onlyregistered");
+		|| !strcmp(cn, "trigger_secret");
 }
 
 /* Climb the targetname chain from a blocked door to something a bot can
