@@ -791,6 +791,18 @@ static int nav_link_callback(
 					}
 				}
 
+				/* Never link a drop that lands in lava or slime: it's a suicide
+				   chute (dm4 green-armor ledge dropped bots into the lava once the
+				   192u cap reached it).  Water is survivable, gate only the deadly. */
+				{
+					vec3_t lc;
+					int lcont;
+					lc[0] = end[0]; lc[1] = end[1]; lc[2] = floors[fi] + 8.0f;
+					lcont = SV_PointContents(lc);
+					if (lcont == CONTENTS_LAVA || lcont == CONTENTS_SLIME)
+						continue;
+				}
+
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
 
 				/* Reverse: if drop height is within jump reach, also create
