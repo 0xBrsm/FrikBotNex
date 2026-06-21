@@ -383,6 +383,18 @@ void() bot_get =
 				if (vlen(pc) < 80)
 					self.b_wishdir = '0 0 0';
 			}
+			// A plat actively moving through this link's shaft: stepping
+			// toward it just grinds the bot against its side/underside
+			// (e1m7/e4m8 lift wells). Hold until it parks, then board.
+			// Moving is transient, so this can't become a standing freeze.
+			else if (bestpl != world && bestpd < 96
+				&& bestpl.velocity != '0 0 0')
+			{
+				pc = wp - self.origin;
+				pc_z = 0;
+				if (vlen(pc) < 96)
+					self.b_wishdir = '0 0 0';
+			}
 		}
 	}
 
