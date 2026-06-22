@@ -56,7 +56,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_WALKABLE_CLIMB           18.0f
 #define NAV_WALKABLE_RADIUS           0.0f
 #define NAV_MAX_EDGE_LEN            192.0f
-#define NAV_MAX_SIMPLIFICATION_ERROR  1.3f
+#define NAV_MAX_SIMPLIFICATION_ERROR  0.1f
 #define NAV_MIN_REGION_SIZE           2
 #define NAV_MERGE_REGION_SIZE        20
 #define NAV_MAX_VERTS_PER_POLY        6
