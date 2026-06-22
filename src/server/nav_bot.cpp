@@ -78,6 +78,13 @@ extern ddef_t *ED_FindGlobal(char *name);
    128u orphaned them from the mesh.  Reach deep enough to link those drops;
    the fall-column hull-truth + lane checks still gate each candidate. */
 #define NAV_DROP_HEIGHT_MAX        192.0f  /* max drop-down height */
+/* Rocket jump: the bot fires an RL at its feet while jumping for a big
+   upward boost a normal run-jump can't reach.  Only used for orphan ledges
+   above normal jump height; a single RJ clears ~250u up.  Horizontal reach
+   while gaining that height is modest -- keep it tight so RJ stays a
+   near-vertical last resort, never a substitute for a run-jump across. */
+#define NAV_RJ_HEIGHT_MAX          256.0f  /* max single-rocket-jump up height */
+#define NAV_RJ_HORIZ_MAX           128.0f  /* max horizontal while RJ-ing up */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
@@ -203,7 +210,23 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	   air time, and the apex arc must be wall-free. */
 	disc = v0 * v0 - 2.0f * g * adz;
 	if (disc < 0.0f)
+	{
+		/* Over a normal jump's reach.  A rocket jump can still get UP to a
+		   ledge (orphan higher than here) within the RJ envelope: the manual
+		   graphs tag exactly these edges AI_SUPER_JUMP.  Near-vertical only --
+		   keep horizontal tight so RJ never replaces a run-jump across.  The
+		   caller pairs this with a drop-out so the ledge isn't a one-way trap. */
+		if (dz > NAV_JUMP_HEIGHT_MAX && dz <= NAV_RJ_HEIGHT_MAX && hd <= NAV_RJ_HORIZ_MAX)
+		{
+			float topz = to[2] + 24.0f + 18.0f;
+			ts[0] = from[0]; ts[1] = from[1]; ts[2] = topz;
+			te[0] = to[0]; te[1] = to[1]; te[2] = topz;
+			tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+			if (tr.fraction >= 1.0f)
+				return AI_SUPER_JUMP;
+		}
 		return 0;
+	}
 	airtime = (v0 + sqrt(disc)) / g;
 	if (hd / airtime > maxspeed)
 		return 0;

@@ -888,7 +888,12 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					float adz = dz < 0 ? -dz : dz;
 					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
 					float hd = sqrtf(dx * dx + dy * dy);
-					if (adz > 48.0f) continue;
+					/* 48u is a run-jump's reach; allow up to a rocket-jump's
+					   reach so validate can offer an AI_SUPER_JUMP for orphan
+					   ledges above that.  validate still gates the physics, and
+					   cost prefers the cheaper walk/jump, so this only adds
+					   links for components nothing else could connect. */
+					if (adz > 256.0f) continue;
 					if (hd > 280.0f || hd < 8.0f) continue;
 					float cost = hd + adz;
 					if (cost >= bestcost) continue;
@@ -901,7 +906,39 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					}
 				}
 			}
-			if (bestType)
+			if (bestType == AI_SUPER_JUMP)
+			{
+				/* Rocket jump is one-way UP (the handler always launches the
+				   bot upward).  validate only returns it when bestEnd is the
+				   higher, orphan side, so emit start(low)->end(high) as the RJ
+				   and pair it with end(high)->start(low) as a drop-out, so the
+				   ledge is reachable AND escapable -- no one-way trap. */
+				nav_off_mesh_link_t up;
+				memset(&up, 0, sizeof(up));
+				up.start[0] = bestStart[0]; up.start[1] = bestStart[1]; up.start[2] = bestStart[2];
+				up.end[0] = bestEnd[0]; up.end[1] = bestEnd[1]; up.end[2] = bestEnd[2];
+				up.radius = 32.0f;
+				up.bidirectional = 0;
+				up.link_type = AI_SUPER_JUMP;
+				up.height_delta = up.end[2] - up.start[2];
+				up.required_speed = 0;
+				jumps.push_back(up);
+
+				nav_off_mesh_link_t down;
+				memset(&down, 0, sizeof(down));
+				down.start[0] = bestEnd[0]; down.start[1] = bestEnd[1]; down.start[2] = bestEnd[2];
+				down.end[0] = bestStart[0]; down.end[1] = bestStart[1]; down.end[2] = bestStart[2];
+				down.radius = 32.0f;
+				down.bidirectional = 0;
+				down.link_type = AI_DROP;
+				down.height_delta = down.end[2] - down.start[2];
+				down.required_speed = 0;
+				jumps.push_back(down);
+
+				conn[c] = 1;
+				progress = true;
+			}
+			else if (bestType)
 			{
 				nav_off_mesh_link_t lk;
 				memset(&lk, 0, sizeof(lk));
