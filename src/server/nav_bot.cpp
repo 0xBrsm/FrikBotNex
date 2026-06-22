@@ -77,7 +77,13 @@ extern ddef_t *ED_FindGlobal(char *name);
    ~800u), and whole lower regions are reached by dropping in.  Capping at
    128u orphaned them from the mesh.  Reach deep enough to link those drops;
    the fall-column hull-truth + lane checks still gate each candidate. */
-#define NAV_DROP_HEIGHT_MAX        192.0f  /* max drop-down height */
+#define NAV_DROP_HEIGHT_MAX        192.0f  /* max drop-down height (dry land) */
+/* Water negates fall damage, so a deep plunge into a pool is survivable and
+   common (dm3's -370 pool holds items).  Allow a much deeper drop ONLY when
+   the landing is underwater, and always pair it with an AI_SURFACE swim-out
+   so the bot can climb back to the ledge -- a deep drop-in with no exit is
+   the pit-trap that a blanket cap raise caused before. */
+#define NAV_WATER_DROP_HEIGHT_MAX  400.0f  /* max drop-down into water */
 /* Rocket jump: the bot fires an RL at its feet while jumping for a big
    upward boost a normal run-jump can't reach.  Only used for orphan ledges
    above normal jump height; a single RJ clears ~250u up.  Horizontal reach
@@ -587,7 +593,7 @@ static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
 	l->required_speed = speed;
 	l->wait_time = 0;
 	fprintf(stderr, "Nav: LINK %s start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f) dz=%.0f spd=%.0f\n",
-		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : "???",
+		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : type == 8 ? "SURF" : "???",
 		start[0], start[1], start[2], end[0], end[1], end[2], dz, speed);
 	(*n)++;
 }
@@ -680,7 +686,9 @@ static int nav_link_callback(
 		/* ---- Drops: find all floors below ---- */
 		{
 			float floors[8];
-			float min_z = mid[2] - NAV_DROP_HEIGHT_MAX;
+			/* Search as deep as a water plunge allows; each floor past the
+			   dry cap is kept only if it's underwater (gated below). */
+			float min_z = mid[2] - NAV_WATER_DROP_HEIGHT_MAX;
 			float max_z = mid[2] - NAV_DROP_HEIGHT_MIN;
 			int nfloors = 0;
 			/* Probe outward too: a thin unwalkable ridge at the boundary
@@ -709,6 +717,19 @@ static int nav_link_callback(
 				float drop_height = mid[2] - floors[fi];
 				if (drop_height < NAV_DROP_HEIGHT_MIN)
 					continue;
+
+				/* Past the dry-land cap, only a water landing is survivable
+				   (and escapable via the surface link); anything else is a
+				   killing fall or a dry pit-trap -- leave it unlinked. */
+				int deep_water_drop = 0;
+				if (drop_height > NAV_DROP_HEIGHT_MAX)
+				{
+					vec3_t wc;
+					wc[0] = mid[0]; wc[1] = mid[1]; wc[2] = floors[fi] + 24.0f;
+					if (SV_PointContents(wc) != CONTENTS_WATER)
+						continue;
+					deep_water_drop = 1;
+				}
 
 				/* Verify drop is physically possible: check that there's no solid
 				   span blocking the fall at a point outward from the edge.
@@ -884,6 +905,13 @@ static int nav_link_callback(
 				}
 
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
+
+				/* Deep water plunge: pair it with an AI_SURFACE swim-out so the
+				   pool isn't a one-way grave.  Only when the ledge sits nearly
+				   straight above the landing (the bot swims up and steps off);
+				   a far ledge would just nose the lip underwater. */
+				if (deep_water_drop && land_dist <= 48.0f)
+					nav_link_push(&links, &n, &cap, end, mid, AI_SURFACE, 0.0f, drop_height);
 
 				/* Reverse: if drop height is within jump reach, also create
 				   a jump link from the landing floor back up to the edge.
