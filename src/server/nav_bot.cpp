@@ -289,6 +289,7 @@ static int nav_build_attempted = 0;
 static struct model_s *nav_built_for_model = NULL;
 static cvar_t nav_enabled_cvar = {"nav_enabled", "0"};
 static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
+static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "1"};
 
 /* debug visualization state */
@@ -1214,6 +1215,36 @@ void Nav_BuildForMap(void)
 			memcpy(entity_links + entity_count, ojumps, (size_t)noj * sizeof(*entity_links));
 			entity_count += noj;
 			free(ojumps);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
+	}
+
+	/* Third pass: complete one-way connectivity.  Runs on the mesh that
+	   already has teleport/plat/orphan links, so it can see which areas can
+	   only be entered or only exited, and add the missing direction. */
+	if (nav_mesh != NULL && nav_directed_links_cvar.value)
+	{
+		nav_off_mesh_link_t *dlinks = NULL;
+		int nd = nav_mesh_compute_directed_links(nav_mesh, nav_link_validate, NULL, &dlinks);
+		if (nd > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + nd) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, dlinks, (size_t)nd * sizeof(*entity_links));
+			entity_count += nd;
+			free(dlinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -2453,6 +2484,7 @@ void Nav_RegisterBuiltins(void)
 
 	Cvar_RegisterVariable(&nav_enabled_cvar);
 	Cvar_RegisterVariable(&nav_jump_links_cvar);
+	Cvar_RegisterVariable(&nav_directed_links_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }
