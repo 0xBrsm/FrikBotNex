@@ -201,15 +201,19 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 			continue;
 
 		nav_mesh_nearest_result_t nra, nrb;
-		char nerr[64];
-		int fa = nav_mesh_find_nearest(mesh, map->wps[ai], &nra, nerr, sizeof(nerr));
-		int fb = nav_mesh_find_nearest(mesh, map->wps[bi], &nrb, nerr, sizeof(nerr));
+		char nerra[80], nerrb[80];
+		nerra[0] = nerrb[0] = 0;
+		int fa = nav_mesh_find_nearest(mesh, map->wps[ai], &nra, nerra, sizeof(nerra));
+		int fb = nav_mesh_find_nearest(mesh, map->wps[bi], &nrb, nerrb, sizeof(nerrb));
 
 		if (!fa || !fb)
 		{
 			miss_count++;
-			fprintf(stderr, "  MISS wp%d->wp%d%s%s\n", ai + 1, bi + 1,
-				fa ? "" : " (start off mesh)", fb ? "" : " (end off mesh)");
+			fprintf(stderr, "  MISS wp%d(%.0f,%.0f,%.0f)->wp%d(%.0f,%.0f,%.0f)%s%s [a:%s] [b:%s]\n",
+				ai + 1, map->wps[ai][0], map->wps[ai][1], map->wps[ai][2],
+				bi + 1, map->wps[bi][0], map->wps[bi][1], map->wps[bi][2],
+				fa ? "" : " (start off mesh)", fb ? "" : " (end off mesh)",
+				fa ? "ok" : nerra, fb ? "ok" : nerrb);
 			continue;
 		}
 
