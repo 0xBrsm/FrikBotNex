@@ -69,6 +69,46 @@ this notice in its entirety.
 .float sense_enemy_size;
 .float sense_friendly_block;
 
+// ---- Combat engagement ----
+
+// Arm the pin window: clocks bot_fight reads to time the no-progress
+// strikes that abandon a hopeless fight, and to keep a just-acquired
+// enemy from being dropped on the very next frame.
+void() bot_arm_pin =
+{
+	self._combat_pin = time + 2;
+	self._pin_org = self.origin;
+	self._pin_strikes = 0;
+};
+
+// Acquire e as the enemy and arm the combat clocks, the way
+// bot_find_enemy does — stale clocks make bot_fight drop the target.
+void(entity e) bot_engage_mover =
+{
+	self.enemy = e;
+	self.b_react_time = time;
+	self.b_combat_time = time;
+	bot_arm_pin();
+};
+
+// If a fresh traceline put a shootable mover (door/button with health)
+// in the lane and we aren't already fighting, gun it open. Returns
+// whether it engaged. Caller runs the traceline; we read trace_ent.
+float() bot_shoot_lane_mover =
+{
+	if (self.enemy)
+		return FALSE;
+	if (trace_ent != world
+		&& (trace_ent.classname == "door"
+			|| trace_ent.classname == "func_button")
+		&& trace_ent.health > 0 && trace_ent.takedamage)
+	{
+		bot_engage_mover(trace_ent);
+		return TRUE;
+	}
+	return FALSE;
+};
+
 // ---- Spatial awareness ----
 
 void() bot_sense_space =
@@ -440,21 +480,7 @@ void() bot_get =
 			&& self.b_wishdir != '0 0 0')
 		{
 			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
-			if (trace_ent != world
-				&& (trace_ent.classname == "door"
-					|| trace_ent.classname == "func_button")
-				&& trace_ent.health > 0 && trace_ent.takedamage)
-			{
-				self.enemy = trace_ent;
-				// arm the combat clocks like bot_find_enemy does —
-				// stale ones make bot_fight_style drop the door on
-				// the very next frame (e1m1: 1024 acquire/drop loops)
-				self.b_react_time = time;
-				self.b_combat_time = time;
-				self._combat_pin = time + 2;
-				self._pin_org = self.origin;
-				self._pin_strikes = 0;
-			}
+			bot_shoot_lane_mover();
 		}
 
 		// Shoulder probes: the steering corner can hug an obstacle the
@@ -526,17 +552,8 @@ void() bot_get =
 				pdir_z = 0;
 				pdir = normalize(pdir);
 				traceline(self.origin, self.origin + pdir * 64, TRUE, self);
-				if (trace_ent != world
-					&& (trace_ent.classname == "door"
-						|| trace_ent.classname == "func_button")
-					&& trace_ent.health > 0 && trace_ent.takedamage)
+				if (bot_shoot_lane_mover())
 				{
-					self.enemy = trace_ent;
-					self.b_react_time = time;
-					self.b_combat_time = time;
-					self._combat_pin = time + 2;
-					self._pin_org = self.origin;
-					self._pin_strikes = 0;
 					self._nav_pin_strikes = 0;
 					return;
 				}
@@ -557,7 +574,7 @@ void() bot_get =
 		}
 
 		local float stall_limit;
-		stall_limit = 1 / cvar("sys_ticrate");
+		stall_limit = 1 / sv_ticrate;
 		// lift links: zero XY progress is normal while waiting for and
 		// riding the plat — budget a full return + ride cycle (~8s)
 		// before declaring the goal dead
@@ -565,63 +582,18 @@ void() bot_get =
 			stall_limit = stall_limit * 8;
 		if (self._progress_stall > stall_limit)
 		{
-			// TEMP DEBUG: stall position dump
-			bprint("STALL ");
-			bprint(self.netname);
-			bprint(" at ");
-			bprint(vtos(self.origin));
-			bprint(" wp ");
-			bprint(vtos(wp));
-			bprint(" lt ");
-			bprint(ftos(link_type));
-			bprint(" wl ");
-			bprint(ftos(self.waterlevel));
-			bprint(" og ");
-			if (self.flags & FL_ONGROUND)
-				bprint("1");
-			else
-				bprint("0");
-			bprint(" tgt ");
-			bprint(self.target1.classname);
-			// blocker probe: what does a monster-aware trace hit ahead?
+			// Probe the lane: a monster-aware trace tells us what's ahead.
+			local vector bdir;
+			bdir = wp - self.origin;
+			bdir_z = 0;
+			bdir = normalize(bdir);
+			traceline(self.origin, self.origin + bdir * 48, FALSE, self);
+			// If it's a shootable mover, gun it open instead of
+			// abandoning. The stall>4 hook above misses this case:
+			// bouncing off the door keeps inching xy_dist closer,
+			// resetting the counter before it reaches 5.
+			if (bot_shoot_lane_mover())
 			{
-				local vector bdir;
-				bdir = wp - self.origin;
-				bdir_z = 0;
-				bdir = normalize(bdir);
-				traceline(self.origin, self.origin + bdir * 48, FALSE, self);
-				bprint(" blk ");
-				bprint(ftos(trace_fraction));
-				if (trace_ent != world)
-				{
-					bprint(" ");
-					bprint(trace_ent.classname);
-					bprint("/");
-					bprint(trace_ent.netname);
-					bprint(" hp ");
-					bprint(ftos(trace_ent.health));
-					bprint(" td ");
-					bprint(ftos(trace_ent.takedamage));
-				}
-			}
-			bprint("\n");
-			// The probe just told us what's in the lane — if it's a
-			// shootable mover, gun it open instead of abandoning. The
-			// stall>4 hook above misses this case: bouncing off the
-			// door keeps inching xy_dist closer, resetting the counter
-			// before it reaches 5 (e2m4 secret door, 81% stk; e1m6
-			// Max's button parked behind a shoot-door).
-			if (!self.enemy && trace_ent != world
-				&& (trace_ent.classname == "door"
-					|| trace_ent.classname == "func_button")
-				&& trace_ent.health > 0 && trace_ent.takedamage)
-			{
-				self.enemy = trace_ent;
-				self.b_react_time = time;
-				self.b_combat_time = time;
-				self._combat_pin = time + 2;
-				self._pin_org = self.origin;
-				self._pin_strikes = 0;
 				self._progress_stall = 0;
 				self._progress_best = 99999;
 				return;

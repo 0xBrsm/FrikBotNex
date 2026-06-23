@@ -788,6 +788,36 @@ static void nav_heightfield_bridge_small_gaps(
 		fprintf(stderr, "Nav: bridged %d tiny raster gaps before ledge filtering\n", fills_applied);
 }
 
+/* Build an off-mesh link; height_delta is implied by the endpoints and the
+   remaining fields default to zero. */
+static nav_off_mesh_link_t nav_make_link(const float *start, const float *end,
+	int type, int bidirectional, float radius)
+{
+	nav_off_mesh_link_t lk;
+	memset(&lk, 0, sizeof(lk));
+	lk.start[0] = start[0]; lk.start[1] = start[1]; lk.start[2] = start[2];
+	lk.end[0] = end[0]; lk.end[1] = end[1]; lk.end[2] = end[2];
+	lk.radius = radius;
+	lk.bidirectional = bidirectional;
+	lk.link_type = type;
+	lk.height_delta = end[2] - start[2];
+	lk.required_speed = 0;
+	return lk;
+}
+
+/* Quake-coord centroids for the ground polys [0, ground). */
+static void nav_collect_ground_centroids(const dtMeshTile *tile, int ground,
+	std::vector<float> &q)
+{
+	q.resize((size_t)ground * 3);
+	for (int i = 0; i < ground; i++)
+	{
+		float c[3];
+		nav_mesh_poly_center(tile, &tile->polys[i], c);
+		nav_recast_to_quake(c, &q[i * 3]);
+	}
+}
+
 extern "C" int nav_mesh_compute_orphan_jumps(
 	nav_mesh_runtime_t *nav,
 	nav_jump_validate_fn validate, void *user,
@@ -845,19 +875,8 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 		if (csize[c] > csize[largest]) largest = (int)c;
 
 	/* Quake-coord poly centroids. */
-	std::vector<float> q(ground * 3);
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		float c[3] = {0, 0, 0};
-		for (int v = 0; v < p->vertCount; v++)
-		{
-			const float *vp = &tile->verts[p->verts[v] * 3];
-			c[0] += vp[0]; c[1] += vp[1]; c[2] += vp[2];
-		}
-		c[0] /= p->vertCount; c[1] /= p->vertCount; c[2] /= p->vertCount;
-		nav_recast_to_quake(c, &q[i * 3]);
-	}
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
 
 	/* Connect components to the main mesh in WAVES (Prim-style growth): a
 	   cluster of orphans walkably/jumpably chained off the main area links one
@@ -913,43 +932,15 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 				   higher, orphan side, so emit start(low)->end(high) as the RJ
 				   and pair it with end(high)->start(low) as a drop-out, so the
 				   ledge is reachable AND escapable -- no one-way trap. */
-				nav_off_mesh_link_t up;
-				memset(&up, 0, sizeof(up));
-				up.start[0] = bestStart[0]; up.start[1] = bestStart[1]; up.start[2] = bestStart[2];
-				up.end[0] = bestEnd[0]; up.end[1] = bestEnd[1]; up.end[2] = bestEnd[2];
-				up.radius = 32.0f;
-				up.bidirectional = 0;
-				up.link_type = AI_SUPER_JUMP;
-				up.height_delta = up.end[2] - up.start[2];
-				up.required_speed = 0;
-				jumps.push_back(up);
-
-				nav_off_mesh_link_t down;
-				memset(&down, 0, sizeof(down));
-				down.start[0] = bestEnd[0]; down.start[1] = bestEnd[1]; down.start[2] = bestEnd[2];
-				down.end[0] = bestStart[0]; down.end[1] = bestStart[1]; down.end[2] = bestStart[2];
-				down.radius = 32.0f;
-				down.bidirectional = 0;
-				down.link_type = AI_DROP;
-				down.height_delta = down.end[2] - down.start[2];
-				down.required_speed = 0;
-				jumps.push_back(down);
-
+				jumps.push_back(nav_make_link(bestStart, bestEnd, AI_SUPER_JUMP, 0, 32.0f));
+				jumps.push_back(nav_make_link(bestEnd, bestStart, AI_DROP, 0, 32.0f));
 				conn[c] = 1;
 				progress = true;
 			}
 			else if (bestType)
 			{
-				nav_off_mesh_link_t lk;
-				memset(&lk, 0, sizeof(lk));
-				lk.start[0] = bestStart[0]; lk.start[1] = bestStart[1]; lk.start[2] = bestStart[2];
-				lk.end[0] = bestEnd[0]; lk.end[1] = bestEnd[1]; lk.end[2] = bestEnd[2];
-				lk.radius = 32.0f;
-				lk.bidirectional = 1;                /* walk + jump are both 2-way */
-				lk.link_type = bestType;
-				lk.height_delta = lk.end[2] - lk.start[2];
-				lk.required_speed = 0;
-				jumps.push_back(lk);
+				/* walk + jump are both 2-way */
+				jumps.push_back(nav_make_link(bestStart, bestEnd, bestType, 1, 32.0f));
 				conn[c] = 1;
 				progress = true;
 			}
@@ -1075,19 +1066,8 @@ int nav_mesh_compute_directed_links(
 	}
 
 	/* Quake-coord centroids. */
-	std::vector<float> q(ground * 3);
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		float c[3] = {0, 0, 0};
-		for (int v = 0; v < p->vertCount; v++)
-		{
-			const float *vp = &tile->verts[p->verts[v] * 3];
-			c[0] += vp[0]; c[1] += vp[1]; c[2] += vp[2];
-		}
-		c[0] /= p->vertCount; c[1] /= p->vertCount; c[2] /= p->vertCount;
-		nav_recast_to_quake(c, &q[i * 3]);
-	}
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
 
 	std::vector<nav_off_mesh_link_t> links;
 	/* For each off-main GA-comp connected only one way, add the missing
@@ -1144,18 +1124,8 @@ int nav_mesh_compute_directed_links(
 			}
 		}
 		if (bestType)
-		{
-			nav_off_mesh_link_t lk;
-			memset(&lk, 0, sizeof(lk));
-			lk.start[0] = bestS[0]; lk.start[1] = bestS[1]; lk.start[2] = bestS[2];
-			lk.end[0] = bestE[0]; lk.end[1] = bestE[1]; lk.end[2] = bestE[2];
-			lk.radius = 32.0f;
-			lk.bidirectional = 0;            /* only the missing direction */
-			lk.link_type = bestType;
-			lk.height_delta = lk.end[2] - lk.start[2];
-			lk.required_speed = 0;
-			links.push_back(lk);
-		}
+			/* only the missing direction */
+			links.push_back(nav_make_link(bestS, bestE, bestType, 0, 32.0f));
 	}
 
 	if (links.empty())

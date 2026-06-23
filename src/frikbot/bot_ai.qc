@@ -398,14 +398,7 @@ void() BotAI =
 		local vector _oc;
 		_oc = (self.target1.absmin + self.target1.absmax) * 0.5;
 		if (vlen(_oc - self.origin) < 256)
-		{
-			self.enemy = self.target1;
-			self.b_react_time = time;
-			self.b_combat_time = time;
-			self._combat_pin = time + 2;
-			self._pin_org = self.origin;
-			self._pin_strikes = 0;
-		}
+			bot_engage_mover(self.target1);
 	}
 
 	// --- act: fight, navigate, or roam ---

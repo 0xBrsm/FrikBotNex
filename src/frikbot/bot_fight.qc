@@ -372,9 +372,7 @@ void() bot_find_enemy =
 	if (self.enemy)
 	{
 		self.b_combat_time = time;
-		self._combat_pin = time + 2;
-		self._pin_org = self.origin;
-		self._pin_strikes = 0;
+		bot_arm_pin();
 	}
 
 	// ambush first-strike

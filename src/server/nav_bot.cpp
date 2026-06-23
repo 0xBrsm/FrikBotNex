@@ -2184,9 +2184,10 @@ static void PF_nav_find_goal(void)
 								memcpy(best_goal_rc, onear, sizeof(float) * 3);
 							}
 							routed = 1;
-							fprintf(stderr, "  GOAL %s via opener %s polys=%d cost=%.0f\n",
-								pr_strings + (int)it->v.classname,
-								pr_strings + (int)opener->v.classname, ocount, cost);
+							if (nav_debug_cvar.value)
+								fprintf(stderr, "  GOAL %s via opener %s polys=%d cost=%.0f\n",
+									pr_strings + (int)it->v.classname,
+									pr_strings + (int)opener->v.classname, ocount, cost);
 						}
 					}
 				}
@@ -2201,6 +2202,7 @@ static void PF_nav_find_goal(void)
 		}
 
 		/* Log each reachable item's cost breakdown */
+		if (nav_debug_cvar.value)
 		{
 			float qdist = sqrtf(
 				(pos[0]-it->v.origin[0])*(pos[0]-it->v.origin[0]) +
