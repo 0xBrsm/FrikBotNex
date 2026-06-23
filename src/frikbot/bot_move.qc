@@ -126,53 +126,43 @@ float(float n) bot_sqrt =
 	return r;
 };
 
-// Mid-flight guidance to land the bot on `corner`, jumping OR falling. Solve
-// the ballistic arc for when it next descends through the landing height, find
-// the forward speed that arrives exactly on the corner in that time, then:
-//   - always cancel sideways drift (steer the velocity back onto the line), and
-//   - brake the forward speed DOWN to that arrival speed, but never below it.
-// SV_AirAccelerate gives hard braking (~160ups/frame against our motion) but
-// only ~30 forward, so we can only shed excess speed, not add it — which is
-// exactly right: overshooting a drop sails it past the ledge (brake good),
-// undershooting a jump drops it into the gap it's clearing (brake bad). Only
-// ever shedding excess does both. The launch supplies the speed; we aim it.
+// Mid-flight guidance for a drop. Steer toward the horizontal velocity that
+// puts the bot on `corner` when its arc descends back to that height.
+// SV_AirAccelerate brakes hard against our motion (~160ups/frame) but only
+// nudges forward at 30 — so this erases an overshoot to stick a near landing
+// the bot would otherwise sail over, while a too-slow arc still gets the
+// forward push. Drops only: a jump must KEEP its launch momentum to clear the
+// gap, and braking it just drops the bot short into a re-jump loop.
 void(vector corner) bot_air_guide =
 {
-	local vector to_wp, hv, fwd, desired, steer;
-	local float dz, disc, t, gap, fwd_speed, want_fwd;
+	local vector to_wp, hv, desired, steer;
+	local float dz, disc, t, gap;
 
 	to_wp = corner - self.origin;
 	to_wp_z = 0;
 	gap = vlen(to_wp);
-	hv = self.velocity;
-	hv_z = 0;
 
+	// time until the arc falls back through the landing height
 	dz = corner_z - self.origin_z;
 	disc = self.velocity_z * self.velocity_z - 2 * sv_gravity * dz;
-	if (gap < 1 || disc < 0)
+	if (disc < 0)
 	{
-		// over the spot, or the arc never reaches that height: kill drift
-		// if we're on top of it, otherwise just hold a heading for it
-		if (gap > 1)
+		// arc never reaches that height — just hold course for the corner
+		if (gap > 0.1)
 			self.b_wishdir = normalize(to_wp);
-		else if (vlen(hv) > 1)
-			self.b_wishdir = normalize(hv) * -1;
-		else
-			self.b_wishdir = '0 0 0';
 		return;
 	}
-
 	t = (self.velocity_z + bot_sqrt(disc)) / sv_gravity;
 	if (t < 0.05)
 		t = 0.05;
-	fwd = normalize(to_wp);
-	fwd_speed = hv * fwd;          // current speed toward the corner
-	want_fwd = gap / t;            // speed that lands us on it
-	if (want_fwd > fwd_speed)
-		want_fwd = fwd_speed;     // never brake below what carries us across
 
-	desired = fwd * want_fwd;     // arrival velocity: on-line, no overshoot
-	steer = desired - hv;         // cancels drift, sheds any excess forward
+	hv = self.velocity;
+	hv_z = 0;
+	if (gap > 1)
+		desired = normalize(to_wp) * (gap / t);
+	else
+		desired = '0 0 0';
+	steer = desired - hv;
 	if (vlen(steer) > 1)
 		self.b_wishdir = normalize(steer);
 	else
@@ -412,11 +402,7 @@ void() bot_get =
 		jflat = wp - self.origin;
 		jflat_z = 0;
 		jdist = vlen(jflat);
-		if (self.waterlevel < 2 && !(self.flags & FL_ONGROUND))
-			// In the air: guide the arc onto the landing (sheds only excess
-			// speed, so the gap-clearing momentum is preserved).
-			bot_air_guide(wp);
-		else if (jdist > 0.1)
+		if (jdist > 0.1)
 			self.b_wishdir = normalize(jflat);
 
 		// Don't commit the jump into a blocked lane: a bot body (or
