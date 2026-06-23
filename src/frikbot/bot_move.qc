@@ -109,6 +109,66 @@ float() bot_shoot_lane_mover =
 	return FALSE;
 };
 
+// Newton's-method square root — QuakeC has no sqrt builtin and vlen only
+// roots a sum of squares. Six iterations from 1.0 cover the fall-time math.
+float(float n) bot_sqrt =
+{
+	local float r, i;
+	if (n <= 0)
+		return 0;
+	r = 1;
+	i = 0;
+	while (i < 6)
+	{
+		r = (r + n / r) * 0.5;
+		i = i + 1;
+	}
+	return r;
+};
+
+// Mid-flight guidance for a drop. Steer toward the horizontal velocity that
+// puts the bot on `corner` when its arc descends back to that height.
+// SV_AirAccelerate brakes hard against our motion (~160ups/frame) but only
+// nudges forward at 30 — so this erases an overshoot to stick a near landing
+// the bot would otherwise sail over, while a too-slow arc still gets the
+// forward push. Drops only: a jump must KEEP its launch momentum to clear the
+// gap, and braking it just drops the bot short into a re-jump loop.
+void(vector corner) bot_air_guide =
+{
+	local vector to_wp, hv, desired, steer;
+	local float dz, disc, t, gap;
+
+	to_wp = corner - self.origin;
+	to_wp_z = 0;
+	gap = vlen(to_wp);
+
+	// time until the arc falls back through the landing height
+	dz = corner_z - self.origin_z;
+	disc = self.velocity_z * self.velocity_z - 2 * sv_gravity * dz;
+	if (disc < 0)
+	{
+		// arc never reaches that height — just hold course for the corner
+		if (gap > 0.1)
+			self.b_wishdir = normalize(to_wp);
+		return;
+	}
+	t = (self.velocity_z + bot_sqrt(disc)) / sv_gravity;
+	if (t < 0.05)
+		t = 0.05;
+
+	hv = self.velocity;
+	hv_z = 0;
+	if (gap > 1)
+		desired = normalize(to_wp) * (gap / t);
+	else
+		desired = '0 0 0';
+	steer = desired - hv;
+	if (vlen(steer) > 1)
+		self.b_wishdir = normalize(steer);
+	else
+		self.b_wishdir = '0 0 0';
+};
+
 // ---- Spatial awareness ----
 
 void() bot_sense_space =
@@ -310,21 +370,26 @@ void() bot_get =
 	// off-mesh link actions
 	if (link_type == 3) // AI_DROP
 	{
-		// Walk off the ledge at full speed. The link's required_speed is
-		// the MINIMUM horizontal speed to clear the gap — never throttle
-		// below it (and Quake friction freezes anything under ~100 ups).
-		// Flatten steering so the corner's -z doesn't kill horizontal speed.
-		local vector flat_to_wp;
-
-		flat_to_wp = wp - self.origin;
-		// swimming: keep the vertical component (feet-referenced) — the
-		// drop "edge" is underwater and the bot must swim to the link end
-		if (self.waterlevel < 2)
-			flat_to_wp_z = 0;
+		if (self.waterlevel < 2 && !(self.flags & FL_ONGROUND))
+		{
+			// Airborne: guide the landing onto the corner.
+			bot_air_guide(wp);
+		}
 		else
-			flat_to_wp_z = flat_to_wp_z + 24;
-		if (vlen(flat_to_wp) > 0.1)
-			self.b_wishdir = normalize(flat_to_wp);
+		{
+			// Run off the ledge toward the corner. Flatten steering so the
+			// corner's -z doesn't starve horizontal speed; swimming keeps
+			// the vertical (feet-referenced) to swim to an underwater link.
+			local vector flat_to_wp;
+
+			flat_to_wp = wp - self.origin;
+			if (self.waterlevel < 2)
+				flat_to_wp_z = 0;
+			else
+				flat_to_wp_z = flat_to_wp_z + 24;
+			if (vlen(flat_to_wp) > 0.1)
+				self.b_wishdir = normalize(flat_to_wp);
+		}
 	}
 	else if (link_type == 2) // AI_JUMP
 	{
