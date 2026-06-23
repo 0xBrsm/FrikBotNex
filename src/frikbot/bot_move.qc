@@ -418,7 +418,23 @@ void() bot_get =
 	}
 	else if (link_type == 7) // AI_SUPER_JUMP
 	{
-		if (self.weapon != 32)
+		// No launcher, no rocket jump. Without it the bot just spams a
+		// weapon switch that can never land (impulse 7 to a gun it doesn't
+		// own) and grinds the link forever (dm2: bots pinned 90%+ under an
+		// RJ-only ledge). Bail on the goal — the area's rocket-only items
+		// go unwanted instead of fatal, and pathing falls back to a route
+		// the bot can actually walk.
+		if (!(self.items & IT_ROCKET_LAUNCHER))
+		{
+			if (self.target1.flags & FL_ITEM)
+			{
+				self._failed_goal = self.target1;
+				self._failed_goal_time = time + 30;
+			}
+			self.target1 = world;
+			return;
+		}
+		if (self.weapon != IT_ROCKET_LAUNCHER)
 			self.impulse = 7;
 		else if (self.flags & FL_ONGROUND)
 		{
@@ -628,7 +644,7 @@ void() bot_get =
 				self._nav_pin_strikes = 0;
 				self._progress_stall = 0;
 				self._progress_best = 99999;
-				if (self.target1.flags & FL_ITEM)
+				if (self.target1 != world && self.target1 != self)
 				{
 					self._failed_goal = self.target1;
 					self._failed_goal_time = time + 10;
@@ -682,9 +698,11 @@ void() bot_get =
 			self._progress_stall = 0;
 			self._progress_best = 99999;
 			// Cool the goal down: the scorer is deterministic, so an
-			// immediate re-pick chooses the same goal and re-creates
-			// the same jam (head-on bot deadlocks, unreachable perches).
-			if (self.target1.flags & FL_ITEM)
+			// immediate re-pick chooses the same goal and re-creates the
+			// same jam. Cool ANY real goal, not just items — a func_button
+			// opener the bot can't reach is re-picked every frame otherwise
+			// (dm2: a crowd pinned under one touch-button).
+			if (self.target1 != world && self.target1 != self)
 			{
 				self._failed_goal = self.target1;
 				self._failed_goal_time = time + 10;

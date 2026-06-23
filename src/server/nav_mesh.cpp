@@ -917,6 +917,13 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					float cost = hd + adz;
 					if (cost >= bestcost) continue;
 					int t = validate(qm, qo, user);
+					/* Don't connect an orphan by rocket jump: RJ is unreliable
+					   even for bots that own the launcher (they grind the link),
+					   and impossible for those that don't.  Leave an RJ-only
+					   area disconnected — bots ignore it instead of pinning
+					   under it (dm2 sunken ledge: bots stuck 90%+). */
+					if (t == AI_SUPER_JUMP)
+						continue;
 					if (t)
 					{
 						bestcost = cost; bestType = t;
@@ -925,19 +932,7 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					}
 				}
 			}
-			if (bestType == AI_SUPER_JUMP)
-			{
-				/* Rocket jump is one-way UP (the handler always launches the
-				   bot upward).  validate only returns it when bestEnd is the
-				   higher, orphan side, so emit start(low)->end(high) as the RJ
-				   and pair it with end(high)->start(low) as a drop-out, so the
-				   ledge is reachable AND escapable -- no one-way trap. */
-				jumps.push_back(nav_make_link(bestStart, bestEnd, AI_SUPER_JUMP, 0, 32.0f));
-				jumps.push_back(nav_make_link(bestEnd, bestStart, AI_DROP, 0, 32.0f));
-				conn[c] = 1;
-				progress = true;
-			}
-			else if (bestType)
+			if (bestType)
 			{
 				/* walk + jump are both 2-way */
 				jumps.push_back(nav_make_link(bestStart, bestEnd, bestType, 1, 32.0f));
@@ -1107,6 +1102,12 @@ int nav_mesh_compute_directed_links(
 				const float *from = need_in ? qm : qo;
 				const float *to   = need_in ? qo : qm;
 				int type = validate(from, to, user);
+				/* Never restore one-way connectivity with a rocket jump: bots
+				   grind RJ links (they can't reliably execute them, or own no
+				   launcher), so an area reachable only by RJ is a trap, not a
+				   fix.  Leave it one-way and let it stay that way. */
+				if (type == AI_SUPER_JUMP)
+					continue;
 				if (!type)
 				{
 					/* validate only models level/up moves.  A downward move
