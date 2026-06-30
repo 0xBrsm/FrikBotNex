@@ -290,6 +290,7 @@ static struct model_s *nav_built_for_model = NULL;
 static cvar_t nav_enabled_cvar = {"nav_enabled", "0"};
 static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
 static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
+static cvar_t nav_gap_jumps_cvar = {"nav_gap_jumps", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "1"};
 
 /* debug visualization state */
@@ -1245,6 +1246,37 @@ void Nav_BuildForMap(void)
 			memcpy(entity_links + entity_count, dlinks, (size_t)nd * sizeof(*entity_links));
 			entity_count += nd;
 			free(dlinks);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
+	}
+
+	/* Fourth pass: bridge local connectivity gaps.  Runs last, on the mesh
+	   with every other link in place, so its findPath gate sees the real
+	   graph and only adds a run-jump where two ledges still have no route
+	   between them (dm3 wp62->wp63). */
+	if (nav_mesh != NULL && nav_gap_jumps_cvar.value)
+	{
+		nav_off_mesh_link_t *glinks = NULL;
+		int ng = nav_mesh_compute_gap_jumps(nav_mesh, nav_link_validate, NULL, &glinks);
+		if (ng > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + ng) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, glinks, (size_t)ng * sizeof(*entity_links));
+			entity_count += ng;
+			free(glinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -2487,6 +2519,7 @@ void Nav_RegisterBuiltins(void)
 	Cvar_RegisterVariable(&nav_enabled_cvar);
 	Cvar_RegisterVariable(&nav_jump_links_cvar);
 	Cvar_RegisterVariable(&nav_directed_links_cvar);
+	Cvar_RegisterVariable(&nav_gap_jumps_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }

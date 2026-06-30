@@ -1140,6 +1140,133 @@ int nav_mesh_compute_directed_links(
 	return (int)links.size();
 }
 
+/* Post-build pass: bridge LOCAL connectivity gaps with run-jumps.  The
+   orphan pass joins areas with no connection at all; the directed pass
+   completes one-way areas.  This one handles two walkable patches each
+   connected to the main mesh independently but NOT to each other -- two
+   ledges reachable from below by their own drops/jumps, with no edge
+   between them (dm3 wp62->wp63).  Their waypoint edge paths PARTIAL even
+   though both ends mesh and both reach main.
+
+   Candidates: cross-ground-component poly pairs within a run-jump's reach.
+   GATE: add the jump ONLY when no direct mesh path between them exists
+   today (findPath returns no full path).  Every link is then NEW
+   reachability, never a redundant shortcut over an existing route -- the
+   shortcut jumps that historically sprayed false links and regressed
+   behavior.  Run-jumps only (no RJ: bots grind it) and bidirectional (a
+   run-jump clears both ways, so it can't strand a bot). */
+int nav_mesh_compute_gap_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links)
+{
+	*out_links = nullptr;
+	if (navmesh == nullptr || navmesh->navmesh == nullptr
+		|| navmesh->query == nullptr || validate == nullptr)
+		return 0;
+	dtNavMesh *mesh = navmesh->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return 0;
+	const int ground = tile->header->offMeshBase;
+	if (ground <= 0)
+		return 0;
+
+	/* Ground-adjacency components (ground<->ground links only): contiguous
+	   walkable patches.  Same construction as the directed pass. */
+	std::vector<int> ga(ground);
+	for (int i = 0; i < ground; i++) ga[i] = i;
+	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground) ga[gf(i)] = gf((int)np);
+		}
+	}
+	std::vector<int> gacomp(ground);
+	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
+
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
+
+	const dtPolyRef base = mesh->getPolyRefBase(tile);
+	dtQueryFilter filter;
+	nav_mesh_setup_filter(&filter);
+
+	/* One bridge per pair of patches, not per poly: linear-scanned seen-list
+	   (component count is small, links fewer still). */
+	std::vector<int> seenLo, seenHi;
+	auto pair_seen = [&](int x, int y) {
+		int lo = x < y ? x : y, hi = x < y ? y : x;
+		for (size_t s = 0; s < seenLo.size(); s++)
+			if (seenLo[s] == lo && seenHi[s] == hi) return true;
+		return false;
+	};
+
+	std::vector<nav_off_mesh_link_t> links;
+	for (int a = 0; a < ground; a++)
+	{
+		if (tile->polys[a].flags == 0) continue; /* disabled sliver (island cull) */
+
+		/* Cheapest cross-patch poly within run-jump reach.  Horizontal cap
+		   216u matches the validator's window; vertical cap 48u brackets a
+		   run-jump's apex (~45u) -- validate() does the exact physics. */
+		float bestcost = 1e9f; int bestB = -1;
+		for (int b = 0; b < ground; b++)
+		{
+			if (tile->polys[b].flags == 0) continue;
+			if (gacomp[a] == gacomp[b]) continue;
+			const float *qa = &q[a * 3], *qb = &q[b * 3];
+			float dx = qa[0]-qb[0], dy = qa[1]-qb[1], dz = qa[2]-qb[2];
+			float hd = sqrtf(dx*dx + dy*dy);
+			float adz = dz < 0 ? -dz : dz;
+			if (hd < 8.0f || hd > 216.0f) continue;
+			if (adz > 48.0f) continue;
+			float cost = hd + adz;
+			if (cost < bestcost) { bestcost = cost; bestB = b; }
+		}
+		if (bestB < 0) continue;
+		if (pair_seen(gacomp[a], gacomp[bestB])) continue;
+
+		const float *qa = &q[a * 3], *qb = &q[bestB * 3];
+
+		/* A genuine run-jump both ways -- validate gates the apex arc and
+		   the harder (upward) direction.  Reject WALK/SUPER_JUMP/DROP/none. */
+		if (validate(qa, qb, user) != AI_JUMP)
+			continue;
+
+		/* Connectivity gate: skip if a direct mesh path already exists --
+		   adding it would be a redundant shortcut.  A PARTIAL/failed path
+		   means the two ledges have no route between them today. */
+		float ra[3], rb[3];
+		dtPolyRef path[256]; int pc = 0;
+		nav_quake_to_recast(qa, ra);
+		nav_quake_to_recast(qb, rb);
+		dtStatus st = navmesh->query->findPath(base | (dtPolyRef)a, base | (dtPolyRef)bestB,
+			ra, rb, &filter, path, &pc, 256);
+		if (!dtStatusFailed(st) && !dtStatusDetail(st, DT_PARTIAL_RESULT) && pc > 0)
+			continue;
+
+		links.push_back(nav_make_link(qa, qb, AI_JUMP, 1, 32.0f));
+		seenLo.push_back(gacomp[a] < gacomp[bestB] ? gacomp[a] : gacomp[bestB]);
+		seenHi.push_back(gacomp[a] < gacomp[bestB] ? gacomp[bestB] : gacomp[a]);
+	}
+
+	if (links.empty())
+		return 0;
+	nav_off_mesh_link_t *outp = (nav_off_mesh_link_t *)malloc(links.size() * sizeof(nav_off_mesh_link_t));
+	if (outp == nullptr)
+		return 0;
+	memcpy(outp, links.data(), links.size() * sizeof(nav_off_mesh_link_t));
+	*out_links = outp;
+	fprintf(stderr, "Nav: computed %d gap-bridging jump links\n", (int)links.size());
+	return (int)links.size();
+}
+
 /* Disable polys not connected to the largest mesh component.
    Hull-1 extraction emits sliver floors (lintels, beams) that bots
    reseed onto and then roam forever inside a 1-poly island.  Traversal

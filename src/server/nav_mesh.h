@@ -273,6 +273,16 @@ int nav_mesh_compute_directed_links(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
+/* Post-build pass: bridge local connectivity gaps -- two walkable patches
+   each reachable from main but not from each other -- with bidirectional
+   run-jumps.  Adds a jump ONLY where no direct mesh path exists, so every
+   link is new reachability, never a redundant shortcut.  Fills *out_links
+   (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_gap_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,
