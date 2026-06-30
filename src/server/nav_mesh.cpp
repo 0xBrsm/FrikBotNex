@@ -1267,6 +1267,134 @@ int nav_mesh_compute_gap_jumps(
 	return (int)links.size();
 }
 
+/* Post-build pass: rocket-jump links.  The manual graphs tag a few high
+   ledges AI_SUPER_JUMP -- reachable only by firing a rocket at your feet
+   mid-jump for a boost a run-jump can't make.  The orphan and directed
+   passes deliberately REFUSE rocket jumps: an area reachable ONLY by RJ
+   traps a bot that owns no launcher (it grinds the link forever).  This
+   pass sidesteps that trap with a strict safety gate -- it adds a one-way
+   RJ-UP only when the high end can ALREADY get back down by some existing
+   route (findPath high->low succeeds), so the RJ is a bonus up-route for
+   launcher-owning bots, never the sole access.  A bot without the rocket
+   launcher abandons the goal (bot_move) rather than pinning.
+
+   validate() does the RJ envelope physics (up past run-jump reach but
+   within a single rocket's lift, horizontal tight).  Directional (low->high
+   only): a rocket jump can't go down, and the return path already exists. */
+int nav_mesh_compute_rocket_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links)
+{
+	*out_links = nullptr;
+	if (navmesh == nullptr || navmesh->navmesh == nullptr
+		|| navmesh->query == nullptr || validate == nullptr)
+		return 0;
+	dtNavMesh *mesh = navmesh->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return 0;
+	const int ground = tile->header->offMeshBase;
+	if (ground <= 0)
+		return 0;
+
+	std::vector<int> ga(ground);
+	for (int i = 0; i < ground; i++) ga[i] = i;
+	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground) ga[gf(i)] = gf((int)np);
+		}
+	}
+	std::vector<int> gacomp(ground);
+	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
+
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
+
+	const dtPolyRef base = mesh->getPolyRefBase(tile);
+	dtQueryFilter filter;
+	nav_mesh_setup_filter(&filter);
+
+	std::vector<int> seenLo, seenHi;
+	auto pair_seen = [&](int x, int y) {
+		int lo = x < y ? x : y, hi = x < y ? y : x;
+		for (size_t s = 0; s < seenLo.size(); s++)
+			if (seenLo[s] == lo && seenHi[s] == hi) return true;
+		return false;
+	};
+
+	std::vector<nav_off_mesh_link_t> links;
+	for (int lo = 0; lo < ground; lo++)
+	{
+		if (tile->polys[lo].flags == 0) continue;
+
+		/* Cheapest higher cross-patch poly inside the RJ-up envelope:
+		   up past a run-jump's apex (48u) but within one rocket's lift
+		   (256u), horizontal tight (128u) -- validate() does the exact
+		   physics and overhead-clearance. */
+		float bestcost = 1e9f; int bestHi = -1;
+		for (int hi = 0; hi < ground; hi++)
+		{
+			if (tile->polys[hi].flags == 0) continue;
+			if (gacomp[lo] == gacomp[hi]) continue;
+			const float *ql = &q[lo * 3], *qh = &q[hi * 3];
+			float dz = qh[2] - ql[2];
+			if (dz <= 48.0f || dz > 256.0f) continue;
+			float dx = qh[0]-ql[0], dy = qh[1]-ql[1];
+			float hd = sqrtf(dx*dx + dy*dy);
+			if (hd < 8.0f || hd > 128.0f) continue;
+			float cost = hd + dz;
+			if (cost < bestcost) { bestcost = cost; bestHi = hi; }
+		}
+		if (bestHi < 0) continue;
+		if (pair_seen(gacomp[lo], gacomp[bestHi])) continue;
+
+		const float *ql = &q[lo * 3], *qh = &q[bestHi * 3];
+
+		if (validate(ql, qh, user) != AI_SUPER_JUMP)
+			continue;
+
+		float rl[3], rh[3];
+		dtPolyRef path[256]; int pc = 0;
+		nav_quake_to_recast(ql, rl);
+		nav_quake_to_recast(qh, rh);
+
+		/* New up-access: skip if the bot can already reach the high ledge
+		   (an RJ shortcut over an existing climb just invites grinding). */
+		dtStatus up = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)bestHi,
+			rl, rh, &filter, path, &pc, 256);
+		if (!dtStatusFailed(up) && !dtStatusDetail(up, DT_PARTIAL_RESULT) && pc > 0)
+			continue;
+
+		/* No-trap gate: the high end must ALREADY get back down some other
+		   way, so the one-way RJ-up can never strand a bot up top. */
+		dtStatus down = navmesh->query->findPath(base | (dtPolyRef)bestHi, base | (dtPolyRef)lo,
+			rh, rl, &filter, path, &pc, 256);
+		if (dtStatusFailed(down) || dtStatusDetail(down, DT_PARTIAL_RESULT) || pc < 1)
+			continue;
+
+		links.push_back(nav_make_link(ql, qh, AI_SUPER_JUMP, 0, 32.0f));
+		seenLo.push_back(gacomp[lo] < gacomp[bestHi] ? gacomp[lo] : gacomp[bestHi]);
+		seenHi.push_back(gacomp[lo] < gacomp[bestHi] ? gacomp[bestHi] : gacomp[lo]);
+	}
+
+	if (links.empty())
+		return 0;
+	nav_off_mesh_link_t *outp = (nav_off_mesh_link_t *)malloc(links.size() * sizeof(nav_off_mesh_link_t));
+	if (outp == nullptr)
+		return 0;
+	memcpy(outp, links.data(), links.size() * sizeof(nav_off_mesh_link_t));
+	*out_links = outp;
+	fprintf(stderr, "Nav: computed %d rocket-jump links\n", (int)links.size());
+	return (int)links.size();
+}
+
 /* Disable polys not connected to the largest mesh component.
    Hull-1 extraction emits sliver floors (lintels, beams) that bots
    reseed onto and then roam forever inside a 1-poly island.  Traversal
@@ -2360,7 +2488,12 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 				omc_verts.push_back(rc_start[0]); omc_verts.push_back(rc_start[1]); omc_verts.push_back(rc_start[2]);
 				omc_verts.push_back(rc_end[0]); omc_verts.push_back(rc_end[1]); omc_verts.push_back(rc_end[2]);
 				omc_rad.push_back(links[li].radius);
-				omc_flags.push_back(kPolyFlagWalk);
+				/* RJ links carry an extra flag so a bot without launcher/
+				   rockets/health excludes them from its path (it routes the
+				   normal way; the gate guarantees one exists). */
+				omc_flags.push_back(links[li].link_type == AI_SUPER_JUMP
+					? (unsigned short)(kPolyFlagWalk | NAV_POLYFLAG_RJ)
+					: kPolyFlagWalk);
 				omc_areas.push_back(nav_area_for_link(links[li].link_type));
 				omc_dir.push_back(links[li].bidirectional ? DT_OFFMESH_CON_BIDIR : 0);
 				omc_id.push_back((unsigned int)(id_base + li));
@@ -2866,6 +2999,16 @@ extern "C" int nav_corridor_set(nav_corridor_t *c,
 	c->corridor.setCorridor(rc_target, polys, path_count);
 	c->pending_link_ref = 0;
 	return 1;
+}
+
+/* Per-bot rocket-jump gate: when the bot can't rocket-jump, exclude RJ
+   off-mesh polys from its corridor filter so navigate() steers it the
+   normal way instead of onto a launch it can't make. */
+extern "C" void nav_corridor_set_rj(nav_corridor_t *c, int allowed)
+{
+	if (c == nullptr)
+		return;
+	c->filter.setExcludeFlags(allowed ? 0 : NAV_POLYFLAG_RJ);
 }
 
 /* Average of a ground poly's vertices (Recast coords).  Returns 0 for

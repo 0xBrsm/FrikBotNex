@@ -40,6 +40,12 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define NAV_AREA_RJ        5   /* rocket jump (cost 10.0 — expensive, risky) */
 #define NAV_AREA_NEAR_WALL 6   /* within walkable_radius of wall (cost 3.0) */
 
+/* Poly flags (dtPoly.flags) for per-bot filtering.  WALK is on every
+   traversable poly; RJ additionally marks rocket-jump off-mesh links so a
+   bot that can't rocket-jump (no launcher/rockets/health) excludes them. */
+#define NAV_POLYFLAG_WALK  1
+#define NAV_POLYFLAG_RJ    2
+
 typedef struct
 {
 	float	cell_size;
@@ -283,6 +289,16 @@ int nav_mesh_compute_gap_jumps(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
+/* Post-build pass: add one-way rocket-jump-up links to high ledges that
+   are out of run-jump reach -- but ONLY where the high end can already get
+   back down some other way, so a launcher-less bot is never trapped (it
+   abandons the goal instead).  Fills *out_links (malloc'd, caller frees);
+   returns the count. */
+int nav_mesh_compute_rocket_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,
@@ -315,6 +331,10 @@ typedef struct nav_corridor_s nav_corridor_t;
 
 nav_corridor_t *nav_corridor_create(int max_path);
 void nav_corridor_destroy(nav_corridor_t *c);
+
+/* Per-bot rocket-jump gate: allowed=0 excludes RJ off-mesh links from this
+   corridor's pathing filter; allowed=1 restores them. */
+void nav_corridor_set_rj(nav_corridor_t *c, int allowed);
 
 /* Load a computed path into the corridor. */
 int nav_corridor_set(nav_corridor_t *c,

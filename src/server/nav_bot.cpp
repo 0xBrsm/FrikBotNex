@@ -291,6 +291,7 @@ static cvar_t nav_enabled_cvar = {"nav_enabled", "0"};
 static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
 static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
 static cvar_t nav_gap_jumps_cvar = {"nav_gap_jumps", "1"};
+static cvar_t nav_rocket_jumps_cvar = {"nav_rocket_jumps", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "1"};
 
 /* debug visualization state */
@@ -1293,6 +1294,36 @@ void Nav_BuildForMap(void)
 		}
 	}
 
+	/* Fifth pass: rocket-jump links to high ledges out of run-jump reach,
+	   gated so the high end can already get back down (no launcher-less
+	   trap).  Runs last so its reachability gate sees every other link. */
+	if (nav_mesh != NULL && nav_rocket_jumps_cvar.value)
+	{
+		nav_off_mesh_link_t *rlinks = NULL;
+		int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, &rlinks);
+		if (nr > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + nr) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, rlinks, (size_t)nr * sizeof(*entity_links));
+			entity_count += nr;
+			free(rlinks);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
+	}
+
 	free(verts);
 	free(tris);
 	free(entity_links);
@@ -1829,6 +1860,20 @@ static void PF_nav_stub(void)
 	G_FLOAT(OFS_RETURN) = -1.0f;
 }
 
+/* A bot may be routed onto a rocket-jump link only if it can actually pay
+   for the launch: owns the launcher, has a rocket loaded, and enough health
+   to survive the self-damage (>75).  Otherwise RJ links are excluded from
+   its pathing and it takes the normal route the safety gate guarantees. */
+#define NAV_IT_ROCKET_LAUNCHER 32
+static int nav_bot_can_rj(edict_t *bot)
+{
+	if (bot == NULL)
+		return 0;
+	return ((int)bot->v.items & NAV_IT_ROCKET_LAUNCHER)
+		&& bot->v.ammo_rockets > 0.0f
+		&& bot->v.health > 75.0f;
+}
+
 /* vector nav_path_steer(vector pos) = #84
    Uses dtPathCorridor to get next steering corner.
    Returns corner position. Off-mesh links encoded in Z (10000 + type).
@@ -1852,6 +1897,11 @@ static void PF_nav_path_steer(void)
 
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
+
+	/* Keep the corridor's RJ gate in step with the bot's live state (health
+	   or rockets may have changed since the goal was planned). */
+	nav_corridor_set_rj(nav_bot_corridors[slot],
+		nav_bot_can_rj(PROG_TO_EDICT(pr_global_struct->self)));
 
 	if (!navigate(nav_bot_corridors[slot], nav_mesh, pos,
 		corner, &flags, &ref))
@@ -2076,6 +2126,10 @@ static void PF_nav_find_goal(void)
 	dtNavMeshQuery *query = nav_mesh->query;
 	dtQueryFilter plain_filter;
 	nav_mesh_setup_filter(&plain_filter);
+	/* Plan around RJ links unless this bot can rocket-jump, so the goal it
+	   picks and the path it commits to never depend on a launch it can't make. */
+	if (!nav_bot_can_rj(bot))
+		plain_filter.setExcludeFlags(NAV_POLYFLAG_RJ);
 
 	/* Find bot's current poly (once for all candidates) */
 	float bot_nearest[3];
@@ -2520,6 +2574,7 @@ void Nav_RegisterBuiltins(void)
 	Cvar_RegisterVariable(&nav_jump_links_cvar);
 	Cvar_RegisterVariable(&nav_directed_links_cvar);
 	Cvar_RegisterVariable(&nav_gap_jumps_cvar);
+	Cvar_RegisterVariable(&nav_rocket_jumps_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }
