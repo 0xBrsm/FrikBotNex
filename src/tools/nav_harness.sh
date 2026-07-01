@@ -75,13 +75,22 @@ for m in $MAPS; do
 	fi
 
 	if [[ "$status" != "CRASH" ]]; then
-		conn_line="$(grep -m1 "^Nav: CONNECTIVITY:" "$log" || true)"
+		# Two "^Nav: CONNECTIVITY:" lines are printed per map: an interim
+		# "N/M spawns resolve to a navmesh floor poly" line, then the real
+		# summary "N/M spawns unreachable, N/M items unreachable" line.
+		# Must match the summary specifically -- grep -m1 on the bare
+		# prefix used to grab the interim line instead, silently skipping
+		# the unreachable-count check (e2m4/e3m5/e4m7 wrongly passed).
+		conn_line="$(grep -m1 -E "^Nav: CONNECTIVITY: ([0-9]+/[0-9]+ spawns unreachable|no spawn)" "$log" || true)"
 		if [[ -z "$conn_line" ]]; then
 			status="FAIL"
 			reasons+=("no CONNECTIVITY report found")
 		elif [[ "$conn_line" == *"no spawn points found"* ]]; then
 			status="FAIL"
 			reasons+=("no spawn points found on map")
+		elif [[ "$conn_line" == *"no spawn resolves to a navmesh floor poly"* ]]; then
+			status="FAIL"
+			reasons+=("no spawn resolves to a navmesh floor poly")
 		else
 			read -r spawn_bad spawn_tot item_bad item_tot <<<"$(echo "$conn_line" | \
 				sed -n 's#.*: \([0-9]*\)/\([0-9]*\) spawns unreachable, \([0-9]*\)/\([0-9]*\) items unreachable#\1 \2 \3 \4#p')"

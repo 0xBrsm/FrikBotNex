@@ -1141,12 +1141,18 @@ int nav_mesh_compute_directed_links(
 			}
 		}
 		if (bestType)
-			/* Reciprocal fix for an already one-way component: only the
-			   missing direction. A fully isolated component gets a
-			   bidirectional link instead (matching the main JUMP/DROP
-			   generation passes above, which default to bidirectional) so
-			   an item sitting in it is reachable, not just escapable. */
-			links.push_back(nav_make_link(bestS, bestE, bestType, isolated ? 1 : 0, 32.0f));
+			/* Bidirectional here regressed real maps: DROP/JUMP links found
+			   by this merge pass aren't necessarily climbable in reverse
+			   (unlike the main JUMP passes above, which only ever link
+			   spots a bot can actually walk/jump between both ways), so
+			   forcing reverse traversal sent bots at physically-infeasible
+			   "climb the drop" moves -- new stuck/lava failures appeared on
+			   e1m1/e1m7/e2m2/e2m4/e2m7 (confirmed via nav_harness.sh full
+			   suite: 15/37 -> 14/37 despite fixing a couple of item spots).
+			   Back to one-way only; the isolated-component case still gets
+			   its OUT link so nothing is trapped, it just won't make an
+			   item-only pocket reachable in reverse. */
+			links.push_back(nav_make_link(bestS, bestE, bestType, 0, 32.0f));
 	}
 
 	if (links.empty())
