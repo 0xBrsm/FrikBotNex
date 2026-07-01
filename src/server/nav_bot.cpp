@@ -1480,11 +1480,13 @@ void Nav_BuildForMap(void)
 			for (size_t i = 0; i < items.size(); i++)
 			{
 				int reached = 0;
-				char lasterr[64] = "";
+				/* 128, not 64: the partial-path error now embeds a "stopped
+				   at x y z" position and 64 truncates it. */
+				char lasterr[128] = "";
 				for (size_t j = 0; j < spawns.size(); j++)
 				{
 					nav_mesh_path_result_t path_result;
-					char perr[64];
+					char perr[128];
 					if (nav_mesh_find_path(nav_mesh, spawns[j].pos, items[i].pos, &path_result, perr, sizeof(perr)))
 					{
 						reached = 1;

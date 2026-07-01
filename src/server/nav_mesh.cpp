@@ -2873,7 +2873,21 @@ extern "C" int nav_mesh_find_path(
 	{
 		if (path_count <= 0 || path_refs[path_count - 1] != end_ref)
 		{
-			nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial)");
+			/* Report WHERE the search dead-ended, in quake coords -- the
+			   gap between here and the goal is the thing to go look at. */
+			const dtMeshTile *stop_tile = nullptr;
+			const dtPoly *stop_poly = nullptr;
+			if (path_count > 0
+				&& !dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(path_refs[path_count - 1], &stop_tile, &stop_poly)))
+			{
+				float stop_center[3], stop_quake[3];
+				nav_mesh_poly_center(stop_tile, stop_poly, stop_center);
+				nav_recast_to_quake(stop_center, stop_quake);
+				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial, stopped at %.0f %.0f %.0f)",
+					stop_quake[0], stop_quake[1], stop_quake[2]);
+			}
+			else
+				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial)");
 			return 0;
 		}
 	}
