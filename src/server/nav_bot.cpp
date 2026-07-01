@@ -1493,7 +1493,21 @@ void Nav_BuildForMap(void)
 			ent.cn = cn;
 			VectorCopy(e->v.origin, ent.pos);
 			if (is_spawn)
+			{
+				/* Spawn points are often placed in mid-air (e4m6 hangs
+				   them 480-650u up) -- the player falls to the floor on
+				   spawn.  Path from where the player LANDS, not from the
+				   floating origin, which has no floor poly under it. */
+				vec3_t ts, te, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+				trace_t tr;
+				VectorCopy(ent.pos, ts);
+				VectorCopy(ent.pos, te);
+				te[2] -= 2048;
+				tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
+				if (!tr.startsolid && !tr.allsolid && tr.fraction < 1.0f)
+					ent.pos[2] = tr.endpos[2];
 				spawns.push_back(ent);
+			}
 			else if (is_item)
 				items.push_back(ent);
 		}
@@ -1537,26 +1551,39 @@ void Nav_BuildForMap(void)
 			for (size_t i = 0; i < spawns.size(); i++)
 			{
 				int reached = 0;
+				char lasterr[128] = "";
 				for (size_t j = 0; j < spawns.size() && !reached; j++)
 				{
 					if (j == i) continue;
 					nav_mesh_path_result_t path_result;
-					char perr[64];
+					char perr[128];
 					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, spawns[j].pos, &path_result, perr, sizeof(perr)))
 						reached = 1;
+					else
+						memcpy(lasterr, perr, sizeof(lasterr));
 				}
 				for (size_t j = 0; j < items.size() && !reached; j++)
 				{
 					nav_mesh_path_result_t path_result;
-					char perr[64];
+					char perr[128];
 					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, items[j].pos, &path_result, perr, sizeof(perr)))
 						reached = 1;
+					else
+						memcpy(lasterr, perr, sizeof(lasterr));
 				}
 				if (!reached)
 				{
 					spawn_unreachable++;
-					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): can't reach any other spawn or item\n",
-						spawns[i].cn, spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2]);
+					/* Wide-extents probe: says whether the mesh is merely
+					   out of the actor snap's reach or absent entirely. */
+					char near_note[96] = "no poly within wide extents";
+					nav_mesh_nearest_result_t nr;
+					char nerr[64];
+					if (nav_mesh_find_nearest(nav_mesh, spawns[i].pos, &nr, nerr, sizeof(nerr)) && nr.found)
+						snprintf(near_note, sizeof(near_note), "nearest poly point (%.0f %.0f %.0f)",
+							nr.nearest_point[0], nr.nearest_point[1], nr.nearest_point[2]);
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): can't reach any other spawn or item (%s; %s)\n",
+						spawns[i].cn, spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2], lasterr, near_note);
 				}
 			}
 			for (size_t i = 0; i < items.size(); i++)
