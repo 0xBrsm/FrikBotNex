@@ -1073,7 +1073,18 @@ int nav_mesh_compute_directed_links(
 		if (c == maingc) continue;
 		int need_in = (gc_bwd[c] && !gc_fwd[c]);
 		int need_out = (gc_fwd[c] && !gc_bwd[c]);
-		if (!need_in && !need_out) continue;
+		/* A component with NO existing link either way (never reached by
+		   the JUMP/SUPER_JUMP passes, e.g. an isolated ledge) falls through
+		   both checks above and used to be skipped entirely -- permanently
+		   trapping any bot that spawns or lands there. It doesn't need a
+		   way IN (nothing requires walking to it), just a way OUT. */
+		if (!need_in && !need_out)
+		{
+			if (!gc_fwd[c] && !gc_bwd[c])
+				need_out = 1;
+			else
+				continue;
+		}
 
 		float bestcost = 1e9f, bestS[3] = {0,0,0}, bestE[3] = {0,0,0};
 		int bestType = 0;

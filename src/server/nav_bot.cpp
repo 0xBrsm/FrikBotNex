@@ -1443,24 +1443,37 @@ void Nav_BuildForMap(void)
 			fprintf(stderr, "Nav: CONNECTIVITY: %d/%d spawns resolve to a navmesh floor poly\n",
 				usable_spawns, (int)spawns.size());
 
+			/* A bot respawns AT a spawn point -- it never walks to one, so
+			   inbound reachability (can other spawns path TO this one) is
+			   the wrong question and flags legitimate dead-end spawns
+			   (drop-in landings, dm6's rocket-jump ledge) that only need
+			   an exit, not an entrance. Check outbound instead: can this
+			   spawn get OUT to the rest of the map at all -- any other
+			   spawn or any item, not just other spawns (a dead-end spawn
+			   with only a drop-link out still lands somewhere with items,
+			   even if no other spawn happens to be reachable from it). */
 			for (size_t i = 0; i < spawns.size(); i++)
 			{
 				int reached = 0;
-				for (size_t j = 0; j < spawns.size(); j++)
+				for (size_t j = 0; j < spawns.size() && !reached; j++)
 				{
 					if (j == i) continue;
 					nav_mesh_path_result_t path_result;
 					char perr[64];
-					if (nav_mesh_find_path(nav_mesh, spawns[j].pos, spawns[i].pos, &path_result, perr, sizeof(perr)))
-					{
+					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, spawns[j].pos, &path_result, perr, sizeof(perr)))
 						reached = 1;
-						break;
-					}
+				}
+				for (size_t j = 0; j < items.size() && !reached; j++)
+				{
+					nav_mesh_path_result_t path_result;
+					char perr[64];
+					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, items[j].pos, &path_result, perr, sizeof(perr)))
+						reached = 1;
 				}
 				if (!reached)
 				{
 					spawn_unreachable++;
-					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every other spawn\n",
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): can't reach any other spawn or item\n",
 						spawns[i].cn, spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2]);
 				}
 			}
