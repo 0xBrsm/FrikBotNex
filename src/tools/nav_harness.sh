@@ -12,15 +12,34 @@
 # Usage: src/tools/nav_harness.sh [map ...]
 #   (defaults to MAPS below if no maps given on the command line)
 #
+# Two tiers:
+#   MODE=full (default) -- connectivity check + ${DURATION}s bot soak with
+#     NAVSTAT stuck/lava thresholds. Slow, and stuck/lava readings get noisy
+#     under memory pressure on constrained devices.
+#   MODE=conn -- connectivity check only. Launches 1 bot (the first bot's
+#     nav_ready call is what triggers the mesh build), watches the log, and
+#     kills the server the moment the CONNECTIVITY summary prints (~20-30s
+#     per map instead of ${DURATION}s+). Deterministic under load; use this
+#     as the fast full-suite regression gate after navmesh changes.
+#
 set -uo pipefail
 
 NQSERVER="${NQSERVER:-$HOME/bin/nqserver}"
 GAMEDIR="${GAMEDIR:-$HOME/quake}"
 GAME="${GAME:-ffa}"
-BOTS="${BOTS:-4}"
-DURATION="${DURATION:-60}"
+MODE="${MODE:-full}"
 BATCH_SIZE="${BATCH_SIZE:-6}"
 OUTDIR="${OUTDIR:-$GAMEDIR/navruns/harness}"
+if [[ "$MODE" == "conn" ]]; then
+	BOTS=1
+	DURATION="${DURATION:-90}" # worst-case mesh-build wait; early-kill makes the typical map much faster
+elif [[ "$MODE" == "full" ]]; then
+	BOTS="${BOTS:-4}"
+	DURATION="${DURATION:-60}"
+else
+	echo "error: MODE must be 'full' or 'conn', got '$MODE'" >&2
+	exit 1
+fi
 ID1_MAPS="start \
 	e1m1 e1m2 e1m3 e1m4 e1m5 e1m6 e1m7 \
 	e2m1 e2m2 e2m3 e2m4 e2m5 e2m6 e2m7 \
@@ -44,17 +63,38 @@ fi
 rm -rf "$OUTDIR"
 mkdir -p "$OUTDIR"
 
-echo "Nav harness: maps=[$MAPS] bots=$BOTS duration=${DURATION}s batch=$BATCH_SIZE"
+echo "Nav harness: mode=$MODE maps=[$MAPS] bots=$BOTS duration=${DURATION}s batch=$BATCH_SIZE"
+
+# Matches only the final summary line (or the two skip variants), not the
+# interim "N/M spawns resolve to a navmesh floor poly" line.
+CONN_SUMMARY_RE="^Nav: CONNECTIVITY: ([0-9]+/[0-9]+ spawns unreachable|no spawn)"
 
 # nqserver falls back to shareware mode (zero bot output) unless run
 # from the directory holding id1/ and the game dir.
 cd "$GAMEDIR" || exit 1
 
-n=0
-for m in $MAPS; do
+run_map() {
+	local m="$1" pid
 	timeout "$((DURATION + 20))" "$NQSERVER" -dedicated "$BOTS" -port 0 -game "$GAME" \
 		+deathmatch 1 +skill 2 +temp1 "$BOTS" +map "$m" \
 		>"$OUTDIR/$m.log" 2>&1 &
+	pid=$!
+	if [[ "$MODE" == "conn" ]]; then
+		# The connectivity report is a one-shot at mesh-build time; once the
+		# summary line lands there is nothing left to measure, so kill the
+		# server instead of waiting out the clock.
+		while kill -0 "$pid" 2>/dev/null; do
+			grep -qE "$CONN_SUMMARY_RE" "$OUTDIR/$m.log" && break
+			sleep 1
+		done
+		kill "$pid" 2>/dev/null
+	fi
+	wait "$pid" 2>/dev/null
+}
+
+n=0
+for m in $MAPS; do
+	run_map "$m" &
 	n=$((n + 1))
 	if [[ "$n" -ge "$BATCH_SIZE" ]]; then
 		wait
@@ -81,7 +121,7 @@ for m in $MAPS; do
 		# Must match the summary specifically -- grep -m1 on the bare
 		# prefix used to grab the interim line instead, silently skipping
 		# the unreachable-count check (e2m4/e3m5/e4m7 wrongly passed).
-		conn_line="$(grep -m1 -E "^Nav: CONNECTIVITY: ([0-9]+/[0-9]+ spawns unreachable|no spawn)" "$log" || true)"
+		conn_line="$(grep -m1 -E "$CONN_SUMMARY_RE" "$log" || true)"
 		if [[ -z "$conn_line" ]]; then
 			status="FAIL"
 			reasons+=("no CONNECTIVITY report found")
@@ -109,22 +149,26 @@ for m in $MAPS; do
 			fi
 		fi
 
-		navstats="$(grep "^NAVSTAT " "$log" || true)"
-		if [[ -z "$navstats" ]]; then
-			status="FAIL"
-			reasons+=("no NAVSTAT reports found (bots never ran)")
-		else
-			avg_stk="$(echo "$navstats" | sed -n 's/.* stk=\([0-9.]*\).*/\1/p' | \
-				awk '{s+=$1; n++} END {if (n>0) printf "%.0f", s/n; else print 0}')"
-			avg_lava="$(echo "$navstats" | sed -n 's/.* lava=\([0-9.]*\).*/\1/p' | \
-				awk '{s+=$1; n++} END {if (n>0) printf "%.0f", s/n; else print 0}')"
-			if [[ "$avg_stk" -gt "$MAX_STUCK_PCT" ]]; then
+		# Behavioral (NAVSTAT) thresholds only apply to the full-soak tier;
+		# conn mode kills the server before any 10s NAVSTAT window elapses.
+		if [[ "$MODE" == "full" ]]; then
+			navstats="$(grep "^NAVSTAT " "$log" || true)"
+			if [[ -z "$navstats" ]]; then
 				status="FAIL"
-				reasons+=("avg stuck ${avg_stk}% > ${MAX_STUCK_PCT}%")
-			fi
-			if [[ "$avg_lava" -gt "$MAX_LAVA_PCT" ]]; then
-				status="FAIL"
-				reasons+=("avg lava ${avg_lava}% > ${MAX_LAVA_PCT}%")
+				reasons+=("no NAVSTAT reports found (bots never ran)")
+			else
+				avg_stk="$(echo "$navstats" | sed -n 's/.* stk=\([0-9.]*\).*/\1/p' | \
+					awk '{s+=$1; n++} END {if (n>0) printf "%.0f", s/n; else print 0}')"
+				avg_lava="$(echo "$navstats" | sed -n 's/.* lava=\([0-9.]*\).*/\1/p' | \
+					awk '{s+=$1; n++} END {if (n>0) printf "%.0f", s/n; else print 0}')"
+				if [[ "$avg_stk" -gt "$MAX_STUCK_PCT" ]]; then
+					status="FAIL"
+					reasons+=("avg stuck ${avg_stk}% > ${MAX_STUCK_PCT}%")
+				fi
+				if [[ "$avg_lava" -gt "$MAX_LAVA_PCT" ]]; then
+					status="FAIL"
+					reasons+=("avg lava ${avg_lava}% > ${MAX_LAVA_PCT}%")
+				fi
 			fi
 		fi
 	fi
