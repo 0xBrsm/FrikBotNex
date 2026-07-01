@@ -1970,7 +1970,17 @@ static void PF_nav_path_debug(void)
 		return;
 	}
 
-	/* bot entity: corridor doesn't support random access. */
+	/* bot entity: corridor doesn't support random access, but idx == -1
+	   is used by QC as a coverage proxy (detect poly-to-poly movement),
+	   so answer that one case with the bot's current poly ref. */
+	if (idx == -1 && nav_mesh != NULL)
+	{
+		float pos[3], nearest[3];
+		dtPolyRef ref = 0;
+		VectorCopy(e->v.origin, pos);
+		if (nav_find_bot_poly(nav_mesh->query, e, pos, &ref, nearest))
+			G_FLOAT(OFS_RETURN + 0) = (float)(ref & 0xFFFFFFu);
+	}
 }
 
 /* ---- nav_ent_pos: entity position for navmesh queries ---- */
@@ -2540,10 +2550,41 @@ static void PF_nav_link_info(void)
 	G_FLOAT(OFS_RETURN + 2) = (float)nav_mesh->links[idx].link_type;
 }
 
+/* void nav_report_stats(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) = #92
+   Single-line, machine-parseable periodic nav-quality report for the
+   calling bot. Replaces the old bprint()-per-token sequence in QC: bprint
+   broadcasts each call individually through the server's print hook, so a
+   multi-call report fragments into one log line per token (and can
+   interleave with other bots' reports under concurrent load). Packing
+   into vectors keeps this well within the 8-param VM limit:
+     core         = (stuck_pct, no_target_pct, roam_idle_pct)
+     env          = (lava_pct, coverage_polys, lava_entries_roam)
+     lava_entries = (lava_entries_nav, lava_entries_beeline, lava_entries_combat)
+   lava_entries_* are raw counts (not percentages): how many times the bot
+   crossed into lava/slime this window while in each movement mode -- the
+   QC side already tracked these but never reported them. */
+static void PF_nav_report_stats(void)
+{
+	edict_t *bot = PROG_TO_EDICT(pr_global_struct->self);
+	float *core = G_VECTOR(OFS_PARM0);
+	float *env = G_VECTOR(OFS_PARM1);
+	float *lava_entries = G_VECTOR(OFS_PARM2);
+	const char *tgt = G_STRING(OFS_PARM3);
+	float tgt_dist = G_FLOAT(OFS_PARM4);
+
+	Con_Printf("NAVSTAT bot=%s stk=%.0f notgt=%.0f roam_idle=%.0f lava=%.0f cov=%.0f "
+		"le_nav=%.0f le_beeline=%.0f le_combat=%.0f le_roam=%.0f tgt=%s dist=%.0f\n",
+		pr_strings + (int)bot->v.netname,
+		core[0], core[1], core[2],
+		env[0], env[1], env[2],
+		lava_entries[0], lava_entries[1], lava_entries[2],
+		tgt, tgt_dist);
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 12
+#define NAV_BUILTIN_COUNT 13
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -2570,6 +2611,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 9] = PF_nav_block;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

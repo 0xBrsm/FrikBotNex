@@ -203,7 +203,6 @@ void() bot_server_spawn =
 
 void() bot_debug_metrics =
 {
-	local string s;
 	local vector vel;
 
 	if (self.health < 1)
@@ -271,29 +270,41 @@ void() bot_debug_metrics =
 	if (self._m_frames < 1)
 		return;
 
-	bprint("["); bprint(self.netname); bprint("] ");
-	s = ftos(rint(100 * self._m_stuck / self._m_frames));
-	bprint("stk="); bprint(s);
-	s = ftos(rint(100 * self._m_idle_notgt / self._m_frames));
-	bprint("% no_tgt="); bprint(s);
-	s = ftos(rint(100 * self._m_idle_roam / self._m_frames));
-	bprint("% roam_idle="); bprint(s);
-	s = ftos(rint(100 * self._m_lava / self._m_frames));
-	bprint("% lav="); bprint(s);
-	bprint("% cov=");
-	s = ftos(self._m_polys_seen); bprint(s);
-	bprint(" ");
-	if (self.target1 == self)
-		bprint("tgt=ROAM");
-	else if (self.target1)
 	{
-		bprint("tgt="); bprint(self.target1.classname);
-		s = ftos(rint(vlen(self.target1.origin - self.origin)));
-		bprint(" d="); bprint(s);
+		local vector core, env, lava_entries;
+		local string tgt_name;
+		local float tgt_dist;
+
+		core_x = rint(100 * self._m_stuck / self._m_frames);
+		core_y = rint(100 * self._m_idle_notgt / self._m_frames);
+		core_z = rint(100 * self._m_idle_roam / self._m_frames);
+
+		env_x = rint(100 * self._m_lava / self._m_frames);
+		env_y = self._m_polys_seen;
+		env_z = self._m_le_roam;
+
+		lava_entries_x = self._m_le_nav;
+		lava_entries_y = self._m_le_beeline;
+		lava_entries_z = self._m_le_combat;
+
+		if (self.target1 == self)
+		{
+			tgt_name = "ROAM";
+			tgt_dist = 0;
+		}
+		else if (self.target1)
+		{
+			tgt_name = self.target1.classname;
+			tgt_dist = rint(vlen(self.target1.origin - self.origin));
+		}
+		else
+		{
+			tgt_name = "NONE";
+			tgt_dist = 0;
+		}
+
+		nav_report_stats(core, env, lava_entries, tgt_name, tgt_dist);
 	}
-	else
-		bprint("tgt=NONE");
-	bprint("\n");
 
 	// reset counters
 	self._m_stuck = 0;
