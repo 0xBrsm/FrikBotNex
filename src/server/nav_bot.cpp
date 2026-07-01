@@ -294,7 +294,7 @@ static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
 static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
 static cvar_t nav_gap_jumps_cvar = {"nav_gap_jumps", "1"};
 static cvar_t nav_rocket_jumps_cvar = {"nav_rocket_jumps", "1"};
-static cvar_t nav_debug_cvar = {"nav_debug", "1"};
+static cvar_t nav_debug_cvar = {"nav_debug", "0"};
 
 /* debug visualization state */
 static nav_mesh_poly_record_t *nav_debug_polys = NULL;
@@ -2183,20 +2183,22 @@ static void PF_nav_find_goal(void)
 
 		if (dtStatusFailed(status) || path_count < 1)
 		{
-			Con_Printf("  findPath FAIL to %s\n", pr_strings + (int)it->v.classname);
+			if (nav_debug_cvar.value)
+				fprintf(stderr, "  findPath FAIL to %s\n", pr_strings + (int)it->v.classname);
 			continue;
 		}
 		if (dtStatusDetail(status, DT_PARTIAL_RESULT))
 		{
 			if (path[path_count - 1] != nav_item_cache[i].poly_ref)
 			{
+				if (nav_debug_cvar.value)
 				{
 					/* Log where the partial path ends */
 					float last_pos[3] = {0};
 					nav_mesh->query->closestPointOnPoly(path[path_count-1], bot_nearest, last_pos, NULL);
 					float lq[3];
 					lq[0] = last_pos[0]; lq[1] = last_pos[2]; lq[2] = last_pos[1]; /* recast→quake */
-					Con_Printf("  PARTIAL to %s (%d polys) ends=(%.0f %.0f %.0f)\n",
+					fprintf(stderr, "  PARTIAL to %s (%d polys) ends=(%.0f %.0f %.0f)\n",
 						pr_strings + (int)it->v.classname, path_count, lq[0], lq[1], lq[2]);
 				}
 				continue;
