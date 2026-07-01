@@ -90,8 +90,9 @@ extern ddef_t *ED_FindGlobal(char *name);
    which can already path back out -- a flat cap raise to 320 dropped bots
    into exitless dm3 pits, so depth alone can't be the gate.  Falls kill
    past ~800u; stay under that. */
+#define NAV_DEEP_DROP_HEIGHT_MIN    48.0f  /* below this, walk/jump passes own it */
 #define NAV_DEEP_DROP_HEIGHT_MAX   700.0f
-#define NAV_DEEP_DROP_HORIZ_MAX    128.0f
+#define NAV_DEEP_DROP_MAX_SPEED    300.0f  /* launch speed budget (full run ~320) */
 /* Rocket jump: the bot fires an RL at its feet while jumping for a big
    upward boost a normal run-jump can't reach.  Only used for orphan ledges
    above normal jump height; a single RJ clears ~250u up.  Horizontal reach
@@ -268,9 +269,11 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	float hd = sqrtf(dx * dx + dy * dy);
 	(void)user;
 
-	if (drop <= NAV_DROP_HEIGHT_MAX || drop > NAV_DEEP_DROP_HEIGHT_MAX)
+	if (drop <= NAV_DEEP_DROP_HEIGHT_MIN || drop > NAV_DEEP_DROP_HEIGHT_MAX)
 		return 0;
-	if (hd < 8.0f || hd > NAV_DEEP_DROP_HORIZ_MAX)
+	/* Horizontal reach is physics-limited, not a fixed radius: the launch
+	   speed needed to cover hd during the fall must fit inside a full run. */
+	if (hd < 8.0f || hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / 800.0f))
 		return 0;
 
 	/* Walk-off line: level trace at start height out to above the landing. */
@@ -1608,6 +1611,23 @@ void Nav_BuildForMap(void)
 					item_unreachable++;
 					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn (%s)\n",
 						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], lasterr);
+					/* Pinpoint the physical gap: closest pair between the
+					   spawn-reachable poly set and the item's island. */
+					std::vector<float> flat;
+					for (size_t s = 0; s < spawns.size(); s++)
+					{
+						flat.push_back(spawns[s].pos[0]);
+						flat.push_back(spawns[s].pos[1]);
+						flat.push_back(spawns[s].pos[2]);
+					}
+					float gfrom[3], gto[3];
+					char gerr[64];
+					if (nav_mesh_gap_probe(nav_mesh, flat.data(), (int)spawns.size(),
+							items[i].pos, gfrom, gto, gerr, sizeof(gerr)))
+						fprintf(stderr, "Nav: CONNECTIVITY gap: reach ends (%.0f %.0f %.0f), island starts (%.0f %.0f %.0f), dz=%.0f hd=%.0f\n",
+							gfrom[0], gfrom[1], gfrom[2], gto[0], gto[1], gto[2],
+							gfrom[2] - gto[2],
+							sqrtf((gfrom[0]-gto[0])*(gfrom[0]-gto[0]) + (gfrom[1]-gto[1])*(gfrom[1]-gto[1])));
 				}
 			}
 

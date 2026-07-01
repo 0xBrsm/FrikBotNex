@@ -299,8 +299,9 @@ int nav_mesh_compute_rocket_jumps(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
-/* Post-build pass: one-way DEEP drop links (past the boundary detector's
-   dry-land cap) into lower regions that have no other way in -- but ONLY
+/* Post-build pass: one-way walk-off DROP links (48-700u, horizontal reach
+   physics-limited by fall time) into lower regions that have no other way
+   in -- but ONLY
    where the landing can already path back OUT (to the drop's start or to
    the main mesh), so a pit with no exit never gets a link and can't trap
    a bot (the dm3 pit regression when the flat cap was raised to 320).
@@ -309,6 +310,18 @@ int nav_mesh_compute_deep_drops(
 	nav_mesh_runtime_t *navmesh,
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
+
+/* Diagnostic: for an unreachable goal, BFS the poly graph from the given
+   start positions (directed, off-mesh links included) and from the goal
+   (undirected island), then report the closest ground-poly pair across
+   the two sets -- i.e. WHERE a bridging link is missing.  Quake coords.
+   Returns 1 and fills out_from (reachable side) / out_to (island side). */
+int nav_mesh_gap_probe(
+	const nav_mesh_runtime_t *navmesh,
+	const float *starts, int start_count,
+	const float *goal,
+	float *out_from, float *out_to,
+	char *error, size_t error_size);
 
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <new>
 #include <string>
+#include <algorithm>
 #include <vector>
 
 #include "DetourCommon.h"
@@ -1426,12 +1427,14 @@ int nav_mesh_compute_deep_drops(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links)
 {
-	/* Envelope: deeper than the boundary detector's dry-land cap (192,
-	   which handles everything shallower), capped short of a lethal fall
-	   (~800u kills); near-vertical so this stays a drop, not a leap. */
-	const float kDeepDropMin = 192.0f;
+	/* Envelope: below 48 the walk/jump passes own the space; capped short
+	   of a lethal fall (~800u kills).  Horizontal reach is physics, not a
+	   fixed radius: during a dz fall a running bot covers up to
+	   run_speed * sqrt(2*dz/800), so a candidate is feasible whenever the
+	   required launch speed stays under a full run (with margin). */
+	const float kDeepDropMin = 48.0f;
 	const float kDeepDropMax = 700.0f;
-	const float kDeepDropHorizMax = 128.0f;
+	const float kDeepDropMaxSpeed = 300.0f;
 
 	*out_links = nullptr;
 	if (navmesh == nullptr || navmesh->navmesh == nullptr
@@ -1453,11 +1456,12 @@ int nav_mesh_compute_deep_drops(
 	for (int i = 0; i < ground; i++)
 	{
 		const dtPoly *p = &tile->polys[i];
+		if (p->flags == 0) continue; /* disabled polys must not bridge components */
 		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
 		{
 			if (tile->links[k].ref == 0) continue;
 			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground) ga[gf(i)] = gf((int)np);
+			if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
 		}
 	}
 	std::vector<int> gacomp(ground);
@@ -1485,79 +1489,146 @@ int nav_mesh_compute_deep_drops(
 		return false;
 	};
 
+	/* Per-poly horizontal radius and z-range: the prefilter below works on
+	   centroids, and a rim-adjacent pair of large polys can have centroids
+	   hundreds of units apart -- slack by the radii so those still qualify,
+	   then verify the exact geometry on the closest vertex pair. */
+	std::vector<float> pr(ground, 0.0f), pzmin(ground, 0.0f), pzmax(ground, 0.0f);
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		const float *c = &q[i * 3];
+		float r = 0.0f, zmin = 1e9f, zmax = -1e9f;
+		for (int v = 0; v < p->vertCount; v++)
+		{
+			float vq[3];
+			nav_recast_to_quake(&tile->verts[p->verts[v] * 3], vq);
+			float dx = vq[0]-c[0], dy = vq[1]-c[1];
+			float d = sqrtf(dx*dx + dy*dy);
+			if (d > r) r = d;
+			if (vq[2] < zmin) zmin = vq[2];
+			if (vq[2] > zmax) zmax = vq[2];
+		}
+		pr[i] = r; pzmin[i] = zmin; pzmax[i] = zmax;
+	}
+
+	auto closest_verts = [&](int a, int b, float *qa, float *qb) {
+		const dtPoly *pa = &tile->polys[a], *pb = &tile->polys[b];
+		float best = 1e18f;
+		for (int va = 0; va < pa->vertCount; va++)
+		{
+			float aq[3];
+			nav_recast_to_quake(&tile->verts[pa->verts[va] * 3], aq);
+			for (int vb = 0; vb < pb->vertCount; vb++)
+			{
+				float bq[3];
+				nav_recast_to_quake(&tile->verts[pb->verts[vb] * 3], bq);
+				float dx = aq[0]-bq[0], dy = aq[1]-bq[1], dz = aq[2]-bq[2];
+				float d = dx*dx + dy*dy + dz*dz;
+				if (d < best)
+				{
+					best = d;
+					memcpy(qa, aq, sizeof(float) * 3);
+					memcpy(qb, bq, sizeof(float) * 3);
+				}
+			}
+		}
+	};
+
 	std::vector<nav_off_mesh_link_t> links;
 	for (int hi = 0; hi < ground; hi++)
 	{
 		if (tile->polys[hi].flags == 0) continue;
 
-		/* Cheapest lower cross-patch poly inside the deep-drop envelope;
-		   prefer near-vertical and shallow (least fall for the access). */
-		float bestcost = 1e9f; int bestLo = -1;
+		/* Candidate lower cross-patch polys, cheapest first; try several,
+		   since the cheapest can fail validation while a slightly worse
+		   one is physically clean. */
+		struct cand { float cost; int lo; };
+		std::vector<cand> cands;
 		for (int lo = 0; lo < ground; lo++)
 		{
 			if (tile->polys[lo].flags == 0) continue;
 			if (gacomp[hi] == gacomp[lo]) continue;
 			const float *qh = &q[hi * 3], *ql = &q[lo * 3];
+			float dmax = pzmax[hi] - pzmin[lo];
+			float dmin = pzmin[hi] - pzmax[lo];
+			if (dmax <= kDeepDropMin || dmin > kDeepDropMax) continue;
+			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
+			float hd = sqrtf(dx*dx + dy*dy);
+			float hd_min = hd - pr[hi] - pr[lo];
+			if (hd_min < 8.0f) hd_min = 8.0f;
+			float dz_cap = dmax < kDeepDropMax ? dmax : kDeepDropMax;
+			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / 800.0f)) continue;
+			cand c = { hd + (qh[2] - ql[2]) * 0.25f, lo };
+			cands.push_back(c);
+		}
+		if (cands.empty()) continue;
+		std::sort(cands.begin(), cands.end(),
+			[](const cand &a, const cand &b) { return a.cost < b.cost; });
+
+		const int kTryMax = 12;
+		for (size_t ci = 0; ci < cands.size() && (int)ci < kTryMax; ci++)
+		{
+			int lo = cands[ci].lo;
+			if (pair_seen(gacomp[hi], gacomp[lo])) continue;
+
+			/* Exact geometry on the closest rim pair, not the centroids. */
+			float qh[3], ql[3];
+			closest_verts(hi, lo, qh, ql);
 			float ddz = qh[2] - ql[2];
 			if (ddz <= kDeepDropMin || ddz > kDeepDropMax) continue;
 			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
 			float hd = sqrtf(dx*dx + dy*dy);
-			if (hd < 8.0f || hd > kDeepDropHorizMax) continue;
-			float cost = hd + ddz * 0.25f;
-			if (cost < bestcost) { bestcost = cost; bestLo = lo; }
+			if (hd < 8.0f) { hd = 8.0f; }
+			if (hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / 800.0f)) continue;
+
+			if (validate(qh, ql, user) != AI_DROP)
+				continue;
+
+			float rh[3], rl[3];
+			dtPolyRef path[256]; int pc = 0;
+			nav_quake_to_recast(qh, rh);
+			nav_quake_to_recast(ql, rl);
+
+			/* New down-access only: if the low patch is already reachable from
+			   here, another route exists and this link is just a shortcut. */
+			dtStatus down = navmesh->query->findPath(base | (dtPolyRef)hi, base | (dtPolyRef)lo,
+				rh, rl, &filter, path, &pc, 256);
+			if (!dtStatusFailed(down) && !dtStatusDetail(down, DT_PARTIAL_RESULT) && pc > 0)
+				break;
+
+			/* No-trap gate: the landing must already path back OUT -- up to the
+			   start, or to the main mesh -- before we offer a way in.  A pit
+			   with no exit never gets a link (the cap-320 dm3 regression). */
+			int escapes = (gacomp[lo] == maincomp);
+			if (!escapes)
+			{
+				dtStatus up = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)hi,
+					rl, rh, &filter, path, &pc, 256);
+				escapes = (!dtStatusFailed(up) && !dtStatusDetail(up, DT_PARTIAL_RESULT) && pc > 0);
+			}
+			if (!escapes && mainrep >= 0)
+			{
+				float rm[3];
+				nav_quake_to_recast(&q[mainrep * 3], rm);
+				dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)mainrep,
+					rl, rm, &filter, path, &pc, 256);
+				escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
+			}
+			if (!escapes)
+				continue;
+
+			nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
+			{
+				float fall_time = sqrtf(2.0f * ddz / 800.0f);
+				lk.required_speed = hd / fall_time;
+				if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
+			}
+			links.push_back(lk);
+			seenLo.push_back(gacomp[hi] < gacomp[lo] ? gacomp[hi] : gacomp[lo]);
+			seenHi.push_back(gacomp[hi] < gacomp[lo] ? gacomp[lo] : gacomp[hi]);
+			break;
 		}
-		if (bestLo < 0) continue;
-		if (pair_seen(gacomp[hi], gacomp[bestLo])) continue;
-
-		const float *qh = &q[hi * 3], *ql = &q[bestLo * 3];
-
-		if (validate(qh, ql, user) != AI_DROP)
-			continue;
-
-		float rh[3], rl[3];
-		dtPolyRef path[256]; int pc = 0;
-		nav_quake_to_recast(qh, rh);
-		nav_quake_to_recast(ql, rl);
-
-		/* New down-access only: if the low patch is already reachable from
-		   here, another route exists and this link is just a shortcut. */
-		dtStatus down = navmesh->query->findPath(base | (dtPolyRef)hi, base | (dtPolyRef)bestLo,
-			rh, rl, &filter, path, &pc, 256);
-		if (!dtStatusFailed(down) && !dtStatusDetail(down, DT_PARTIAL_RESULT) && pc > 0)
-			continue;
-
-		/* No-trap gate: the landing must already path back OUT -- up to the
-		   start, or to the main mesh -- before we offer a way in.  A pit
-		   with no exit never gets a link (the cap-320 dm3 regression). */
-		int escapes = (gacomp[bestLo] == maincomp);
-		if (!escapes)
-		{
-			dtStatus up = navmesh->query->findPath(base | (dtPolyRef)bestLo, base | (dtPolyRef)hi,
-				rl, rh, &filter, path, &pc, 256);
-			escapes = (!dtStatusFailed(up) && !dtStatusDetail(up, DT_PARTIAL_RESULT) && pc > 0);
-		}
-		if (!escapes && mainrep >= 0)
-		{
-			float rm[3];
-			nav_quake_to_recast(&q[mainrep * 3], rm);
-			dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)bestLo, base | (dtPolyRef)mainrep,
-				rl, rm, &filter, path, &pc, 256);
-			escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
-		}
-		if (!escapes)
-			continue;
-
-		nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
-		{
-			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
-			float hd = sqrtf(dx*dx + dy*dy);
-			float fall_time = sqrtf(2.0f * (qh[2] - ql[2]) / 800.0f);
-			lk.required_speed = hd / fall_time;
-			if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
-		}
-		links.push_back(lk);
-		seenLo.push_back(gacomp[hi] < gacomp[bestLo] ? gacomp[hi] : gacomp[bestLo]);
-		seenHi.push_back(gacomp[hi] < gacomp[bestLo] ? gacomp[bestLo] : gacomp[hi]);
 	}
 
 	if (links.empty())
@@ -1569,6 +1640,168 @@ int nav_mesh_compute_deep_drops(
 	*out_links = outp;
 	fprintf(stderr, "Nav: computed %d deep-drop links\n", (int)links.size());
 	return (int)links.size();
+}
+
+int nav_mesh_gap_probe(
+	const nav_mesh_runtime_t *navmesh,
+	const float *starts, int start_count,
+	const float *goal,
+	float *out_from, float *out_to,
+	char *error, size_t error_size)
+{
+	if (navmesh == nullptr || navmesh->navmesh == nullptr || navmesh->query == nullptr)
+	{
+		nav_set_error(error, error_size, "navmesh not built");
+		return 0;
+	}
+	dtNavMesh *mesh = navmesh->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+	{
+		nav_set_error(error, error_size, "no tile");
+		return 0;
+	}
+	const int npolys = tile->header->polyCount;
+	const int ground = tile->header->offMeshBase > 0 ? tile->header->offMeshBase : npolys;
+
+	/* Directed BFS from every start poly over the FULL link graph
+	   (walk adjacency + off-mesh connections) = everything a bot can
+	   actually reach.  Undirected BFS from the goal poly = the goal's
+	   island.  The closest ground-poly pair across the two sets is the
+	   physical gap a new link would have to bridge. */
+	std::vector<char> reach(npolys, 0), island(npolys, 0);
+	std::vector<int> stack;
+
+	auto resolve = [&](const float *qpos) -> int {
+		nav_mesh_nearest_result_t nr;
+		char nerr[64];
+		if (!nav_mesh_find_nearest(navmesh, qpos, &nr, nerr, sizeof(nerr)) || !nr.found)
+			return -1;
+		unsigned int s, t, ip;
+		mesh->decodePolyId((dtPolyRef)nr.poly_ref, s, t, ip);
+		return (int)ip < npolys ? (int)ip : -1;
+	};
+
+	for (int s = 0; s < start_count; s++)
+	{
+		int sp = resolve(&starts[s * 3]);
+		if (sp >= 0 && !reach[sp]) { reach[sp] = 1; stack.push_back(sp); }
+	}
+	while (!stack.empty())
+	{
+		int i = stack.back(); stack.pop_back();
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int sa, t, ip; mesh->decodePolyId(tile->links[k].ref, sa, t, ip);
+			if ((int)ip < npolys && !reach[ip]) { reach[ip] = 1; stack.push_back((int)ip); }
+		}
+	}
+
+	int gp = resolve(goal);
+	if (gp < 0)
+	{
+		nav_set_error(error, error_size, "goal resolves to no poly");
+		return 0;
+	}
+	if (reach[gp])
+	{
+		nav_set_error(error, error_size, "goal poly is reachable (stale query?)");
+		return 0;
+	}
+
+	/* Reverse-directed BFS from the goal: every poly that can REACH the
+	   goal.  Disjoint from the reachable set by construction (overlap
+	   would mean the goal is reachable), so the closest pair across the
+	   two sets is the true directed gap -- an undirected island bleeds
+	   back through one-way links and degenerates to a zero-length "gap". */
+	std::vector<std::vector<int>> rev(npolys);
+	for (int i = 0; i < npolys; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int sa, t, ip; mesh->decodePolyId(tile->links[k].ref, sa, t, ip);
+			if ((int)ip < npolys) rev[ip].push_back(i);
+		}
+	}
+	island[gp] = 1; stack.push_back(gp);
+	while (!stack.empty())
+	{
+		int i = stack.back(); stack.pop_back();
+		for (size_t k = 0; k < rev[i].size(); k++)
+		{
+			int j = rev[i][k];
+			if (!island[j]) { island[j] = 1; stack.push_back(j); }
+		}
+	}
+
+	/* Rank candidate pairs by center distance, then refine the best few
+	   by closest VERTEX pair -- centers of large polys overstate the gap
+	   badly (a 300u "gap" can be a 40u hole between two big floors). */
+	struct cand { float d; int i, j; };
+	std::vector<cand> top;
+	const size_t kTop = 48;
+	for (int i = 0; i < ground; i++)
+	{
+		if (!reach[i] || tile->polys[i].flags == 0) continue;
+		float ci[3];
+		nav_mesh_poly_center(tile, &tile->polys[i], ci);
+		for (int j = 0; j < ground; j++)
+		{
+			if (!island[j] || tile->polys[j].flags == 0) continue;
+			float cj[3];
+			nav_mesh_poly_center(tile, &tile->polys[j], cj);
+			float dx = ci[0]-cj[0], dy = ci[1]-cj[1], dz = ci[2]-cj[2];
+			float d = dx*dx + dy*dy + dz*dz;
+			if (top.size() < kTop || d < top.back().d)
+			{
+				cand c = { d, i, j };
+				size_t at = top.size();
+				top.push_back(c);
+				while (at > 0 && top[at - 1].d > d)
+				{
+					top[at] = top[at - 1];
+					at--;
+				}
+				top[at] = c;
+				if (top.size() > kTop) top.pop_back();
+			}
+		}
+	}
+	if (top.empty())
+	{
+		nav_set_error(error, error_size, "no reachable/island ground poly pair");
+		return 0;
+	}
+	float best = 1e18f;
+	float bf[3] = {0,0,0}, bt[3] = {0,0,0};
+	for (size_t c = 0; c < top.size(); c++)
+	{
+		const dtPoly *pi = &tile->polys[top[c].i];
+		const dtPoly *pj = &tile->polys[top[c].j];
+		for (int vi = 0; vi < pi->vertCount; vi++)
+		{
+			const float *a = &tile->verts[pi->verts[vi] * 3];
+			for (int vj = 0; vj < pj->vertCount; vj++)
+			{
+				const float *b = &tile->verts[pj->verts[vj] * 3];
+				float dx = a[0]-b[0], dy = a[1]-b[1], dz = a[2]-b[2];
+				float d = dx*dx + dy*dy + dz*dz;
+				if (d < best)
+				{
+					best = d;
+					dtVcopy(bf, a);
+					dtVcopy(bt, b);
+				}
+			}
+		}
+	}
+	nav_recast_to_quake(bf, out_from);
+	nav_recast_to_quake(bt, out_to);
+	return 1;
 }
 
 /* Disable polys not connected to the largest mesh component.
