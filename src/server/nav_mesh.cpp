@@ -2724,7 +2724,10 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	/* nav_data ownership transferred to Detour navmesh via DT_TILE_FREE_DATA */
 	guard.nav_data = nullptr;
 
-	status = guard.runtime->query->init(guard.runtime->navmesh, 2048);
+	/* 2048 nodes was too small once off-mesh links multiplied: A* can
+	   exhaust the pool exploring cheap shortcut fans and report a
+	   reachable goal as PARTIAL|OUT_OF_NODES (seen on e2m3). */
+	status = guard.runtime->query->init(guard.runtime->navmesh, 16384);
 	if (dtStatusFailed(status))
 	{
 		nav_set_error(error, error_size, "Failed to initialize Detour navmesh query");
@@ -3023,6 +3026,11 @@ extern "C" int nav_mesh_find_path(
 	{
 		if (path_count <= 0 || path_refs[path_count - 1] != end_ref)
 		{
+			/* Out-of-nodes is a search-budget failure, not proof of
+			   unreachability -- flag it so connectivity checks don't
+			   chase phantom mesh gaps. */
+			const char *oon = dtStatusDetail(status, DT_OUT_OF_NODES)
+				? ", out of nodes" : "";
 			/* Report WHERE the search dead-ended, in quake coords -- the
 			   gap between here and the goal is the thing to go look at. */
 			const dtMeshTile *stop_tile = nullptr;
@@ -3033,11 +3041,11 @@ extern "C" int nav_mesh_find_path(
 				float stop_center[3], stop_quake[3];
 				nav_mesh_poly_center(stop_tile, stop_poly, stop_center);
 				nav_recast_to_quake(stop_center, stop_quake);
-				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial, stopped at %.0f %.0f %.0f)",
-					stop_quake[0], stop_quake[1], stop_quake[2]);
+				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial%s, stopped at %.0f %.0f %.0f)",
+					oon, stop_quake[0], stop_quake[1], stop_quake[2]);
 			}
 			else
-				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial)");
+				nav_set_error(error, error_size, "Detour findPath: goal unreachable (partial%s)", oon);
 			return 0;
 		}
 	}
