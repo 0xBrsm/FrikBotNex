@@ -1388,6 +1388,63 @@ void Nav_BuildForMap(void)
 		}
 	}
 
+	/* ---- Oracle-free connectivity check: reachability from spawns to
+	   every other spawn and every item, via the same pathfinder bots use.
+	   No hand-authored waypoints required, so this runs on any map. ---- */
+	if (nav_mesh != NULL)
+	{
+		int si;
+		float ref_origin[3];
+		int have_ref = 0;
+		int spawn_total = 0, spawn_unreachable = 0;
+		int item_total = 0, item_unreachable = 0;
+
+		for (si = 1; si < sv.num_edicts; si++)
+		{
+			edict_t *e = EDICT_NUM(si);
+			if (e->free) continue;
+			const char *cn = pr_strings + (int)e->v.classname;
+			int is_spawn = (strcmp(cn, "info_player_deathmatch") == 0 ||
+				strcmp(cn, "info_player_start") == 0);
+			int is_item = (strncmp(cn, "item_", 5) == 0 || strncmp(cn, "weapon_", 7) == 0);
+			if (!is_spawn && !is_item)
+				continue;
+
+			if (!have_ref)
+			{
+				if (!is_spawn)
+					continue; /* need a spawn as the reference point */
+				VectorCopy(e->v.origin, ref_origin);
+				have_ref = 1;
+				spawn_total++;
+				continue;
+			}
+
+			if (is_spawn)
+				spawn_total++;
+			else
+				item_total++;
+
+			nav_mesh_path_result_t path_result;
+			char perr[64];
+			if (!nav_mesh_find_path(nav_mesh, ref_origin, e->v.origin, &path_result, perr, sizeof(perr)))
+			{
+				if (is_spawn)
+					spawn_unreachable++;
+				else
+					item_unreachable++;
+				fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f)\n",
+					cn, e->v.origin[0], e->v.origin[1], e->v.origin[2]);
+			}
+		}
+
+		if (have_ref)
+			fprintf(stderr, "Nav: CONNECTIVITY: %d/%d spawns unreachable, %d/%d items unreachable\n",
+				spawn_unreachable, spawn_total, item_unreachable, item_total);
+		else
+			fprintf(stderr, "Nav: CONNECTIVITY: no spawn points found, skipped\n");
+	}
+
 	/* Inline diagnostics removed — see Nav_Validate() in nav_val.cpp */
 
 	/* ---- DM4 stairway connectivity probe — REMOVED ---- */
@@ -2323,7 +2380,12 @@ static void PF_nav_find_goal(void)
 		}
 	}
 
-	/* Count reachable polys from bot's position via flood fill */
+	/* Count reachable polys from bot's position via flood fill.
+	   Debug-only: the flood is O(polys) and this path runs every call
+	   that finds no goal, so an idle/stuck bot would otherwise re-run it
+	   (and print) every frame -- the same unthrottled-spam class fixed
+	   for this function's other two Con_Printf calls. */
+	if (nav_debug_cvar.value)
 	{
 		const dtNavMesh *nm = nav_mesh->navmesh;
 		const dtMeshTile *tile = nm->getTile(0);
@@ -2350,11 +2412,11 @@ static void PF_nav_find_goal(void)
 				}
 			}
 			reachable = flood_count;
-			Con_Printf("nav_find_goal[%d]: %d cached, %d avail, %d wanted, %d pathed, %d blocked | reachable=%d/%d\n",
+			fprintf(stderr, "nav_find_goal[%d]: %d cached, %d avail, %d wanted, %d pathed, %d blocked | reachable=%d/%d\n",
 				slot, nav_item_count, dbg_avail, dbg_wanted, dbg_pathed, dbg_blocked, reachable, total_polys);
 		}
 		else
-			Con_Printf("nav_find_goal[%d]: %d cached, %d avail, %d wanted, %d pathed, %d blocked\n",
+			fprintf(stderr, "nav_find_goal[%d]: %d cached, %d avail, %d wanted, %d pathed, %d blocked\n",
 				slot, nav_item_count, dbg_avail, dbg_wanted, dbg_pathed, dbg_blocked);
 	}
 
@@ -2376,10 +2438,11 @@ static void PF_nav_find_goal(void)
 			if (dtStatusSucceed(ps) && path_count > 0
 				&& nav_path_block_class(path, path_count, bot, NULL) != 1)
 			{
+				if (nav_debug_cvar.value)
 				{
 					float rdx = roam_rc[0] - bot_nearest[0];
 					float rdz = roam_rc[2] - bot_nearest[2];
-					Con_Printf("nav_find_goal[%d]: ROAM dist=%.0f polys=%d\n",
+					fprintf(stderr, "nav_find_goal[%d]: ROAM dist=%.0f polys=%d\n",
 						slot, sqrtf(rdx*rdx + rdz*rdz), path_count);
 				}
 				best_path_count = path_count;
