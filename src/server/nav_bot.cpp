@@ -85,6 +85,13 @@ extern ddef_t *ED_FindGlobal(char *name);
    so the bot can climb back to the ledge -- a deep drop-in with no exit is
    the pit-trap that a blanket cap raise caused before. */
 #define NAV_WATER_DROP_HEIGHT_MAX  400.0f  /* max drop-down into water */
+/* Deep dry drops past NAV_DROP_HEIGHT_MAX are handled by a separate
+   post-build pass (nav_mesh_compute_deep_drops) that only links landings
+   which can already path back out -- a flat cap raise to 320 dropped bots
+   into exitless dm3 pits, so depth alone can't be the gate.  Falls kill
+   past ~800u; stay under that. */
+#define NAV_DEEP_DROP_HEIGHT_MAX   700.0f
+#define NAV_DEEP_DROP_HORIZ_MAX    128.0f
 /* Rocket jump: the bot fires an RL at its feet while jumping for a big
    upward boost a normal run-jump can't reach.  Only used for orphan ledges
    above normal jump height; a single RJ clears ~250u up.  Horizontal reach
@@ -250,6 +257,49 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	return AI_JUMP;
 }
 
+/* Validator for nav_mesh_compute_deep_drops: is a walk-off fall from 'from'
+   down to 'to' physically clean?  Mirrors the boundary drop detector's
+   gates (walk-off line, hull-truth fall column, no lava/slime landing) on
+   centroid pairs.  Reachability/no-trap gating happens in the pass itself. */
+static int nav_deep_drop_validate(const float *from, const float *to, void *user)
+{
+	float drop = from[2] - to[2];
+	float dx = to[0] - from[0], dy = to[1] - from[1];
+	float hd = sqrtf(dx * dx + dy * dy);
+	(void)user;
+
+	if (drop <= NAV_DROP_HEIGHT_MAX || drop > NAV_DEEP_DROP_HEIGHT_MAX)
+		return 0;
+	if (hd < 8.0f || hd > NAV_DEEP_DROP_HORIZ_MAX)
+		return 0;
+
+	/* Walk-off line: level trace at start height out to above the landing. */
+	if (!nav_trace_clear_at_height(from, to, from[2] + 24.0f, NULL))
+		return 0;
+
+	/* Hull-truth the fall column at the landing spot. */
+	{
+		vec3_t fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+		trace_t tr;
+		fs[0] = to[0]; fs[1] = to[1]; fs[2] = from[2] + 26.0f;
+		fe[0] = to[0]; fe[1] = to[1]; fe[2] = to[2] + 24.0f;
+		tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
+		if (tr.startsolid || tr.allsolid || tr.endpos[2] > to[2] + 36.0f)
+			return 0;
+	}
+
+	/* Suicide-chute gate: never a drop that lands in lava or slime. */
+	{
+		vec3_t lc;
+		int lcont;
+		lc[0] = to[0]; lc[1] = to[1]; lc[2] = to[2] + 8.0f;
+		lcont = SV_PointContents(lc);
+		if (lcont == CONTENTS_LAVA || lcont == CONTENTS_SLIME)
+			return 0;
+	}
+	return AI_DROP;
+}
+
 static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *qpos, dtPolyRef *out_ref, float *out_nearest)
 {
 	dtQueryFilter filter;
@@ -295,6 +345,7 @@ static cvar_t nav_jump_links_cvar = {"nav_jump_links", "1"};
 static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
 static cvar_t nav_gap_jumps_cvar = {"nav_gap_jumps", "1"};
 static cvar_t nav_rocket_jumps_cvar = {"nav_rocket_jumps", "1"};
+static cvar_t nav_deep_drops_cvar = {"nav_deep_drops", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "0"};
 
 /* debug visualization state */
@@ -1311,6 +1362,37 @@ void Nav_BuildForMap(void)
 			memcpy(entity_links + entity_count, rlinks, (size_t)nr * sizeof(*entity_links));
 			entity_count += nr;
 			free(rlinks);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
+	}
+
+	/* Sixth pass: deep one-way drops (past the boundary detector's 192u
+	   cap) into lower regions with no other way in, gated on the landing
+	   already having a way back OUT.  Runs after every other link pass so
+	   both its no-access and no-trap findPath gates see the real graph. */
+	if (nav_mesh != NULL && nav_deep_drops_cvar.value)
+	{
+		nav_off_mesh_link_t *ddlinks = NULL;
+		int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
+		if (ndd > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + ndd) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
+			entity_count += ndd;
+			free(ddlinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -2818,6 +2900,7 @@ void Nav_RegisterBuiltins(void)
 	Cvar_RegisterVariable(&nav_directed_links_cvar);
 	Cvar_RegisterVariable(&nav_gap_jumps_cvar);
 	Cvar_RegisterVariable(&nav_rocket_jumps_cvar);
+	Cvar_RegisterVariable(&nav_deep_drops_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }

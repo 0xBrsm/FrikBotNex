@@ -299,6 +299,17 @@ int nav_mesh_compute_rocket_jumps(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
+/* Post-build pass: one-way DEEP drop links (past the boundary detector's
+   dry-land cap) into lower regions that have no other way in -- but ONLY
+   where the landing can already path back OUT (to the drop's start or to
+   the main mesh), so a pit with no exit never gets a link and can't trap
+   a bot (the dm3 pit regression when the flat cap was raised to 320).
+   Fills *out_links (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_deep_drops(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,

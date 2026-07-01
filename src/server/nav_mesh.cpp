@@ -1421,6 +1421,156 @@ int nav_mesh_compute_rocket_jumps(
 	return (int)links.size();
 }
 
+int nav_mesh_compute_deep_drops(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links)
+{
+	/* Envelope: deeper than the boundary detector's dry-land cap (192,
+	   which handles everything shallower), capped short of a lethal fall
+	   (~800u kills); near-vertical so this stays a drop, not a leap. */
+	const float kDeepDropMin = 192.0f;
+	const float kDeepDropMax = 700.0f;
+	const float kDeepDropHorizMax = 128.0f;
+
+	*out_links = nullptr;
+	if (navmesh == nullptr || navmesh->navmesh == nullptr
+		|| navmesh->query == nullptr || validate == nullptr)
+		return 0;
+	dtNavMesh *mesh = navmesh->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return 0;
+	const int ground = tile->header->offMeshBase;
+	if (ground <= 0)
+		return 0;
+
+	/* Walk-adjacency components (off-mesh hops excluded on purpose --
+	   the findPath gates below are what see those). */
+	std::vector<int> ga(ground);
+	for (int i = 0; i < ground; i++) ga[i] = i;
+	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground) ga[gf(i)] = gf((int)np);
+		}
+	}
+	std::vector<int> gacomp(ground);
+	std::vector<int> compsize(ground, 0);
+	for (int i = 0; i < ground; i++) { gacomp[i] = gf(i); compsize[gacomp[i]]++; }
+	int maincomp = 0;
+	for (int i = 0; i < ground; i++)
+		if (compsize[i] > compsize[maincomp]) maincomp = i;
+	int mainrep = -1;
+	for (int i = 0; i < ground; i++)
+		if (gacomp[i] == maincomp && tile->polys[i].flags != 0) { mainrep = i; break; }
+
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
+
+	const dtPolyRef base = mesh->getPolyRefBase(tile);
+	dtQueryFilter filter;
+	nav_mesh_setup_filter(&filter);
+
+	std::vector<int> seenLo, seenHi;
+	auto pair_seen = [&](int x, int y) {
+		int lo = x < y ? x : y, hi = x < y ? y : x;
+		for (size_t s = 0; s < seenLo.size(); s++)
+			if (seenLo[s] == lo && seenHi[s] == hi) return true;
+		return false;
+	};
+
+	std::vector<nav_off_mesh_link_t> links;
+	for (int hi = 0; hi < ground; hi++)
+	{
+		if (tile->polys[hi].flags == 0) continue;
+
+		/* Cheapest lower cross-patch poly inside the deep-drop envelope;
+		   prefer near-vertical and shallow (least fall for the access). */
+		float bestcost = 1e9f; int bestLo = -1;
+		for (int lo = 0; lo < ground; lo++)
+		{
+			if (tile->polys[lo].flags == 0) continue;
+			if (gacomp[hi] == gacomp[lo]) continue;
+			const float *qh = &q[hi * 3], *ql = &q[lo * 3];
+			float ddz = qh[2] - ql[2];
+			if (ddz <= kDeepDropMin || ddz > kDeepDropMax) continue;
+			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
+			float hd = sqrtf(dx*dx + dy*dy);
+			if (hd < 8.0f || hd > kDeepDropHorizMax) continue;
+			float cost = hd + ddz * 0.25f;
+			if (cost < bestcost) { bestcost = cost; bestLo = lo; }
+		}
+		if (bestLo < 0) continue;
+		if (pair_seen(gacomp[hi], gacomp[bestLo])) continue;
+
+		const float *qh = &q[hi * 3], *ql = &q[bestLo * 3];
+
+		if (validate(qh, ql, user) != AI_DROP)
+			continue;
+
+		float rh[3], rl[3];
+		dtPolyRef path[256]; int pc = 0;
+		nav_quake_to_recast(qh, rh);
+		nav_quake_to_recast(ql, rl);
+
+		/* New down-access only: if the low patch is already reachable from
+		   here, another route exists and this link is just a shortcut. */
+		dtStatus down = navmesh->query->findPath(base | (dtPolyRef)hi, base | (dtPolyRef)bestLo,
+			rh, rl, &filter, path, &pc, 256);
+		if (!dtStatusFailed(down) && !dtStatusDetail(down, DT_PARTIAL_RESULT) && pc > 0)
+			continue;
+
+		/* No-trap gate: the landing must already path back OUT -- up to the
+		   start, or to the main mesh -- before we offer a way in.  A pit
+		   with no exit never gets a link (the cap-320 dm3 regression). */
+		int escapes = (gacomp[bestLo] == maincomp);
+		if (!escapes)
+		{
+			dtStatus up = navmesh->query->findPath(base | (dtPolyRef)bestLo, base | (dtPolyRef)hi,
+				rl, rh, &filter, path, &pc, 256);
+			escapes = (!dtStatusFailed(up) && !dtStatusDetail(up, DT_PARTIAL_RESULT) && pc > 0);
+		}
+		if (!escapes && mainrep >= 0)
+		{
+			float rm[3];
+			nav_quake_to_recast(&q[mainrep * 3], rm);
+			dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)bestLo, base | (dtPolyRef)mainrep,
+				rl, rm, &filter, path, &pc, 256);
+			escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
+		}
+		if (!escapes)
+			continue;
+
+		nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
+		{
+			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
+			float hd = sqrtf(dx*dx + dy*dy);
+			float fall_time = sqrtf(2.0f * (qh[2] - ql[2]) / 800.0f);
+			lk.required_speed = hd / fall_time;
+			if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
+		}
+		links.push_back(lk);
+		seenLo.push_back(gacomp[hi] < gacomp[bestLo] ? gacomp[hi] : gacomp[bestLo]);
+		seenHi.push_back(gacomp[hi] < gacomp[bestLo] ? gacomp[bestLo] : gacomp[hi]);
+	}
+
+	if (links.empty())
+		return 0;
+	nav_off_mesh_link_t *outp = (nav_off_mesh_link_t *)malloc(links.size() * sizeof(nav_off_mesh_link_t));
+	if (outp == nullptr)
+		return 0;
+	memcpy(outp, links.data(), links.size() * sizeof(nav_off_mesh_link_t));
+	*out_links = outp;
+	fprintf(stderr, "Nav: computed %d deep-drop links\n", (int)links.size());
+	return (int)links.size();
+}
+
 /* Disable polys not connected to the largest mesh component.
    Hull-1 extraction emits sliver floors (lintels, beams) that bots
    reseed onto and then roam forever inside a 1-poly island.  Traversal
