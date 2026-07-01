@@ -2644,10 +2644,77 @@ static void PF_nav_report_stats(void)
 		tgt, tgt_dist);
 }
 
+/* void nav_debug_event(float streak, string tgt, float tgt_dist) = #93
+   One-shot forensic dump for a bot that has been continuously "stuck"
+   (wants to move, hasn't) for `streak` frames. Everything besides the
+   QC-side counters is read straight from the bot's own entvars_t --
+   origin/velocity/flags/movetype/waterlevel/groundentity are all
+   engine-physics fields, no QC round-trip needed. Investigating dm1/dm5
+   bots that go stk=100 cov=0 for 50+s straight: this pins down whether
+   it's a wedge (zero velocity, blocked on all sides) or something else
+   (e.g. stuck in air, no ground). */
+static void PF_nav_debug_event(void)
+{
+	edict_t *bot = PROG_TO_EDICT(pr_global_struct->self);
+	float streak = G_FLOAT(OFS_PARM0);
+	const char *tgt = G_STRING(OFS_PARM1);
+	float tgt_dist = G_FLOAT(OFS_PARM2);
+	const char *ground_cn = "none";
+	vec3_t down_start, down_end, fwd_start, fwd_end, hdir;
+	trace_t down_tr, fwd_tr;
+	const char *down_cn = "none", *fwd_cn = "none";
+	float hlen;
+
+	if (bot->v.groundentity)
+	{
+		edict_t *ge = PROG_TO_EDICT(bot->v.groundentity);
+		if (ge != NULL && !ge->free)
+			ground_cn = pr_strings + (int)ge->v.classname;
+	}
+
+	/* Straight-down probe: how far to the nearest floor, and what plane
+	   is it (normal.z tells us if it's walkable vs a slope too steep to
+	   ever set FL_ONGROUND). */
+	VectorCopy(bot->v.origin, down_start);
+	VectorCopy(bot->v.origin, down_end);
+	down_end[2] -= 64;
+	down_tr = SV_Move(down_start, bot->v.mins, bot->v.maxs, down_end, MOVE_NORMAL, bot);
+	if (down_tr.ent != NULL && !down_tr.ent->free)
+		down_cn = pr_strings + (int)down_tr.ent->v.classname;
+
+	/* Horizontal-velocity-direction probe: what's directly ahead of the
+	   bot's current travel heading, if it has any horizontal velocity. */
+	VectorCopy(bot->v.velocity, hdir);
+	hdir[2] = 0;
+	hlen = Length(hdir);
+	VectorCopy(bot->v.origin, fwd_start);
+	VectorCopy(bot->v.origin, fwd_end);
+	if (hlen > 1)
+	{
+		VectorScale(hdir, 48.0f / hlen, hdir);
+		VectorAdd(fwd_end, hdir, fwd_end);
+	}
+	fwd_tr = SV_Move(fwd_start, bot->v.mins, bot->v.maxs, fwd_end, MOVE_NORMAL, bot);
+	if (fwd_tr.ent != NULL && !fwd_tr.ent->free)
+		fwd_cn = pr_strings + (int)fwd_tr.ent->v.classname;
+
+	Con_Printf("NAVSTUCK bot=%s streak=%.0f pos=(%.0f %.0f %.0f) vel=(%.0f %.0f %.0f) "
+		"flags=%.0f onground=%d movetype=%.0f water=%.0f ground=%s tgt=%s dist=%.0f "
+		"down_frac=%.2f down_norm=(%.2f %.2f %.2f) down_ent=%s "
+		"fwd_frac=%.2f fwd_norm=(%.2f %.2f %.2f) fwd_ent=%s\n",
+		pr_strings + (int)bot->v.netname, streak,
+		bot->v.origin[0], bot->v.origin[1], bot->v.origin[2],
+		bot->v.velocity[0], bot->v.velocity[1], bot->v.velocity[2],
+		bot->v.flags, ((int)bot->v.flags & FL_ONGROUND) != 0, bot->v.movetype, bot->v.waterlevel,
+		ground_cn, tgt, tgt_dist,
+		down_tr.fraction, down_tr.plane.normal[0], down_tr.plane.normal[1], down_tr.plane.normal[2], down_cn,
+		fwd_tr.fraction, fwd_tr.plane.normal[0], fwd_tr.plane.normal[1], fwd_tr.plane.normal[2], fwd_cn);
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 13
+#define NAV_BUILTIN_COUNT 14
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -2675,6 +2742,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

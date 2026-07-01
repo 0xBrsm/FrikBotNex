@@ -191,6 +191,7 @@ float nav_debug_next;
 .float _m_idle_roam;   // frames idle with roam target (self)
 .float _m_polys_seen;  // unique polys visited (coverage proxy)
 .float _m_last_poly;   // last poly ref seen (for change detection)
+.float _m_stuck_streak; // consecutive stuck frames (wedge detection)
 
 void() bot_server_spawn =
 {
@@ -217,10 +218,42 @@ void() bot_debug_metrics =
 	if (vlen(vel) < 1)
 	{
 		if (self.b_wishdir != '0 0 0')
+		{
 			self._m_stuck = self._m_stuck + 1;
+			self._m_stuck_streak = self._m_stuck_streak + 1;
+			// One-shot forensic dump the moment a stuck run looks like a
+			// genuine wedge (~3s), not just a corner the recovery system
+			// is already handling (that resolves in ~1s, see bot_get).
+			if (self._m_stuck_streak == 30)
+			{
+				local string tgt_name;
+				local float tgt_dist;
+				if (self.target1 == self)
+				{
+					tgt_name = "ROAM";
+					tgt_dist = 0;
+				}
+				else if (self.target1)
+				{
+					tgt_name = self.target1.classname;
+					tgt_dist = rint(vlen(self.target1.origin - self.origin));
+				}
+				else
+				{
+					tgt_name = "NONE";
+					tgt_dist = 0;
+				}
+				nav_debug_event(self._m_stuck_streak, tgt_name, tgt_dist);
+			}
+		}
 		else
+		{
 			self._m_idle = self._m_idle + 1;
+			self._m_stuck_streak = 0;
+		}
 	}
+	else
+		self._m_stuck_streak = 0;
 	self._m_last_origin = self.origin;
 
 	// idle breakdown: no target vs roam

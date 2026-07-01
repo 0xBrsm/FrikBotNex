@@ -585,10 +585,21 @@ void() bot_get =
 		// pileup short of the lightning-gun drop). The ledge-departure
 		// itself is untouched: this only fires on-ground, before the bot
 		// has committed to running off.
+		// Airborne wedges too: a bot can end up pressed flat against a
+		// wall while falling (not resting on anything, so FL_ONGROUND
+		// never sets) and just grind straight into it under gravity,
+		// sliding down the face for 60-90s until it happens to clear the
+		// wall's bottom edge (dm1: Erwin wedged mid-air, wishdir jammed
+		// into a vertical wall, NAVSTUCK forensic showed fwd trace fraction
+		// 0.00 the entire time). A real jump/drop arc never takes anywhere
+		// near 2s, so once _nav_pin_strikes has actually latched (a full
+		// realized 2s window of <24u net movement) it's safe to veer even
+		// mid-air -- this can't misfire on a legitimate airborne link.
 		if (self._progress_stall > 4
 			&& (link_type == 0 || link_type == 2 || link_type == 3
 				|| link_type == 4 || link_type == 5)
-			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
+			&& self.b_wishdir != '0 0 0'
+			&& ((self.flags & FL_ONGROUND) || self._nav_pin_strikes > 0))
 		{
 			rt_x = self.b_wishdir_y;
 			rt_y = 0 - self.b_wishdir_x;
