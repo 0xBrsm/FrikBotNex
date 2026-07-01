@@ -27,6 +27,7 @@ extern "C" {
 
 #include <stdlib.h>
 #include <string.h>
+#include <vector>
 
 /* Quake↔Recast coordinate conversion (Quake: X,Y,Z-up  Recast: X,Z,Y-up) */
 static inline void nav_q2r(const float *q, float *r) { r[0]=q[0]; r[1]=q[2]; r[2]=q[1]; }
@@ -1393,11 +1394,10 @@ void Nav_BuildForMap(void)
 	   No hand-authored waypoints required, so this runs on any map. ---- */
 	if (nav_mesh != NULL)
 	{
+		struct nav_conn_entry { const char *cn; float pos[3]; };
+		std::vector<nav_conn_entry> spawns;
+		std::vector<nav_conn_entry> items;
 		int si;
-		float ref_origin[3];
-		int have_ref = 0;
-		int spawn_total = 0, spawn_unreachable = 0;
-		int item_total = 0, item_unreachable = 0;
 
 		for (si = 1; si < sv.num_edicts; si++)
 		{
@@ -1407,40 +1407,89 @@ void Nav_BuildForMap(void)
 			int is_spawn = (strcmp(cn, "info_player_deathmatch") == 0 ||
 				strcmp(cn, "info_player_start") == 0);
 			int is_item = (strncmp(cn, "item_", 5) == 0 || strncmp(cn, "weapon_", 7) == 0);
-			if (!is_spawn && !is_item)
-				continue;
-
-			if (!have_ref)
-			{
-				if (!is_spawn)
-					continue; /* need a spawn as the reference point */
-				VectorCopy(e->v.origin, ref_origin);
-				have_ref = 1;
-				spawn_total++;
-				continue;
-			}
-
+			nav_conn_entry ent;
+			ent.cn = cn;
+			VectorCopy(e->v.origin, ent.pos);
 			if (is_spawn)
-				spawn_total++;
-			else
-				item_total++;
-
-			nav_mesh_path_result_t path_result;
-			char perr[64];
-			if (!nav_mesh_find_path(nav_mesh, ref_origin, e->v.origin, &path_result, perr, sizeof(perr)))
-			{
-				if (is_spawn)
-					spawn_unreachable++;
-				else
-					item_unreachable++;
-				fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f)\n",
-					cn, e->v.origin[0], e->v.origin[1], e->v.origin[2]);
-			}
+				spawns.push_back(ent);
+			else if (is_item)
+				items.push_back(ent);
 		}
 
-		if (have_ref)
+		/* A bot can respawn at ANY deathmatch spawn, so an item or spawn is
+		   only genuinely unreachable if it can't be reached from ANY of
+		   them. A single fixed reference spawn gives false mass-unreachable
+		   reports whenever that one spawn happens to sit on a small or
+		   one-way-linked pocket of the mesh (confirmed on e4m7/e2m4/e3m5:
+		   picking a *different*, still-valid reference spawn swung the
+		   unreachable count from ~5% to ~90%, i.e. the old single-reference
+		   design was measuring the reference's pocket, not the map). Union
+		   across all spawns instead -- this also naturally survives spawns
+		   that don't resolve to a floor poly at all (they just contribute
+		   nothing, rather than poisoning every query). */
+		int usable_spawns = 0;
+		for (size_t i = 0; i < spawns.size(); i++)
+		{
+			nav_mesh_path_result_t self_check;
+			char perr[64];
+			if (nav_mesh_find_path(nav_mesh, spawns[i].pos, spawns[i].pos, &self_check, perr, sizeof(perr)))
+				usable_spawns++;
+		}
+
+		if (usable_spawns > 0)
+		{
+			int spawn_unreachable = 0, item_unreachable = 0;
+
+			fprintf(stderr, "Nav: CONNECTIVITY: %d/%d spawns resolve to a navmesh floor poly\n",
+				usable_spawns, (int)spawns.size());
+
+			for (size_t i = 0; i < spawns.size(); i++)
+			{
+				int reached = 0;
+				for (size_t j = 0; j < spawns.size(); j++)
+				{
+					if (j == i) continue;
+					nav_mesh_path_result_t path_result;
+					char perr[64];
+					if (nav_mesh_find_path(nav_mesh, spawns[j].pos, spawns[i].pos, &path_result, perr, sizeof(perr)))
+					{
+						reached = 1;
+						break;
+					}
+				}
+				if (!reached)
+				{
+					spawn_unreachable++;
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every other spawn\n",
+						spawns[i].cn, spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2]);
+				}
+			}
+			for (size_t i = 0; i < items.size(); i++)
+			{
+				int reached = 0;
+				for (size_t j = 0; j < spawns.size(); j++)
+				{
+					nav_mesh_path_result_t path_result;
+					char perr[64];
+					if (nav_mesh_find_path(nav_mesh, spawns[j].pos, items[i].pos, &path_result, perr, sizeof(perr)))
+					{
+						reached = 1;
+						break;
+					}
+				}
+				if (!reached)
+				{
+					item_unreachable++;
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn\n",
+						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2]);
+				}
+			}
+
 			fprintf(stderr, "Nav: CONNECTIVITY: %d/%d spawns unreachable, %d/%d items unreachable\n",
-				spawn_unreachable, spawn_total, item_unreachable, item_total);
+				spawn_unreachable, (int)spawns.size(), item_unreachable, (int)items.size());
+		}
+		else if (!spawns.empty())
+			fprintf(stderr, "Nav: CONNECTIVITY: no spawn resolves to a navmesh floor poly, skipped\n");
 		else
 			fprintf(stderr, "Nav: CONNECTIVITY: no spawn points found, skipped\n");
 	}

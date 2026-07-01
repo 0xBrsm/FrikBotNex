@@ -21,7 +21,14 @@ BOTS="${BOTS:-4}"
 DURATION="${DURATION:-60}"
 BATCH_SIZE="${BATCH_SIZE:-6}"
 OUTDIR="${OUTDIR:-$GAMEDIR/navruns/harness}"
-MAPS="${*:-dm1 dm2 dm3 dm4 dm5 dm6}"
+ID1_MAPS="start \
+	e1m1 e1m2 e1m3 e1m4 e1m5 e1m6 e1m7 \
+	e2m1 e2m2 e2m3 e2m4 e2m5 e2m6 e2m7 \
+	e3m1 e3m2 e3m3 e3m4 e3m5 e3m6 e3m7 \
+	e4m1 e4m2 e4m3 e4m4 e4m5 e4m6 e4m7 e4m8 \
+	end \
+	dm1 dm2 dm3 dm4 dm5 dm6"
+MAPS="${*:-$ID1_MAPS}"
 
 # A map fails if any of these are crossed.
 MAX_STUCK_PCT="${MAX_STUCK_PCT:-15}"
