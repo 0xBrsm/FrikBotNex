@@ -1642,6 +1642,225 @@ int nav_mesh_compute_deep_drops(
 	return (int)links.size();
 }
 
+int nav_mesh_compute_swim_links(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links)
+{
+	/* 3D reach cap: swimming is slow, and any submerged route longer than
+	   this almost certainly has intermediate polys the straight segment
+	   would rather hop through anyway. */
+	const float kSwimMax = 600.0f;
+
+	*out_links = nullptr;
+	if (navmesh == nullptr || navmesh->navmesh == nullptr
+		|| navmesh->query == nullptr || validate == nullptr)
+		return 0;
+	dtNavMesh *mesh = navmesh->navmesh;
+	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
+	if (tile == nullptr || tile->header == nullptr)
+		return 0;
+	const int ground = tile->header->offMeshBase;
+	if (ground <= 0)
+		return 0;
+
+	/* Walk-adjacency components, same as the deep-drop pass. */
+	std::vector<int> ga(ground);
+	for (int i = 0; i < ground; i++) ga[i] = i;
+	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		if (p->flags == 0) continue;
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
+		}
+	}
+	std::vector<int> gacomp(ground);
+	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
+
+	std::vector<float> q;
+	nav_collect_ground_centroids(tile, ground, q);
+
+	const dtPolyRef base = mesh->getPolyRefBase(tile);
+	dtQueryFilter filter;
+	nav_mesh_setup_filter(&filter);
+
+	std::vector<int> seenLo, seenHi;
+	auto pair_seen = [&](int x, int y) {
+		int lo = x < y ? x : y, hi = x < y ? y : x;
+		for (size_t s = 0; s < seenLo.size(); s++)
+			if (seenLo[s] == lo && seenHi[s] == hi) return true;
+		return false;
+	};
+
+	/* Centroid prefilter slack, as in the deep-drop pass. */
+	std::vector<float> pr(ground, 0.0f), pzmin(ground, 0.0f), pzmax(ground, 0.0f);
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		const float *c = &q[i * 3];
+		float r = 0.0f, zmin = 1e9f, zmax = -1e9f;
+		for (int v = 0; v < p->vertCount; v++)
+		{
+			float vq[3];
+			nav_recast_to_quake(&tile->verts[p->verts[v] * 3], vq);
+			float dx = vq[0]-c[0], dy = vq[1]-c[1];
+			float d = sqrtf(dx*dx + dy*dy);
+			if (d > r) r = d;
+			if (vq[2] < zmin) zmin = vq[2];
+			if (vq[2] > zmax) zmax = vq[2];
+		}
+		pr[i] = r; pzmin[i] = zmin; pzmax[i] = zmax;
+	}
+
+	auto closest_verts = [&](int a, int b, float *qa, float *qb) {
+		const dtPoly *pa = &tile->polys[a], *pb = &tile->polys[b];
+		float best = 1e18f;
+		for (int va = 0; va < pa->vertCount; va++)
+		{
+			float aq[3];
+			nav_recast_to_quake(&tile->verts[pa->verts[va] * 3], aq);
+			for (int vb = 0; vb < pb->vertCount; vb++)
+			{
+				float bq[3];
+				nav_recast_to_quake(&tile->verts[pb->verts[vb] * 3], bq);
+				float dx = aq[0]-bq[0], dy = aq[1]-bq[1], dz = aq[2]-bq[2];
+				float d = dx*dx + dy*dy + dz*dz;
+				if (d < best)
+				{
+					best = d;
+					memcpy(qa, aq, sizeof(float) * 3);
+					memcpy(qb, bq, sizeof(float) * 3);
+				}
+			}
+		}
+	};
+
+	std::vector<nav_off_mesh_link_t> links;
+	for (int i = 0; i < ground; i++)
+	{
+		if (tile->polys[i].flags == 0) continue;
+
+		struct cand { float cost; int j; };
+		std::vector<cand> cands;
+		for (int j = 0; j < ground; j++)
+		{
+			if (j == i || tile->polys[j].flags == 0) continue;
+			if (gacomp[i] == gacomp[j]) continue;
+			const float *qi = &q[i * 3], *qj = &q[j * 3];
+			float dx = qj[0]-qi[0], dy = qj[1]-qi[1];
+			float hd_min = sqrtf(dx*dx + dy*dy) - pr[i] - pr[j];
+			if (hd_min < 0.0f) hd_min = 0.0f;
+			float dz_min = pzmin[i] - pzmax[j];
+			if (pzmin[j] - pzmax[i] > dz_min) dz_min = pzmin[j] - pzmax[i];
+			if (dz_min < 0.0f) dz_min = 0.0f;
+			float d3 = sqrtf(hd_min*hd_min + dz_min*dz_min);
+			if (d3 > kSwimMax) continue;
+			cand c = { d3, j };
+			cands.push_back(c);
+		}
+		if (cands.empty()) continue;
+		std::sort(cands.begin(), cands.end(),
+			[](const cand &a, const cand &b) { return a.cost < b.cost; });
+
+		/* Candidate endpoints on a poly: each vertex nudged 16u toward the
+		   centroid (rim points hug walls and the validator sweeps the full
+		   player hull), plus the centroid itself.  The one straight
+		   hull-clear corridor can sit anywhere on the two polys (end's
+		   shaft is barely hull-wide), so search pairs instead of trusting
+		   the single closest-vertex pair. */
+		auto gather_pts = [&](int poly, float pts[7][3]) {
+			const dtPoly *p = &tile->polys[poly];
+			const float *c = &q[poly * 3];
+			int n = 0;
+			for (int v = 0; v < p->vertCount && n < 6; v++, n++)
+			{
+				float vq[3];
+				nav_recast_to_quake(&tile->verts[p->verts[v] * 3], vq);
+				float d[3] = { c[0]-vq[0], c[1]-vq[1], c[2]-vq[2] };
+				float len = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+				float t = (len < 16.0f || len < 1.0f) ? 1.0f : 16.0f / len;
+				pts[n][0] = vq[0] + d[0]*t;
+				pts[n][1] = vq[1] + d[1]*t;
+				pts[n][2] = vq[2] + d[2]*t;
+			}
+			pts[n][0] = c[0]; pts[n][1] = c[1]; pts[n][2] = c[2];
+			return n + 1;
+		};
+
+		const int kTryMax = 8;
+		for (size_t ci = 0; ci < cands.size() && (int)ci < kTryMax; ci++)
+		{
+			int j = cands[ci].j;
+			if (pair_seen(gacomp[i], gacomp[j])) continue;
+
+			float pa[7][3], pb[7][3];
+			int na = gather_pts(i, pa), nb = gather_pts(j, pb);
+			struct ppair { float d; int a, b; };
+			std::vector<ppair> pairs;
+			for (int a = 0; a < na; a++)
+				for (int b = 0; b < nb; b++)
+				{
+					float dx = pb[b][0]-pa[a][0], dy = pb[b][1]-pa[a][1], dz = pb[b][2]-pa[a][2];
+					float d = sqrtf(dx*dx + dy*dy + dz*dz);
+					if (d > kSwimMax) continue;
+					ppair pp = { d, a, b };
+					pairs.push_back(pp);
+				}
+			std::sort(pairs.begin(), pairs.end(),
+				[](const ppair &x, const ppair &y) { return x.d < y.d; });
+
+			/* Validator proves the whole segment is underwater and the
+			   player hull can swim it. */
+			float qa[3], qb[3];
+			int found = 0;
+			const int kPairTryMax = 16;
+			for (size_t pi = 0; pi < pairs.size() && (int)pi < kPairTryMax; pi++)
+			{
+				if (validate(pa[pairs[pi].a], pb[pairs[pi].b], user) == AI_DROP)
+				{
+					memcpy(qa, pa[pairs[pi].a], sizeof(qa));
+					memcpy(qb, pb[pairs[pi].b], sizeof(qb));
+					found = 1;
+					break;
+				}
+			}
+			if (!found)
+				continue;
+
+			/* New access only: if a path already exists either way, this
+			   would just be a shortcut inside connected water. */
+			float ra[3], rb[3];
+			dtPolyRef path[256]; int pc = 0;
+			nav_quake_to_recast(qa, ra);
+			nav_quake_to_recast(qb, rb);
+			dtStatus fwd = navmesh->query->findPath(base | (dtPolyRef)i, base | (dtPolyRef)j,
+				ra, rb, &filter, path, &pc, 256);
+			if (!dtStatusFailed(fwd) && !dtStatusDetail(fwd, DT_PARTIAL_RESULT) && pc > 0)
+				break;
+
+			links.push_back(nav_make_link(qa, qb, AI_DROP, 1, 32.0f));
+			seenLo.push_back(gacomp[i] < gacomp[j] ? gacomp[i] : gacomp[j]);
+			seenHi.push_back(gacomp[i] < gacomp[j] ? gacomp[j] : gacomp[i]);
+			break;
+		}
+	}
+
+	if (links.empty())
+		return 0;
+	nav_off_mesh_link_t *outp = (nav_off_mesh_link_t *)malloc(links.size() * sizeof(nav_off_mesh_link_t));
+	if (outp == nullptr)
+		return 0;
+	memcpy(outp, links.data(), links.size() * sizeof(nav_off_mesh_link_t));
+	*out_links = outp;
+	fprintf(stderr, "Nav: computed %d swim links\n", (int)links.size());
+	return (int)links.size();
+}
+
 int nav_mesh_gap_probe(
 	const nav_mesh_runtime_t *navmesh,
 	const float *starts, int start_count,

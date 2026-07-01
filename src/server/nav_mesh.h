@@ -311,6 +311,17 @@ int nav_mesh_compute_deep_drops(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
+/* Post-build pass: bidirectional swim links between components whose
+   closest rims connect through an entirely-underwater straight segment
+   (the validator proves full submersion + hull clearance).  Water is the
+   one medium where traversal is symmetric and fall-free, so unlike every
+   other repair pass these links are safely two-way.  Fills *out_links
+   (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_swim_links(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
 /* Diagnostic: for an unreachable goal, BFS the poly graph from the given
    start positions (directed, off-mesh links included) and from the goal
    (undirected island), then report the closest ground-poly pair across

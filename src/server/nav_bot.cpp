@@ -303,6 +303,89 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	return AI_DROP;
 }
 
+/* Validator for nav_mesh_compute_swim_links: can a player swim the straight
+   segment from 'from' to 'to' (floor points, probed at swim height +24)?
+   Submersion is what makes the link safely bidirectional: no falls, no
+   damage, symmetric traversal.  Deliberately NOT a full-corridor hull sweep:
+   tight shafts (end's exit well is barely hull-wide and skewed) have no
+   straight hull-clear line, yet swim physics slides along the walls just
+   fine.  Instead: every sample along the line must be open water (a small
+   air allowance right at an endpoint covers surface pop-outs), the point
+   trace must not cross solid, and the player hull must actually fit at
+   both endpoints. */
+static int nav_swim_link_validate(const float *from, const float *to, void *user)
+{
+	vec3_t fs, fe, delta;
+	float len;
+	int i, steps, water_samples = 0;
+	(void)user;
+
+	for (i = 0; i < 3; i++)
+	{
+		fs[i] = from[i];
+		fe[i] = to[i];
+		delta[i] = to[i] - from[i];
+	}
+	fs[2] += 24.0f;
+	fe[2] += 24.0f;
+	len = sqrtf(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]);
+	if (len < 8.0f)
+		return 0;
+
+	steps = (int)(len / 16.0f) + 1;
+	for (i = 0; i <= steps; i++)
+	{
+		vec3_t p;
+		float f = (float)i / (float)steps;
+		float edge_dist = (f < 0.5f ? f : 1.0f - f) * len;
+		int c;
+		p[0] = fs[0] + (fe[0] - fs[0]) * f;
+		p[1] = fs[1] + (fe[1] - fs[1]) * f;
+		p[2] = fs[2] + (fe[2] - fs[2]) * f;
+		c = SV_PointContents(p);
+		if (c == CONTENTS_WATER)
+			water_samples++;
+		else if (c != CONTENTS_EMPTY || edge_dist > 56.0f)
+			return 0; /* solid/lava/slime anywhere, or air away from the rims */
+	}
+	/* The middle must be genuinely submerged, not a mostly-air hop. */
+	if (water_samples * 2 < steps + 1)
+		return 0;
+
+	/* Point trace catches any thin wall the sampling straddled. */
+	{
+		vec3_t zero3 = {0, 0, 0};
+		trace_t tr;
+		tr = SV_Move(fs, zero3, zero3, fe, MOVE_NOMONSTERS, NULL);
+		if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
+			return 0;
+	}
+
+	/* The player hull must fit at each endpoint -- at swim height, or a
+	   little higher for shelves right under the surface (the bot floats). */
+	for (i = 0; i < 2; i++)
+	{
+		const float *pt = i ? to : from;
+		vec3_t hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+		int fits = 0;
+		for (float up = 24.0f; up <= 40.0f; up += 8.0f)
+		{
+			vec3_t hp;
+			trace_t tr;
+			hp[0] = pt[0]; hp[1] = pt[1]; hp[2] = pt[2] + up;
+			tr = SV_Move(hp, hmins, hmaxs, hp, MOVE_NOMONSTERS, NULL);
+			if (!tr.startsolid && !tr.allsolid)
+			{
+				fits = 1;
+				break;
+			}
+		}
+		if (!fits)
+			return 0;
+	}
+	return AI_DROP;
+}
+
 static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *qpos, dtPolyRef *out_ref, float *out_nearest)
 {
 	dtQueryFilter filter;
@@ -349,6 +432,7 @@ static cvar_t nav_directed_links_cvar = {"nav_directed_links", "1"};
 static cvar_t nav_gap_jumps_cvar = {"nav_gap_jumps", "1"};
 static cvar_t nav_rocket_jumps_cvar = {"nav_rocket_jumps", "1"};
 static cvar_t nav_deep_drops_cvar = {"nav_deep_drops", "1"};
+static cvar_t nav_swim_links_cvar = {"nav_swim_links", "1"};
 static cvar_t nav_debug_cvar = {"nav_debug", "0"};
 
 /* debug visualization state */
@@ -1396,6 +1480,37 @@ void Nav_BuildForMap(void)
 			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
 			entity_count += ndd;
 			free(ddlinks);
+
+			nav_mesh_destroy(nav_mesh);
+			memset(&summary, 0, sizeof(summary));
+			memset(error, 0, sizeof(error));
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+				&config, entity_links, entity_count, &summary,
+				nav_link_callback, NULL, error, sizeof(error));
+			if (nav_mesh == NULL)
+			{
+				Con_Printf("Nav: rebuild failed: %s\n", error);
+				free(verts); free(tris); free(entity_links);
+				return;
+			}
+		}
+	}
+
+	/* Seventh pass: bidirectional swim links across components whose rims
+	   connect through fully-submerged water (e4m8 canal tunnel, end's
+	   underwater ledge).  Runs last so its new-access findPath gate sees
+	   every other link. */
+	if (nav_mesh != NULL && nav_swim_links_cvar.value)
+	{
+		nav_off_mesh_link_t *swlinks = NULL;
+		int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
+		if (nsw > 0)
+		{
+			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+				(size_t)(entity_count + nsw) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
+			entity_count += nsw;
+			free(swlinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -2948,6 +3063,7 @@ void Nav_RegisterBuiltins(void)
 	Cvar_RegisterVariable(&nav_gap_jumps_cvar);
 	Cvar_RegisterVariable(&nav_rocket_jumps_cvar);
 	Cvar_RegisterVariable(&nav_deep_drops_cvar);
+	Cvar_RegisterVariable(&nav_swim_links_cvar);
 	Cvar_RegisterVariable(&nav_debug_cvar);
 	Cvar_SetValue("nav_enabled", 1);
 }
