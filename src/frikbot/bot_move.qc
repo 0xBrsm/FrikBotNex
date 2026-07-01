@@ -579,8 +579,15 @@ void() bot_get =
 		// approaches too: the boarding point can sit past a wall corner
 		// the straight-line steer grinds on forever (dm2: Erwin frozen
 		// 30+s walking full-speed into a wall short of a lift shaft).
+		// Drop approaches too: several bots beelining for the same ledge
+		// corner box each other in the open room behind it, and with no
+		// veer they grind full-speed into each other forever (dm5: 4-bot
+		// pileup short of the lightning-gun drop). The ledge-departure
+		// itself is untouched: this only fires on-ground, before the bot
+		// has committed to running off.
 		if (self._progress_stall > 4
-			&& (link_type == 0 || link_type == 2 || link_type == 4 || link_type == 5)
+			&& (link_type == 0 || link_type == 2 || link_type == 3
+				|| link_type == 4 || link_type == 5)
 			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
 		{
 			rt_x = self.b_wishdir_y;
@@ -600,10 +607,19 @@ void() bot_get =
 			{
 				// Both shoulders blocked at the same depth: a body (or
 				// flat wall) dead ahead — asymmetry veer can't fire, so
-				// side-step square right and let the stall reset once
-				// the lane clears (dm6: bot parked on the corner poly
-				// froze the queue behind it indefinitely).
-				self.b_wishdir = normalize(rt);
+				// side-step square and let the stall reset once the lane
+				// clears (dm6: bot parked on the corner poly froze the
+				// queue behind it indefinitely). Split the side-step by
+				// player slot (colormap is the engine's per-client edict
+				// number) so a pile of bots stuck the same way doesn't
+				// all step in lockstep and just rotate in place forever
+				// (dm5: 4 bots wedged short of the lightning-gun drop
+				// kept re-forming the same circular jam every time they
+				// all turned the identical direction).
+				if (self.colormap & 1)
+					self.b_wishdir = normalize(rt);
+				else
+					self.b_wishdir = normalize(rt * -1);
 			}
 		}
 
