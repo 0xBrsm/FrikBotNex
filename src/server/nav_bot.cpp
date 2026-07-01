@@ -211,10 +211,12 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 			return AI_WALK;
 	}
 
-	/* JUMP: bidirectional, so the harder (upward) direction governs -- clear
-	   |dz| against gravity (apex v0^2/2g ~45u), run distance <= maxspeed *
-	   air time, and the apex arc must be wall-free. */
-	disc = v0 * v0 - 2.0f * g * adz;
+	/* JUMP: clear dz against gravity (apex v0^2/2g ~45u up), run distance <=
+	   maxspeed * air time, apex arc wall-free.  Use SIGNED dz, not |dz| --
+	   a downward target gets a LONGER airtime (falls further before landing),
+	   never shorter.  disc can only go negative when dz is positive (a rise
+	   past the jump's max height); it's never negative for dz<=0. */
+	disc = v0 * v0 - 2.0f * g * dz;
 	if (disc < 0.0f)
 	{
 		/* Over a normal jump's reach.  A rocket jump can still get UP to a
