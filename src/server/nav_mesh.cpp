@@ -1738,6 +1738,28 @@ int nav_mesh_gap_probe(
 		}
 	}
 
+	/* Island footprint helps tell a one-poly pocket from a whole wing. */
+	{
+		int nis = 0, nre = 0;
+		float bb[6] = {1e9f,1e9f,1e9f,-1e9f,-1e9f,-1e9f};
+		for (int i = 0; i < ground; i++)
+		{
+			if (reach[i]) nre++;
+			if (!island[i]) continue;
+			nis++;
+			float c[3], qc[3];
+			nav_mesh_poly_center(tile, &tile->polys[i], c);
+			nav_recast_to_quake(c, qc);
+			for (int a = 0; a < 3; a++)
+			{
+				if (qc[a] < bb[a]) bb[a] = qc[a];
+				if (qc[a] > bb[a+3]) bb[a+3] = qc[a];
+			}
+		}
+		fprintf(stderr, "Nav: gap-probe island: %d polys (reach %d) bbox (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n",
+			nis, nre, bb[0], bb[1], bb[2], bb[3], bb[4], bb[5]);
+	}
+
 	/* Rank candidate pairs by center distance, then refine the best few
 	   by closest VERTEX pair -- centers of large polys overstate the gap
 	   badly (a 300u "gap" can be a 40u hole between two big floors). */
