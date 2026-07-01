@@ -1480,6 +1480,7 @@ void Nav_BuildForMap(void)
 			for (size_t i = 0; i < items.size(); i++)
 			{
 				int reached = 0;
+				char lasterr[64] = "";
 				for (size_t j = 0; j < spawns.size(); j++)
 				{
 					nav_mesh_path_result_t path_result;
@@ -1489,12 +1490,13 @@ void Nav_BuildForMap(void)
 						reached = 1;
 						break;
 					}
+					strncpy(lasterr, perr, sizeof(lasterr) - 1);
 				}
 				if (!reached)
 				{
 					item_unreachable++;
-					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn\n",
-						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2]);
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn (%s)\n",
+						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], lasterr);
 				}
 			}
 

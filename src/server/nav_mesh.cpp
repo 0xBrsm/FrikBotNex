@@ -1074,13 +1074,18 @@ int nav_mesh_compute_directed_links(
 		int need_in = (gc_bwd[c] && !gc_fwd[c]);
 		int need_out = (gc_fwd[c] && !gc_bwd[c]);
 		/* A component with NO existing link either way (never reached by
-		   the JUMP/SUPER_JUMP passes, e.g. an isolated ledge) falls through
-		   both checks above and used to be skipped entirely -- permanently
-		   trapping any bot that spawns or lands there. It doesn't need a
-		   way IN (nothing requires walking to it), just a way OUT. */
+		   the JUMP/SUPER_JUMP passes, e.g. an isolated ledge or an item
+		   alcove) falls through both checks above and used to be skipped
+		   entirely -- permanently trapping any bot that spawns or lands
+		   there, and hiding any item sitting in it from every spawn.
+		   Search for an OUT candidate (that's the minimum a dead-end spot
+		   needs), but mark the resulting link bidirectional so an item-only
+		   pocket also becomes reachable FROM the main mesh, not just able
+		   to leave it. */
+		int isolated = (!gc_fwd[c] && !gc_bwd[c]);
 		if (!need_in && !need_out)
 		{
-			if (!gc_fwd[c] && !gc_bwd[c])
+			if (isolated)
 				need_out = 1;
 			else
 				continue;
@@ -1136,8 +1141,12 @@ int nav_mesh_compute_directed_links(
 			}
 		}
 		if (bestType)
-			/* only the missing direction */
-			links.push_back(nav_make_link(bestS, bestE, bestType, 0, 32.0f));
+			/* Reciprocal fix for an already one-way component: only the
+			   missing direction. A fully isolated component gets a
+			   bidirectional link instead (matching the main JUMP/DROP
+			   generation passes above, which default to bidirectional) so
+			   an item sitting in it is reachable, not just escapable. */
+			links.push_back(nav_make_link(bestS, bestE, bestType, isolated ? 1 : 0, 32.0f));
 	}
 
 	if (links.empty())
