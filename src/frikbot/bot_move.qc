@@ -575,8 +575,12 @@ void() bot_get =
 		// (dm6 pedestal corner: 3-bot train frozen 35+ seconds).
 		// Jump links recover too: while still walking the approach, a
 		// blocked jumper needs the same veer/side-step as flat ground
-		// (the jump itself is gated on a clear lane above).
-		if (self._progress_stall > 4 && (link_type == 0 || link_type == 2)
+		// (the jump itself is gated on a clear lane above). Plat/train
+		// approaches too: the boarding point can sit past a wall corner
+		// the straight-line steer grinds on forever (dm2: Erwin frozen
+		// 30+s walking full-speed into a wall short of a lift shaft).
+		if (self._progress_stall > 4
+			&& (link_type == 0 || link_type == 2 || link_type == 4 || link_type == 5)
 			&& self.b_wishdir != '0 0 0' && (self.flags & FL_ONGROUND))
 		{
 			rt_x = self.b_wishdir_y;
