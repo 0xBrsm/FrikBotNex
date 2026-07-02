@@ -796,18 +796,45 @@ static int nav_top_face_has_clearance(edict_t *e)
 	return 0;
 }
 
+/* A func_door acting as a room-sized collapsing floor (e2m6's oubliette):
+   opens downward, footprint wide enough to stand on, parked closed at its
+   top position, with standing room above.  These get baked as floor AND
+   get a plat-style ride link, since the descent is the intended route. */
+static int nav_is_floor_collapse_door(edict_t *e)
+{
+	eval_t *pos1 = GetEdictFieldValue(e, "pos1");
+	eval_t *pos2 = GetEdictFieldValue(e, "pos2");
+	float sx = e->v.absmax[0] - e->v.absmin[0];
+	float sy = e->v.absmax[1] - e->v.absmin[1];
+	float min_horiz = sx < sy ? sx : sy;
+	return pos1 && pos2
+		&& pos2->vector[2] < pos1->vector[2] - 32.0f
+		&& e->v.origin[2] == pos1->vector[2]
+		&& min_horiz >= 128.0f
+		&& nav_top_face_has_clearance(e);
+}
+
 static int nav_is_brush_entity(edict_t *e)
 {
 	char *classname = pr_strings + (int)e->v.classname;
 	if (!strcasecmp(classname, "door"))
-		return (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
-			&& nav_top_face_has_clearance(e);
+	{
+		if ((e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS)
+			return nav_top_face_has_clearance(e);
+		/* Tall doors are usually passages -- never bake those.  But a
+		   room-sized collapsing floor (see nav_is_floor_collapse_door)
+		   is the floor the mesh needs. */
+		return nav_is_floor_collapse_door(e);
+	}
 	if (!strcasecmp(classname, "plat"))
 		return nav_plat_rests_at_top(e);
+	/* Trains you can stand on are floor; a floor-to-ceiling train is a
+	   triggered barrier (e2m6's corridor bars) -- don't seal the passage. */
+	if (!strcasecmp(classname, "train"))
+		return nav_top_face_has_clearance(e);
 	return !strncasecmp(classname, "func_wall", 9)
 		|| !strncasecmp(classname, "func_episodegate", 16)
-		|| !strncasecmp(classname, "func_bossgate", 13)
-		|| !strcasecmp(classname, "train");
+		|| !strncasecmp(classname, "func_bossgate", 13);
 }
 
 /* Polygonize clip hull 1 of the world plus static brush entities.
@@ -1133,9 +1160,12 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		eval_t *pos1, *pos2, *spd;
 		float top_z, bot_z, speed, travel;
 		if (e->free) continue;
-		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")
+			&& !(!strcasecmp(pr_strings + (int)e->v.classname, "door")
+				&& nav_is_floor_collapse_door(e))) continue;
 
-		/* pos1 = top, pos2 = bottom (QC fields, set by plat spawn code).
+		/* pos1 = top, pos2 = bottom (QC fields, set by plat spawn code;
+		   same ordering for a collapse-floor door, which opens down).
 		   Link endpoints are where the bot STANDS: brush top surface
 		   (pos z + maxs z), which is flush with the floor at each stop. */
 		pos1 = GetEdictFieldValue(e, "pos1");
@@ -1177,6 +1207,44 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 			Con_Printf("Nav: plat link (%.0f %.0f) z %.0f -> %.0f spd %.0f\n",
 				links[n].start[0], links[n].start[1], bot_z, top_z, speed);
 		n++;
+
+		/* A collapse-floor door is baked CLOSED, so its raster walls
+		   fence off the floor beneath it from the surrounding rooms.
+		   When it's fully lowered its top face sits flush with the
+		   adjacent floor, and the way out is a step over its rim.  Emit
+		   a short exit link across each side at the lowered top level;
+		   sides that face solid walls simply fail to snap and drop out. */
+		if (!strcasecmp(pr_strings + (int)e->v.classname, "door"))
+		{
+			int side;
+			float cx = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
+			float cy = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
+			for (side = 0; side < 4; side++)
+			{
+				float in_x = cx, in_y = cy, out_x = cx, out_y = cy;
+				switch (side)
+				{
+				case 0: in_x = e->v.absmin[0] + 24; out_x = e->v.absmin[0] - 32; break;
+				case 1: in_x = e->v.absmax[0] - 24; out_x = e->v.absmax[0] + 32; break;
+				case 2: in_y = e->v.absmin[1] + 24; out_y = e->v.absmin[1] - 32; break;
+				case 3: in_y = e->v.absmax[1] - 24; out_y = e->v.absmax[1] + 32; break;
+				}
+				if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+				links[n].start[0] = in_x;
+				links[n].start[1] = in_y;
+				links[n].start[2] = bot_z;
+				links[n].end[0] = out_x;
+				links[n].end[1] = out_y;
+				links[n].end[2] = bot_z;
+				links[n].radius = 32.0f;
+				links[n].bidirectional = 1;
+				links[n].link_type = AI_PLAT_BOTTOM;
+				links[n].height_delta = 0;
+				links[n].wait_time = 0;
+				links[n].required_speed = 0;
+				n++;
+			}
+		}
 	}
 
 	*out_links = links;
