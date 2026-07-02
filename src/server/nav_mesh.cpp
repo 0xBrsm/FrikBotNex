@@ -1433,8 +1433,15 @@ int nav_mesh_compute_deep_drops(
 	   run_speed * sqrt(2*dz/800), so a candidate is feasible whenever the
 	   required launch speed stays under a full run (with margin). */
 	const float kDeepDropMin = 48.0f;
-	const float kDeepDropMax = 700.0f;
+	/* Envelope only: the validator enforces the true lethal-fall cap (~700u)
+	   on the DRY part of the fall, so a landing poly deep under water may sit
+	   far below that.  This just bounds the candidate search. */
+	const float kDeepDropMax = 1400.0f;
 	const float kDeepDropMaxSpeed = 300.0f;
+	/* Envelope slack for water landings: after splashdown the remaining
+	   horizontal distance is swum, not flown -- the validator's entry-column
+	   search enforces the real per-offset drift caps and the wet leg. */
+	const float kDeepDropSwimSlack = 600.0f;
 
 	*out_links = nullptr;
 	if (navmesh == nullptr || navmesh->navmesh == nullptr
@@ -1535,55 +1542,129 @@ int nav_mesh_compute_deep_drops(
 		}
 	};
 
+	/* Per-component central poly: the poly nearest the component's mean
+	   centroid.  Nearest-rim candidates can all sit tucked under overhangs
+	   (e3m5's hole floor rims under its donut platform); the central poly
+	   gives every nearby component one open-ground attempt too. */
+	std::vector<double> csum(3 * (size_t)ground, 0.0);
+	std::vector<int> ccnt(ground, 0);
+	for (int i = 0; i < ground; i++)
+	{
+		if (tile->polys[i].flags == 0) continue;
+		int c = gacomp[i];
+		csum[c*3+0] += q[i*3+0]; csum[c*3+1] += q[i*3+1]; csum[c*3+2] += q[i*3+2];
+		ccnt[c]++;
+	}
+	std::vector<int> comprep(ground, -1);
+	std::vector<float> repd(ground, 1e18f);
+	for (int i = 0; i < ground; i++)
+	{
+		if (tile->polys[i].flags == 0) continue;
+		int c = gacomp[i];
+		float mx = (float)(csum[c*3+0] / ccnt[c]), my = (float)(csum[c*3+1] / ccnt[c]);
+		float dx = q[i*3+0] - mx, dy = q[i*3+1] - my;
+		float d2 = dx*dx + dy*dy;
+		if (d2 < repd[c]) { repd[c] = d2; comprep[c] = i; }
+	}
+
+	/* Temporary diagnostic: trace candidate rejection for hi polys inside an
+	   env-supplied bbox ("xmin ymin xmax ymax"). */
+	float dbg[4] = {0,0,0,0}; int dbg_on = 0;
+	if (const char *db = getenv("NAV_DD_DEBUG"))
+		dbg_on = (sscanf(db, "%f %f %f %f", &dbg[0], &dbg[1], &dbg[2], &dbg[3]) == 4);
+
 	std::vector<nav_off_mesh_link_t> links;
 	for (int hi = 0; hi < ground; hi++)
 	{
 		if (tile->polys[hi].flags == 0) continue;
+		int dbg_hi = dbg_on && q[hi*3] >= dbg[0] && q[hi*3+1] >= dbg[1]
+			&& q[hi*3] <= dbg[2] && q[hi*3+1] <= dbg[3];
 
 		/* Candidate lower cross-patch polys, cheapest first; try several,
 		   since the cheapest can fail validation while a slightly worse
 		   one is physically clean. */
 		struct cand { float cost; int lo; };
-		std::vector<cand> cands;
-		for (int lo = 0; lo < ground; lo++)
-		{
-			if (tile->polys[lo].flags == 0) continue;
-			if (gacomp[hi] == gacomp[lo]) continue;
+		auto mkcand = [&](int lo, cand *out) -> bool {
+			if (tile->polys[lo].flags == 0) return false;
+			if (gacomp[hi] == gacomp[lo]) return false;
 			const float *qh = &q[hi * 3], *ql = &q[lo * 3];
 			float dmax = pzmax[hi] - pzmin[lo];
 			float dmin = pzmin[hi] - pzmax[lo];
-			if (dmax <= kDeepDropMin || dmin > kDeepDropMax) continue;
+			if (dmax <= kDeepDropMin || dmin > kDeepDropMax) return false;
 			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
 			float hd = sqrtf(dx*dx + dy*dy);
 			float hd_min = hd - pr[hi] - pr[lo];
 			if (hd_min < 8.0f) hd_min = 8.0f;
 			float dz_cap = dmax < kDeepDropMax ? dmax : kDeepDropMax;
-			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / 800.0f)) continue;
-			cand c = { hd + (qh[2] - ql[2]) * 0.25f, lo };
-			cands.push_back(c);
+			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / 800.0f) + kDeepDropSwimSlack) return false;
+			out->cost = hd + (qh[2] - ql[2]) * 0.25f;
+			out->lo = lo;
+			return true;
+		};
+		std::vector<cand> cands;
+		for (int lo = 0; lo < ground; lo++)
+		{
+			cand c;
+			if (mkcand(lo, &c))
+				cands.push_back(c);
 		}
 		if (cands.empty()) continue;
 		std::sort(cands.begin(), cands.end(),
 			[](const cand &a, const cand &b) { return a.cost < b.cost; });
 
+		/* One try per component: keep the cheapest poly per lo component,
+		   and add that component's central poly as a second, open-ground
+		   attempt (rim-nearest polys can all be tucked under overhangs). */
+		{
+			std::vector<cand> picks;
+			std::vector<int> comps;
+			for (size_t ci = 0; ci < cands.size(); ci++)
+			{
+				int cc = gacomp[cands[ci].lo];
+				bool seen = false;
+				for (size_t k = 0; k < comps.size(); k++)
+					if (comps[k] == cc) { seen = true; break; }
+				if (seen) continue;
+				comps.push_back(cc);
+				picks.push_back(cands[ci]);
+				int rp = comprep[cc];
+				cand rc;
+				if (rp >= 0 && rp != cands[ci].lo && mkcand(rp, &rc))
+					picks.push_back(rc);
+			}
+			cands.swap(picks);
+			std::sort(cands.begin(), cands.end(),
+				[](const cand &a, const cand &b) { return a.cost < b.cost; });
+		}
+
 		const int kTryMax = 12;
 		for (size_t ci = 0; ci < cands.size() && (int)ci < kTryMax; ci++)
 		{
 			int lo = cands[ci].lo;
-			if (pair_seen(gacomp[hi], gacomp[lo])) continue;
+			const char *why = NULL;
+			if (pair_seen(gacomp[hi], gacomp[lo]))
+				why = "seen";
 
 			/* Exact geometry on the closest rim pair, not the centroids. */
 			float qh[3], ql[3];
 			closest_verts(hi, lo, qh, ql);
 			float ddz = qh[2] - ql[2];
-			if (ddz <= kDeepDropMin || ddz > kDeepDropMax) continue;
 			float dx = ql[0]-qh[0], dy = ql[1]-qh[1];
 			float hd = sqrtf(dx*dx + dy*dy);
 			if (hd < 8.0f) { hd = 8.0f; }
-			if (hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / 800.0f)) continue;
-
-			if (validate(qh, ql, user) != AI_DROP)
+			if (!why && (ddz <= kDeepDropMin || ddz > kDeepDropMax))
+				why = "dz";
+			if (!why && hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / 800.0f) + kDeepDropSwimSlack)
+				why = "speed";
+			if (!why && validate(qh, ql, user) != AI_DROP)
+				why = "validate";
+			if (why)
+			{
+				if (dbg_hi)
+					fprintf(stderr, "DDDBG hi=%d (%.0f %.0f %.0f) lo=%d (%.0f %.0f %.0f) dz=%.0f hd=%.0f: %s\n",
+						hi, qh[0], qh[1], qh[2], lo, ql[0], ql[1], ql[2], ddz, hd, why);
 				continue;
+			}
 
 			float rh[3], rl[3];
 			dtPolyRef path[256]; int pc = 0;
@@ -1595,7 +1676,11 @@ int nav_mesh_compute_deep_drops(
 			dtStatus down = navmesh->query->findPath(base | (dtPolyRef)hi, base | (dtPolyRef)lo,
 				rh, rl, &filter, path, &pc, 256);
 			if (!dtStatusFailed(down) && !dtStatusDetail(down, DT_PARTIAL_RESULT) && pc > 0)
+			{
+				if (dbg_hi)
+					fprintf(stderr, "DDDBG hi=%d lo=%d: already-connected\n", hi, lo);
 				break;
+			}
 
 			/* No-trap gate: the landing must already path back OUT -- up to the
 			   start, or to the main mesh -- before we offer a way in.  A pit
@@ -1607,6 +1692,8 @@ int nav_mesh_compute_deep_drops(
 					rl, rh, &filter, path, &pc, 256);
 				escapes = (!dtStatusFailed(up) && !dtStatusDetail(up, DT_PARTIAL_RESULT) && pc > 0);
 			}
+			float stopq[3] = { 0, 0, 0 };
+			int stop_ok = 0;
 			if (!escapes && mainrep >= 0)
 			{
 				float rm[3];
@@ -1614,9 +1701,25 @@ int nav_mesh_compute_deep_drops(
 				dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)mainrep,
 					rl, rm, &filter, path, &pc, 256);
 				escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
+				if (!escapes && pc > 0)
+				{
+					unsigned int s, t, np;
+					navmesh->navmesh->decodePolyId(path[pc - 1], s, t, np);
+					if ((int)np < ground)
+					{
+						memcpy(stopq, &q[np * 3], sizeof(stopq));
+						stop_ok = 1;
+					}
+				}
 			}
 			if (!escapes)
+			{
+				if (dbg_hi)
+					fprintf(stderr, "DDDBG hi=%d lo=%d (%.0f %.0f %.0f): no-escape stop=(%.0f %.0f %.0f)%s\n",
+						hi, lo, ql[0], ql[1], ql[2], stopq[0], stopq[1], stopq[2],
+						stop_ok ? "" : " (n/a)");
 				continue;
+			}
 
 			nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
 			{
@@ -1625,6 +1728,8 @@ int nav_mesh_compute_deep_drops(
 				if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
 			}
 			links.push_back(lk);
+			fprintf(stderr, "Nav: LINK DEEPDROP start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f) dz=%.0f spd=%.0f\n",
+				qh[0], qh[1], qh[2], ql[0], ql[1], ql[2], ddz, lk.required_speed);
 			seenLo.push_back(gacomp[hi] < gacomp[lo] ? gacomp[hi] : gacomp[lo]);
 			seenHi.push_back(gacomp[hi] < gacomp[lo] ? gacomp[lo] : gacomp[hi]);
 			break;
@@ -1649,8 +1754,10 @@ int nav_mesh_compute_swim_links(
 {
 	/* 3D reach cap: swimming is slow, and any submerged route longer than
 	   this almost certainly has intermediate polys the straight segment
-	   would rather hop through anyway. */
-	const float kSwimMax = 600.0f;
+	   would rather hop through anyway.  Sized for bent routes too: a well
+	   floor exits by rising ~500u through its own column before crossing,
+	   and the validator walks that whole L. */
+	const float kSwimMax = 800.0f;
 
 	*out_links = nullptr;
 	if (navmesh == nullptr || navmesh->navmesh == nullptr
@@ -1767,6 +1874,26 @@ int nav_mesh_compute_swim_links(
 		std::sort(cands.begin(), cands.end(),
 			[](const cand &a, const cand &b) { return a.cost < b.cost; });
 
+		/* One try per target component: a fragmented neighbor (a chamber
+		   floor split into slivers) must not eat every try slot while a
+		   farther, genuinely distinct component starves (e3m5's hole floor
+		   never got to try its water surface). */
+		{
+			std::vector<cand> picks;
+			std::vector<int> comps;
+			for (size_t ci = 0; ci < cands.size(); ci++)
+			{
+				int cc = gacomp[cands[ci].j];
+				bool seen = false;
+				for (size_t k = 0; k < comps.size(); k++)
+					if (comps[k] == cc) { seen = true; break; }
+				if (seen) continue;
+				comps.push_back(cc);
+				picks.push_back(cands[ci]);
+			}
+			cands.swap(picks);
+		}
+
 		/* Candidate endpoints on a poly: each vertex nudged 16u toward the
 		   centroid (rim points hug walls and the validator sweeps the full
 		   player hull), plus the centroid itself.  The one straight
@@ -1792,11 +1919,23 @@ int nav_mesh_compute_swim_links(
 			return n + 1;
 		};
 
+		static float swdbg[4]; static int swdbg_on = -1;
+		if (swdbg_on < 0)
+		{
+			const char *db = getenv("NAV_DD_DEBUG");
+			swdbg_on = db && sscanf(db, "%f %f %f %f", &swdbg[0], &swdbg[1], &swdbg[2], &swdbg[3]) == 4;
+		}
+		int dbg_i = swdbg_on && q[i*3] >= swdbg[0] && q[i*3+1] >= swdbg[1]
+			&& q[i*3] <= swdbg[2] && q[i*3+1] <= swdbg[3];
+
 		const int kTryMax = 8;
 		for (size_t ci = 0; ci < cands.size() && (int)ci < kTryMax; ci++)
 		{
 			int j = cands[ci].j;
 			if (pair_seen(gacomp[i], gacomp[j])) continue;
+			if (dbg_i)
+				fprintf(stderr, "SWDBG i=%d (%.0f %.0f %.0f) j=%d (%.0f %.0f %.0f) d3=%.0f\n",
+					i, q[i*3], q[i*3+1], q[i*3+2], j, q[j*3], q[j*3+1], q[j*3+2], cands[ci].cost);
 
 			float pa[7][3], pb[7][3];
 			int na = gather_pts(i, pa), nb = gather_pts(j, pb);
@@ -1841,9 +1980,15 @@ int nav_mesh_compute_swim_links(
 			dtStatus fwd = navmesh->query->findPath(base | (dtPolyRef)i, base | (dtPolyRef)j,
 				ra, rb, &filter, path, &pc, 256);
 			if (!dtStatusFailed(fwd) && !dtStatusDetail(fwd, DT_PARTIAL_RESULT) && pc > 0)
+			{
+				if (dbg_i)
+					fprintf(stderr, "SWDBG i=%d j=%d: validated but already connected\n", i, j);
 				break;
+			}
 
 			links.push_back(nav_make_link(qa, qb, AI_DROP, 1, 32.0f));
+			fprintf(stderr, "Nav: LINK SWIM start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f)\n",
+				qa[0], qa[1], qa[2], qb[0], qb[1], qb[2]);
 			seenLo.push_back(gacomp[i] < gacomp[j] ? gacomp[i] : gacomp[j]);
 			seenHi.push_back(gacomp[i] < gacomp[j] ? gacomp[j] : gacomp[i]);
 			break;
@@ -1882,6 +2027,32 @@ int nav_mesh_gap_probe(
 	}
 	const int npolys = tile->header->polyCount;
 	const int ground = tile->header->offMeshBase > 0 ? tile->header->offMeshBase : npolys;
+
+	/* Temporary diagnostic: dump every ground-poly centroid once. */
+	static int dumped = 0;
+	if (!dumped && getenv("NAV_DUMP_POLYS"))
+	{
+		std::vector<float> qc;
+		nav_collect_ground_centroids(tile, ground, qc);
+		std::vector<int> ga(ground);
+		for (int i = 0; i < ground; i++) ga[i] = i;
+		auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+		for (int i = 0; i < ground; i++)
+		{
+			const dtPoly *p = &tile->polys[i];
+			if (p->flags == 0) continue;
+			for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+			{
+				if (tile->links[k].ref == 0) continue;
+				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+				if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
+			}
+		}
+		for (int i = 0; i < ground; i++)
+			fprintf(stderr, "POLYDUMP %d (%.0f %.0f %.0f) f=%d c=%d\n",
+				i, qc[i*3], qc[i*3+1], qc[i*3+2], tile->polys[i].flags, gf(i));
+		dumped = 1;
+	}
 
 	/* Directed BFS from every start poly over the FULL link graph
 	   (walk adjacency + off-mesh connections) = everything a bot can
@@ -3219,7 +3390,15 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			{
 				const dtPoly *p = &tile->polys[tile->header->offMeshBase + oi];
 				if (p->firstLink == DT_NULL_LINK)
+				{
 					unlinked++;
+					const dtOffMeshConnection *con = &tile->offMeshCons[oi];
+					float s[3], e[3];
+					nav_recast_to_quake(&con->pos[0], s);
+					nav_recast_to_quake(&con->pos[3], e);
+					fprintf(stderr, "Nav: UNLINKED off-mesh (%.0f %.0f %.0f)->(%.0f %.0f %.0f) rad=%.0f\n",
+						s[0], s[1], s[2], e[0], e[1], e[2], con->rad);
+				}
 				else
 					linked++;
 			}

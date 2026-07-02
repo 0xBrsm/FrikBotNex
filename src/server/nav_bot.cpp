@@ -267,28 +267,216 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	float drop = from[2] - to[2];
 	float dx = to[0] - from[0], dy = to[1] - from[1];
 	float hd = sqrtf(dx * dx + dy * dy);
+	static int dd_dbg = -1;
+	if (dd_dbg < 0) dd_dbg = getenv("NAV_DD_DEBUG") != NULL;
+#define DDFAIL(stage) do { if (dd_dbg) fprintf(stderr, \
+	"DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): %s\n", \
+	from[0], from[1], from[2], to[0], to[1], to[2], stage); return 0; } while (0)
 	(void)user;
 
-	if (drop <= NAV_DEEP_DROP_HEIGHT_MIN || drop > NAV_DEEP_DROP_HEIGHT_MAX)
-		return 0;
-	/* Horizontal reach is physics-limited, not a fixed radius: the launch
-	   speed needed to cover hd during the fall must fit inside a full run. */
-	if (hd < 8.0f || hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / 800.0f))
-		return 0;
+	if (drop <= NAV_DEEP_DROP_HEIGHT_MIN)
+		DDFAIL("shallow");
+	if (hd < 8.0f)
+		DDFAIL("speed");
 
-	/* Walk-off line: level trace at start height out to above the landing. */
-	if (!nav_trace_clear_at_height(from, to, from[2] + 24.0f, NULL))
-		return 0;
-
-	/* Hull-truth the fall column at the landing spot. */
+	/* Underwater landing: the fall becomes "drop into the water body, then
+	   swim to the floor" -- the landing poly needn't be plumb below the
+	   ledge (e3m5's hole floor is 824u under its rim platform behind an
+	   overhanging slope, but water catches the fall after ~210u).  The
+	   lethal-fall cap applies to the DRY portion only. */
 	{
-		vec3_t fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
-		trace_t tr;
-		fs[0] = to[0]; fs[1] = to[1]; fs[2] = from[2] + 26.0f;
-		fe[0] = to[0]; fe[1] = to[1]; fe[2] = to[2] + 24.0f;
-		tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
-		if (tr.startsolid || tr.allsolid || tr.endpos[2] > to[2] + 36.0f)
+		vec3_t wp;
+		wp[0] = to[0]; wp[1] = to[1]; wp[2] = to[2] + 8.0f;
+		if (SV_PointContents(wp) != CONTENTS_WATER)
+		{
+			/* Water-surface polys sit ~24u above the water plane, so the
+			   probe above them reads air; check just below the plane too. */
+			wp[2] = to[2] - 32.0f;
+			if (SV_PointContents(wp) != CONTENTS_WATER)
+				goto dry_fall;
+		}
+	}
+	{
+		/* Entry-column search: walk-off direction is from->to horizontally;
+		   probe outward past the rim for a spot with a hull-clear plunge
+		   into the water body.  The landing poly's own xy is often plumb
+		   under an overhang (e3m5's hole floor tucks beneath its rim
+		   platform), so each probe finds its own local water surface. */
+		static const float kOff[] = { 16, 32, 64, 128, 192 };
+		float dirh[2];
+		int oi;
+		char miss[160];
+		miss[0] = 0;
+#define DDOFF(why) do { if (dd_dbg) { size_t l = strlen(miss); \
+	snprintf(miss + l, sizeof(miss) - l, " o%.0f=%s", kOff[oi], why); } } while (0)
+		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
+		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
+		for (oi = 0; oi < (int)(sizeof(kOff)/sizeof(kOff[0])); oi++)
+		{
+			vec3_t entry, fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			trace_t tr;
+			float surface, z, ts;
+			int found = 0;
+			entry[0] = from[0] + dirh[0] * kOff[oi];
+			entry[1] = from[1] + dirh[1] * kOff[oi];
+			/* Local water surface below the ledge at this xy.  Scan a bit
+			   past the landing z: a surface poly hovers ~24u above the
+			   water plane it stands for. */
+			surface = 0;
+			for (z = from[2] - 8.0f; z >= to[2] - 40.0f; z -= 8.0f)
+			{
+				int c;
+				entry[2] = z;
+				c = SV_PointContents(entry);
+				if (c == CONTENTS_WATER) { surface = z; found = 1; break; }
+				if (c != CONTENTS_EMPTY) break; /* dry floor/solid first: no plunge here */
+			}
+			if (!found)
+				{ DDOFF("nosurf"); continue; }
+			if (from[2] - surface > NAV_DEEP_DROP_HEIGHT_MAX)
+				{ DDOFF("deepdry"); continue; }
+			/* Horizontal drift during the dry fall is physics-capped. */
+			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / 800.0f);
+			if (kOff[oi] > NAV_DEEP_DROP_MAX_SPEED * ts)
+				{ DDOFF("drift"); break; }
+			if (!nav_trace_clear_at_height(from, entry, from[2] + 24.0f, NULL))
+				{ DDOFF("walkoff"); continue; }
+			fs[0] = entry[0]; fs[1] = entry[1]; fs[2] = from[2] + 26.0f;
+			fe[0] = entry[0]; fe[1] = entry[1]; fe[2] = surface - 24.0f;
+			tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
+			if (tr.startsolid || tr.allsolid || tr.endpos[2] > surface - 8.0f)
+				{ DDOFF("column"); continue; }
+			/* Cushion: enough water under the entry point to absorb the
+			   plunge. */
+			fs[2] = tr.endpos[2];
+			fe[2] = fs[2] - 64.0f;
+			tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
+			if (tr.fraction < 0.5f)
+				{ DDOFF("cushion"); continue; }
+			/* Wet leg: swim from the entry point to the landing through
+			   open water.  Sink vertically in the entry column first,
+			   then go straight -- a single straight chord often clips
+			   underwater slopes that swim physics simply follows around. */
+			{
+				vec3_t goal, dir;
+				float len, s;
+				int wet = 1;
+				entry[2] = surface - 24.0f;
+				goal[0] = to[0]; goal[1] = to[1]; goal[2] = to[2] + 24.0f;
+				if (SV_PointContents(goal) != CONTENTS_WATER)
+					goal[2] = to[2] - 32.0f; /* surface poly: aim just under the plane */
+				while (entry[2] - 16.0f >= goal[2])
+				{
+					vec3_t sink;
+					sink[0] = entry[0]; sink[1] = entry[1]; sink[2] = entry[2] - 16.0f;
+					if (SV_PointContents(sink) != CONTENTS_WATER)
+						break;
+					entry[2] -= 16.0f;
+				}
+				dir[0] = goal[0] - entry[0]; dir[1] = goal[1] - entry[1]; dir[2] = goal[2] - entry[2];
+				len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
+				if (len > 600.0f) /* swim-reach cap, as in the swim pass */
+					{ DDOFF("wetlen"); continue; }
+				for (s = 16.0f; s < len && wet; s += 16.0f)
+				{
+					vec3_t sp;
+					sp[0] = entry[0] + dir[0] * (s / len);
+					sp[1] = entry[1] + dir[1] * (s / len);
+					sp[2] = entry[2] + dir[2] * (s / len);
+					if (SV_PointContents(sp) != CONTENTS_WATER)
+						wet = 0;
+				}
+				if (!wet)
+					{ DDOFF("wet"); continue; }
+			}
+			return AI_DROP;
+		}
+#undef DDOFF
+		/* No clean plunge found -- the landing may still be plumb below
+		   the ledge with a clear column; let the dry path decide. */
+		if (dd_dbg)
+			fprintf(stderr, "DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): water-entry-miss%s\n",
+				from[0], from[1], from[2], to[0], to[1], to[2], miss);
+	}
+
+dry_fall:
+	if (drop > NAV_DEEP_DROP_HEIGHT_MAX)
+		DDFAIL("deep-dry");
+	/* Horizontal reach is physics-limited, not a fixed radius: the launch
+	   speed needed to cover hd during the fall must fit inside a full run.
+	   Dry landings only -- a water landing swims its horizontal remainder,
+	   which the entry-column search caps per offset. */
+	if (hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / 800.0f))
+		DDFAIL("speed");
+
+	/* Fall-column search: the landing rep point is often tucked under the
+	   take-off slab or within hull width of a wall, where the plumb hull
+	   column reads solid even though a player falling just short of (or
+	   past) that point lands on the same floor and walks the remainder.
+	   Probe columns at offsets along the walk-off line. */
+	{
+		static const float kRel[] = { 0, -16, 16, -32, 32, -48, 48 };
+		static const float kLat[] = { 0, -16, 16, -32, 32, -48, 48, -64, 64, -96, 96 };
+		float dirh[2], ts;
+		int oi, li, ok = 0;
+		char miss[200];
+		miss[0] = 0;
+#define DDOFF(why) do { if (dd_dbg && li == 0) { size_t l = strlen(miss); \
+	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", kRel[oi], why); } } while (0)
+		ts = sqrtf(2.0f * drop / 800.0f);
+		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
+		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
+		for (oi = 0; oi < (int)(sizeof(kRel)/sizeof(kRel[0])) && !ok; oi++)
+		for (li = 0; li < (int)(sizeof(kLat)/sizeof(kLat[0])) && !ok; li++)
+		{
+			vec3_t p, fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			trace_t tr;
+			float o = hd + kRel[oi];
+			if (o < 0.0f)
+				continue;
+			/* Drift during the fall is physics-capped: air-steering covers
+			   both the along-line and the sideways component. */
+			if (sqrtf(o * o + kLat[li] * kLat[li]) > NAV_DEEP_DROP_MAX_SPEED * ts)
+				{ DDOFF("drift"); continue; }
+			p[0] = from[0] + dirh[0] * o - dirh[1] * kLat[li];
+			p[1] = from[1] + dirh[1] * o + dirh[0] * kLat[li];
+			p[2] = to[2];
+			/* Walk-off line at start height out to above the column. */
+			if (!nav_trace_clear_at_height(from, p, from[2] + 24.0f, NULL))
+				{ DDOFF("walkoff"); continue; }
+			fs[0] = p[0]; fs[1] = p[1]; fs[2] = from[2] + 26.0f;
+			fe[0] = p[0]; fe[1] = p[1]; fe[2] = to[2] + 24.0f;
+			tr = SV_Move(fs, hmins, hmaxs, fe, MOVE_NOMONSTERS, NULL);
+			if (tr.startsolid || tr.allsolid || tr.endpos[2] > to[2] + 36.0f)
+				{ DDOFF("column"); continue; }
+			/* Landed off the rep point: the remainder is a level walk.
+			   Mid-point floor probe guards against the level trace sailing
+			   over a trench between the column and the rep point. */
+			if (kRel[oi] != 0.0f || kLat[li] != 0.0f)
+			{
+				vec3_t land, mid, mlow, zero = {0, 0, 0};
+				trace_t mtr;
+				land[0] = p[0]; land[1] = p[1]; land[2] = tr.endpos[2];
+				if (!nav_trace_clear_at_height(land, to, tr.endpos[2] + 24.0f, NULL))
+					{ DDOFF("walkback"); continue; }
+				mid[0] = (land[0] + to[0]) * 0.5f;
+				mid[1] = (land[1] + to[1]) * 0.5f;
+				mid[2] = tr.endpos[2] + 24.0f;
+				mlow[0] = mid[0]; mlow[1] = mid[1]; mlow[2] = to[2] - 40.0f;
+				mtr = SV_Move(mid, zero, zero, mlow, MOVE_NOMONSTERS, NULL);
+				if (mtr.fraction >= 1.0f)
+					{ DDOFF("midgap"); continue; }
+			}
+			ok = 1;
+		}
+#undef DDOFF
+		if (!ok)
+		{
+			if (dd_dbg)
+				fprintf(stderr, "DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): column-miss%s\n",
+					from[0], from[1], from[2], to[0], to[1], to[2], miss);
 			return 0;
+		}
 	}
 
 	/* Suicide-chute gate: never a drop that lands in lava or slime. */
@@ -298,7 +486,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 		lc[0] = to[0]; lc[1] = to[1]; lc[2] = to[2] + 8.0f;
 		lcont = SV_PointContents(lc);
 		if (lcont == CONTENTS_LAVA || lcont == CONTENTS_SLIME)
-			return 0;
+			DDFAIL("lava");
 	}
 	return AI_DROP;
 }
@@ -313,25 +501,20 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
    air allowance right at an endpoint covers surface pop-outs), the point
    trace must not cross solid, and the player hull must actually fit at
    both endpoints. */
-static int nav_swim_link_validate(const float *from, const float *to, void *user)
+/* One straight swim segment between two swim-height points: every sample
+   open water (small air allowance right at the ends covers surface
+   pop-outs), and a point trace to catch thin walls the sampling straddled. */
+static char nav_swim_seg_why[96];
+
+static int nav_swim_seg_wet(const float *fs, const float *fe)
 {
-	vec3_t fs, fe, delta;
 	float len;
 	int i, steps, water_samples = 0;
-	(void)user;
-
-	for (i = 0; i < 3; i++)
-	{
-		fs[i] = from[i];
-		fe[i] = to[i];
-		delta[i] = to[i] - from[i];
-	}
-	fs[2] += 24.0f;
-	fe[2] += 24.0f;
-	len = sqrtf(delta[0]*delta[0] + delta[1]*delta[1] + delta[2]*delta[2]);
+	float dx = fe[0]-fs[0], dy = fe[1]-fs[1], dz = fe[2]-fs[2];
+	len = sqrtf(dx*dx + dy*dy + dz*dz);
+	nav_swim_seg_why[0] = 0;
 	if (len < 8.0f)
-		return 0;
-
+		{ snprintf(nav_swim_seg_why, sizeof(nav_swim_seg_why), "short"); return 0; }
 	steps = (int)(len / 16.0f) + 1;
 	for (i = 0; i <= steps; i++)
 	{
@@ -339,27 +522,113 @@ static int nav_swim_link_validate(const float *from, const float *to, void *user
 		float f = (float)i / (float)steps;
 		float edge_dist = (f < 0.5f ? f : 1.0f - f) * len;
 		int c;
-		p[0] = fs[0] + (fe[0] - fs[0]) * f;
-		p[1] = fs[1] + (fe[1] - fs[1]) * f;
-		p[2] = fs[2] + (fe[2] - fs[2]) * f;
+		p[0] = fs[0] + dx * f;
+		p[1] = fs[1] + dy * f;
+		p[2] = fs[2] + dz * f;
 		c = SV_PointContents(p);
 		if (c == CONTENTS_WATER)
 			water_samples++;
 		else if (c != CONTENTS_EMPTY || edge_dist > 56.0f)
-			return 0; /* solid/lava/slime anywhere, or air away from the rims */
+		{
+			/* solid/lava/slime anywhere, or air away from the rims */
+			snprintf(nav_swim_seg_why, sizeof(nav_swim_seg_why),
+				"c%d@(%.0f %.0f %.0f)", c, p[0], p[1], p[2]);
+			return 0;
+		}
 	}
 	/* The middle must be genuinely submerged, not a mostly-air hop. */
 	if (water_samples * 2 < steps + 1)
-		return 0;
-
-	/* Point trace catches any thin wall the sampling straddled. */
+		{ snprintf(nav_swim_seg_why, sizeof(nav_swim_seg_why), "majority"); return 0; }
 	{
-		vec3_t zero3 = {0, 0, 0};
+		vec3_t zero3 = {0, 0, 0}, a, b;
 		trace_t tr;
-		tr = SV_Move(fs, zero3, zero3, fe, MOVE_NOMONSTERS, NULL);
+		a[0]=fs[0]; a[1]=fs[1]; a[2]=fs[2];
+		b[0]=fe[0]; b[1]=fe[1]; b[2]=fe[2];
+		tr = SV_Move(a, zero3, zero3, b, MOVE_NOMONSTERS, NULL);
 		if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
-			return 0;
+			{ snprintf(nav_swim_seg_why, sizeof(nav_swim_seg_why), "trace"); return 0; }
 	}
+	return 1;
+}
+
+static int nav_swim_link_validate(const float *from, const float *to, void *user)
+{
+	vec3_t fs, fe;
+	int i, wet;
+	(void)user;
+
+	for (i = 0; i < 3; i++)
+	{
+		fs[i] = from[i];
+		fe[i] = to[i];
+	}
+	fs[2] += 24.0f;
+	fe[2] += 24.0f;
+
+	/* Waterline polys hover a varying 14-30u above the water plane; their
+	   swim point is just below the plane, not above the poly.  Scan down
+	   for the local surface instead of trusting one fixed offset. */
+	for (i = 0; i < 2; i++)
+	{
+		float *pt = i ? fe : fs;
+		if (SV_PointContents(pt) != CONTENTS_WATER)
+		{
+			vec3_t sub;
+			float z;
+			sub[0] = pt[0]; sub[1] = pt[1];
+			for (z = pt[2] - 8.0f; z >= pt[2] - 96.0f; z -= 8.0f)
+			{
+				int c;
+				sub[2] = z;
+				c = SV_PointContents(sub);
+				if (c == CONTENTS_WATER) { pt[2] = z - 8.0f; break; }
+				if (c != CONTENTS_EMPTY) break; /* floor first: no water here */
+			}
+		}
+	}
+
+	{
+		static int sw_dbg = -1;
+		if (sw_dbg < 0) sw_dbg = getenv("NAV_DD_DEBUG") != NULL;
+		wet = nav_swim_seg_wet(fs, fe);
+		if (!wet && sw_dbg)
+			fprintf(stderr, "SWVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): straight %s\n",
+				fs[0], fs[1], fs[2], fe[0], fe[1], fe[2], nav_swim_seg_why);
+	}
+
+	/* Swim paths bend: a well/hole floor rises through its own water
+	   column, then crosses over -- the straight chord clips the shaft
+	   wall or an overhang (e3m5's hole under its donut platform).  Try
+	   an L: climb vertically inside the water at either endpoint, then
+	   go straight from that pivot. */
+	if (!wet)
+	{
+		int dn;
+		for (dn = 0; dn < 2 && !wet; dn++)
+		for (i = 0; i < 2 && !wet; i++)
+		{
+			/* Rise pivots first (surface pop-outs), then sink pivots --
+			   diving under a wall that splits two pools above depth is a
+			   standard Quake move (e3m5's divider is solid -140..-660 but
+			   open water beneath). */
+			const float *s = i ? fe : fs;
+			const float *o = i ? fs : fe;
+			vec3_t pivot;
+			float step = dn ? -32.0f : 32.0f;
+			float rise;
+			pivot[0] = s[0]; pivot[1] = s[1];
+			for (rise = step; rise <= 512.0f && rise >= -512.0f && !wet; rise += step)
+			{
+				pivot[2] = s[2] + rise;
+				if (SV_PointContents(pivot) != CONTENTS_WATER)
+					break; /* left the water column: no farther pivot here */
+				if (nav_swim_seg_wet(pivot, o))
+					wet = 1;
+			}
+		}
+	}
+	if (!wet)
+		return 0;
 
 	/* The player hull must fit at each endpoint -- at swim height, or a
 	   little higher for shelves right under the surface (the bot floats). */
@@ -381,7 +650,14 @@ static int nav_swim_link_validate(const float *from, const float *to, void *user
 			}
 		}
 		if (!fits)
+		{
+			static int sw_dbg2 = -1;
+			if (sw_dbg2 < 0) sw_dbg2 = getenv("NAV_DD_DEBUG") != NULL;
+			if (sw_dbg2)
+				fprintf(stderr, "SWVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): hullfit@%d\n",
+					from[0], from[1], from[2], to[0], to[1], to[2], i);
 			return 0;
+		}
 	}
 	return AI_DROP;
 }
@@ -568,6 +844,219 @@ static int nav_collect_teleporters(nav_off_mesh_link_t **out_links)
 			break;
 		}
 	}
+	*out_links = links;
+	return n;
+}
+
+/* ---- Wind tunnel (trigger_push) links ---- */
+
+/* Simulate a player carried by trigger_push volumes (e3m5 wind tunnels).
+   QC sets velocity = movedir * speed * 10 EVERY frame the player touches
+   the volume; outside, plain ballistic gravity.  Chained tunnels (vertical
+   shaft feeding a horizontal blower) fall out naturally by checking every
+   push volume each step.  One one-way link per tunnel: enter at the bottom,
+   land wherever the ride ends. */
+static int nav_collect_push_links(nav_off_mesh_link_t **out_links)
+{
+	int i, n = 0, cap = 8;
+	nav_off_mesh_link_t *links;
+	edict_t *pushers[64];
+	int npush = 0;
+
+	*out_links = NULL;
+	for (i = 1; i < sv.num_edicts && npush < 64; i++)
+	{
+		edict_t *e = EDICT_NUM(i);
+		if (e->free) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "trigger_push")) continue;
+		if ((int)e->v.spawnflags & 1) continue; /* PUSH_ONCE: gone after one use */
+		pushers[npush++] = e;
+	}
+	if (npush == 0) { fprintf(stderr, "Nav: push: 0 pushers\n"); return 0; }
+
+	links = (nav_off_mesh_link_t *)calloc(cap, sizeof(*links));
+
+	for (i = 0; i < npush; i++)
+	{
+		edict_t *src = pushers[i];
+		eval_t *spd = GetEdictFieldValue(src, "speed");
+		float speed = (spd && spd->_float > 0) ? spd->_float : 1000.0f;
+		vec3_t start, pos, vel;
+		float t, dt = 0.05f;
+		int landed = 0, stuck = 0, rode_up = 0;
+		(void)speed;
+
+		/* Entry: bottom center of the volume, where a bot walks in --
+		   ground-snapped, since the volume can hang well above the floor
+		   (e3m5's shaft bottoms float 70u+ up) and Detour's off-mesh
+		   stitching only tolerates ~walkableClimb of vertical error. */
+		start[0] = (src->v.absmin[0] + src->v.absmax[0]) * 0.5f;
+		start[1] = (src->v.absmin[1] + src->v.absmax[1]) * 0.5f;
+		start[2] = src->v.absmin[2];
+
+		/* Simulate from inside the volume bottom (a rider is grabbed there),
+		   but the LINK start must be the floor beneath it: the volume can
+		   hang 70u+ up (e3m5's shaft bottoms) and Detour's off-mesh stitch
+		   only tolerates ~walkableClimb of vertical error. */
+		pos[0] = start[0]; pos[1] = start[1]; pos[2] = start[2] + 25.0f;
+		{
+			vec3_t gs, ge, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			trace_t gtr;
+			gs[0] = start[0]; gs[1] = start[1]; gs[2] = start[2] + 25.0f;
+			ge[0] = start[0]; ge[1] = start[1]; ge[2] = start[2] - 512.0f;
+			gtr = SV_Move(gs, hmins, hmaxs, ge, MOVE_NOMONSTERS, NULL);
+			if (!gtr.startsolid && !gtr.allsolid && gtr.fraction < 1.0f)
+				start[2] = gtr.endpos[2] - 24.0f;
+		}
+		vel[0] = vel[1] = vel[2] = 0;
+
+		for (t = 0; t < 15.0f && !landed && !stuck; t += dt)
+		{
+			vec3_t next, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
+			trace_t tr;
+			int j, inside = 0;
+
+			/* Touch check mirrors the engine: player bbox vs trigger bbox. */
+			for (j = 0; j < npush; j++)
+			{
+				edict_t *p = pushers[j];
+				if (pos[0] + hmaxs[0] < p->v.absmin[0] || pos[0] + hmins[0] > p->v.absmax[0]) continue;
+				if (pos[1] + hmaxs[1] < p->v.absmin[1] || pos[1] + hmins[1] > p->v.absmax[1]) continue;
+				if (pos[2] + hmaxs[2] < p->v.absmin[2] || pos[2] + hmins[2] > p->v.absmax[2]) continue;
+				eval_t *ps = GetEdictFieldValue(p, "speed");
+				float psp = (ps && ps->_float > 0) ? ps->_float : 1000.0f;
+				vel[0] = p->v.movedir[0] * psp * 10.0f;
+				vel[1] = p->v.movedir[1] * psp * 10.0f;
+				vel[2] = p->v.movedir[2] * psp * 10.0f;
+				inside = 1;
+				break;
+			}
+			if (inside && vel[2] > 200.0f)
+				rode_up = 1;
+			if (!inside)
+				vel[2] -= 800.0f * dt;
+
+			/* Vertical shaft mouth: with neutral input the rider oscillates
+			   at the apex forever (rises out, falls back in, re-grabbed) --
+			   a real player air-steps onto the rim.  When an upward ride
+			   stalls with no horizontal carry, look for a rim ledge. */
+			if (!inside && rode_up && vel[2] <= 0.0f
+				&& fabsf(vel[0]) < 100.0f && fabsf(vel[1]) < 100.0f)
+			{
+				static const float dirs[8][2] = {
+					{1,0},{-1,0},{0,1},{0,-1},
+					{0.707f,0.707f},{0.707f,-0.707f},{-0.707f,0.707f},{-0.707f,-0.707f}};
+				int d;
+				for (d = 0; d < 8 && !landed; d++)
+				{
+					float rr;
+					for (rr = 32.0f; rr <= 128.0f && !landed; rr += 32.0f)
+					{
+						vec3_t hp, dp;
+						trace_t htr, dtr;
+						hp[0] = pos[0] + dirs[d][0] * rr;
+						hp[1] = pos[1] + dirs[d][1] * rr;
+						hp[2] = pos[2];
+						htr = SV_Move(pos, hmins, hmaxs, hp, MOVE_NOMONSTERS, NULL);
+						if (htr.startsolid || htr.allsolid)
+							break;
+						dp[0] = htr.endpos[0]; dp[1] = htr.endpos[1];
+						dp[2] = htr.endpos[2] - 384.0f;
+						dtr = SV_Move(htr.endpos, hmins, hmaxs, dp, MOVE_NOMONSTERS, NULL);
+						if (dtr.fraction >= 1.0f || dtr.plane.normal[2] <= 0.7f)
+							continue;
+						/* The rim must be out of every push volume, or the
+						   link just re-enters the shaft. */
+						for (j = 0; j < npush; j++)
+						{
+							edict_t *p = pushers[j];
+							if (dtr.endpos[0] + hmaxs[0] < p->v.absmin[0] || dtr.endpos[0] + hmins[0] > p->v.absmax[0]) continue;
+							if (dtr.endpos[1] + hmaxs[1] < p->v.absmin[1] || dtr.endpos[1] + hmins[1] > p->v.absmax[1]) continue;
+							if (dtr.endpos[2] + hmaxs[2] < p->v.absmin[2] || dtr.endpos[2] + hmins[2] > p->v.absmax[2]) continue;
+							break;
+						}
+						if (j < npush)
+							continue;
+						pos[0] = dtr.endpos[0];
+						pos[1] = dtr.endpos[1];
+						pos[2] = dtr.endpos[2];
+						landed = 1;
+					}
+				}
+				if (landed)
+					break;
+			}
+
+			next[0] = pos[0] + vel[0] * dt;
+			next[1] = pos[1] + vel[1] * dt;
+			next[2] = pos[2] + vel[2] * dt;
+			tr = SV_Move(pos, hmins, hmaxs, next, MOVE_NOMONSTERS, NULL);
+			if (tr.startsolid || tr.allsolid)
+			{
+				stuck = 1;
+				break;
+			}
+			if (tr.fraction < 1.0f)
+			{
+				if (tr.plane.normal[2] > 0.7f && vel[2] <= 0 && !inside)
+				{
+					landed = 1;
+				}
+				else
+				{
+					/* Slide along the surface like the engine does. */
+					float bo = vel[0]*tr.plane.normal[0] + vel[1]*tr.plane.normal[1] + vel[2]*tr.plane.normal[2];
+					vel[0] -= tr.plane.normal[0] * bo;
+					vel[1] -= tr.plane.normal[1] * bo;
+					vel[2] -= tr.plane.normal[2] * bo;
+					/* Grounded against a floor with no push and no speed:
+					   the ride is over even if the last hit was a wall. */
+					if (!inside && fabsf(vel[0]) < 1 && fabsf(vel[1]) < 1 && fabsf(vel[2]) < 1)
+						landed = 1;
+				}
+			}
+			pos[0] = tr.endpos[0]; pos[1] = tr.endpos[1]; pos[2] = tr.endpos[2];
+		}
+
+		if (!landed)
+		{
+			fprintf(stderr, "Nav: push: no link for pusher at (%.0f %.0f %.0f): %s at (%.0f %.0f %.0f)\n",
+				start[0], start[1], start[2], stuck ? "stuck" : "timeout",
+				pos[0], pos[1], pos[2]);
+			continue;
+		}
+
+		/* Suicide-chute gate, same as drops. */
+		{
+			vec3_t lc;
+			int lcont;
+			lc[0] = pos[0]; lc[1] = pos[1]; lc[2] = pos[2] - 16.0f;
+			lcont = SV_PointContents(lc);
+			if (lcont == CONTENTS_LAVA || lcont == CONTENTS_SLIME)
+				continue;
+		}
+
+		if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+		links[n].start[0] = start[0];
+		links[n].start[1] = start[1];
+		links[n].start[2] = start[2];
+		links[n].end[0] = pos[0];
+		links[n].end[1] = pos[1];
+		links[n].end[2] = pos[2] - 24.0f; /* origin -> feet */
+		/* Teleporter-width snap: the neutral-input sim lands short of where
+		   a steering player would, so give Detour slack to find the pad. */
+		links[n].radius = 128.0f;
+		links[n].bidirectional = 0;
+		links[n].link_type = AI_DROP;
+		links[n].required_speed = 0;
+		links[n].height_delta = links[n].end[2] - links[n].start[2];
+		fprintf(stderr, "Nav: LINK PUSH start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f)\n",
+			start[0], start[1], start[2], links[n].end[0], links[n].end[1], links[n].end[2]);
+		n++;
+	}
+
+	fprintf(stderr, "Nav: push: %d pushers, %d links\n", npush, n);
+	if (n == 0) { free(links); return 0; }
 	*out_links = links;
 	return n;
 }
@@ -1308,23 +1797,27 @@ void Nav_BuildForMap(void)
 
 	entity_count = nav_collect_teleporters(&entity_links);
 	{
-		nav_off_mesh_link_t *plat_links = NULL, *train_links = NULL;
+		nav_off_mesh_link_t *plat_links = NULL, *train_links = NULL, *push_links = NULL;
 		int plat_count = nav_collect_platform_links(&plat_links);
 		int train_count = nav_collect_train_links(&train_links);
-		if (plat_count + train_count > 0)
+		int push_count = nav_collect_push_links(&push_links);
+		if (plat_count + train_count + push_count > 0)
 		{
 			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + plat_count + train_count) * sizeof(*entity_links));
+				(size_t)(entity_count + plat_count + train_count + push_count) * sizeof(*entity_links));
 			memcpy(entity_links + entity_count, plat_links,
 				(size_t)plat_count * sizeof(*entity_links));
 			memcpy(entity_links + entity_count + plat_count, train_links,
 				(size_t)train_count * sizeof(*entity_links));
+			memcpy(entity_links + entity_count + plat_count + train_count, push_links,
+				(size_t)push_count * sizeof(*entity_links));
 		}
 		free(plat_links);
 		free(train_links);
-		Con_Printf("Nav: %d teleporter, %d plat, %d train links\n",
-			entity_count, plat_count, train_count);
-		entity_count += plat_count + train_count;
+		free(push_links);
+		Con_Printf("Nav: %d teleporter, %d plat, %d train, %d push links\n",
+			entity_count, plat_count, train_count, push_count);
+		entity_count += plat_count + train_count + push_count;
 	}
 
 	/* Single-pass build: entity links provided upfront, jump/drop links
@@ -1465,21 +1958,22 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* Sixth pass: deep one-way drops (past the boundary detector's 192u
-	   cap) into lower regions with no other way in, gated on the landing
-	   already having a way back OUT.  Runs after every other link pass so
-	   both its no-access and no-trap findPath gates see the real graph. */
-	if (nav_mesh != NULL && nav_deep_drops_cvar.value)
+	/* Sixth pass: bidirectional swim links across components whose rims
+	   connect through fully-submerged water (e4m8 canal tunnel, end's
+	   underwater ledge).  Runs before the deep drops: a water landing's
+	   only way OUT is often a swim (e3m5's hole floor swims to the wind
+	   tunnel), and the drop pass's no-trap gate must see that route. */
+	if (nav_mesh != NULL && nav_swim_links_cvar.value)
 	{
-		nav_off_mesh_link_t *ddlinks = NULL;
-		int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
-		if (ndd > 0)
+		nav_off_mesh_link_t *swlinks = NULL;
+		int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
+		if (nsw > 0)
 		{
 			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + ndd) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
-			entity_count += ndd;
-			free(ddlinks);
+				(size_t)(entity_count + nsw) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
+			entity_count += nsw;
+			free(swlinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -1496,21 +1990,30 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* Seventh pass: bidirectional swim links across components whose rims
-	   connect through fully-submerged water (e4m8 canal tunnel, end's
-	   underwater ledge).  Runs last so its new-access findPath gate sees
-	   every other link. */
-	if (nav_mesh != NULL && nav_swim_links_cvar.value)
+	/* Seventh pass: deep one-way drops (past the boundary detector's 192u
+	   cap) into lower regions with no other way in, gated on the landing
+	   already having a way back OUT.  Runs after every other link pass so
+	   both its no-access and no-trap findPath gates see the real graph. */
+	if (nav_mesh != NULL && nav_deep_drops_cvar.value)
 	{
-		nav_off_mesh_link_t *swlinks = NULL;
-		int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
-		if (nsw > 0)
+		/* Iterate to fixpoint: a pit whose only exit is itself a deep drop
+		   (e3m5's ogre platform over the hole) fails the no-trap gate on the
+		   first round -- its escape link doesn't exist yet.  Once round 1
+		   adds the outbound drop, round 2 can accept the inbound one.  The
+		   no-access gate skips already-linked pairs, so rounds never
+		   duplicate. */
+		int ddround;
+		for (ddround = 0; ddround < 3; ddround++)
 		{
+			nav_off_mesh_link_t *ddlinks = NULL;
+			int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
+			if (ndd <= 0)
+				break;
 			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nsw) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
-			entity_count += nsw;
-			free(swlinks);
+				(size_t)(entity_count + ndd) * sizeof(*entity_links));
+			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
+			entity_count += ndd;
+			free(ddlinks);
 
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
@@ -1586,6 +2089,29 @@ void Nav_BuildForMap(void)
 					hull_floor - nr.nearest_point[2]);
 			}
 			if (si > 20) break; /* limit output */
+		}
+	}
+
+	/* Triage probe: NAV_PATH_TEST="x1 y1 z1 x2 y2 z2[;...]" runs findPath
+	   between arbitrary points on the final mesh and prints the outcome. */
+	if (nav_mesh != NULL)
+	{
+		const char *pt = getenv("NAV_PATH_TEST");
+		while (pt != NULL && *pt)
+		{
+			vec3_t a, b;
+			if (sscanf(pt, "%f %f %f %f %f %f", &a[0], &a[1], &a[2], &b[0], &b[1], &b[2]) == 6)
+			{
+				nav_mesh_path_result_t res;
+				char perr[128] = "";
+				int ok = nav_mesh_find_path(nav_mesh, a, b, &res, perr, sizeof(perr));
+				fprintf(stderr, "Nav: PATHTEST (%.0f %.0f %.0f)->(%.0f %.0f %.0f): %s (%s) end=(%.0f %.0f %.0f)\n",
+					a[0], a[1], a[2], b[0], b[1], b[2],
+					ok ? "OK" : "FAIL", perr,
+					res.end_point[0], res.end_point[1], res.end_point[2]);
+			}
+			pt = strchr(pt, ';');
+			if (pt) pt++;
 		}
 	}
 
