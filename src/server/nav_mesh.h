@@ -352,6 +352,11 @@ int nav_mesh_find_path(
 	char *error, size_t error_size);
 
 void nav_mesh_free_poly_records(nav_mesh_poly_record_t *records);
+
+/* Quake-coords center of the poly behind a path ref.
+   0 = bad ref, 1 = ground poly, 2 = off-mesh connection. */
+int nav_mesh_poly_center_by_ref(const nav_mesh_runtime_t *navmesh,
+	unsigned long long ref, float *quake_center);
 void nav_mesh_destroy(nav_mesh_runtime_t *navmesh);
 
 /* Down-biased search box for snapping an actor origin to its floor poly

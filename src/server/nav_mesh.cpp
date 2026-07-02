@@ -216,6 +216,22 @@ static int nav_mesh_push_unique_ref(unsigned long long *refs, int count, int max
 	return count + 1;
 }
 
+int nav_mesh_poly_center_by_ref(const nav_mesh_runtime_t *navmesh,
+	unsigned long long ref, float *quake_center)
+{
+	const dtMeshTile *tile;
+	const dtPoly *poly;
+	float rc[3];
+
+	if (navmesh == nullptr || navmesh->navmesh == nullptr)
+		return 0;
+	if (dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef((dtPolyRef)ref, &tile, &poly)))
+		return 0;
+	nav_mesh_poly_center(tile, poly, rc);
+	nav_recast_to_quake(rc, quake_center);
+	return poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION ? 2 : 1;
+}
+
 static int nav_mesh_collect_neighbors(const nav_mesh_runtime_t *navmesh, dtPolyRef ref, unsigned long long *refs, int max_refs)
 {
 	const dtMeshTile *tile;
@@ -2051,6 +2067,27 @@ int nav_mesh_gap_probe(
 		for (int i = 0; i < ground; i++)
 			fprintf(stderr, "POLYDUMP %d (%.0f %.0f %.0f) f=%d c=%d\n",
 				i, qc[i*3], qc[i*3+1], qc[i*3+2], tile->polys[i].flags, gf(i));
+		if (getenv("NAV_DUMP_POLY_VERTS"))
+		{
+			float bx0, by0, bx1, by1;
+			if (sscanf(getenv("NAV_DUMP_POLY_VERTS"), "%f %f %f %f", &bx0, &by0, &bx1, &by1) == 4)
+			{
+				for (int i = 0; i < ground; i++)
+				{
+					if (qc[i*3] < bx0 || qc[i*3] > bx1 || qc[i*3+1] < by0 || qc[i*3+1] > by1)
+						continue;
+					const dtPoly *p = &tile->polys[i];
+					fprintf(stderr, "POLYVERTS %d:", i);
+					for (int vi = 0; vi < p->vertCount; vi++)
+					{
+						float q[3];
+						nav_recast_to_quake(&tile->verts[p->verts[vi] * 3], q);
+						fprintf(stderr, " (%.0f %.0f %.0f)", q[0], q[1], q[2]);
+					}
+					fprintf(stderr, "\n");
+				}
+			}
+		}
 		dumped = 1;
 	}
 
@@ -2356,10 +2393,13 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 				continue;
 			mesh->setPolyFlags(base | (dtPolyRef)i, 0);
 			disabled++;
-#ifdef NAV_ISLAND_DEBUG
-			fprintf(stderr, "Nav: sliver poly %d comp=%d size=%d at (%.0f %.0f %.0f)\n",
-				i, c, comp_size[c], ctr[i * 3], ctr[i * 3 + 2], ctr[i * 3 + 1]);
-#endif
+			if (getenv("NAV_ISLAND_DEBUG") != NULL)
+			{
+				float qc[3], rc[3] = { ctr[i * 3], ctr[i * 3 + 1], ctr[i * 3 + 2] };
+				nav_recast_to_quake(rc, qc);
+				fprintf(stderr, "Nav: sliver poly %d comp=%d size=%d at (%.0f %.0f %.0f)\n",
+					i, c, comp_size[c], qc[0], qc[1], qc[2]);
+			}
 		}
 	}
 
@@ -3400,7 +3440,23 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 						s[0], s[1], s[2], e[0], e[1], e[2], con->rad);
 				}
 				else
+				{
 					linked++;
+					if (getenv("NAV_DUMP_LINKS") != NULL)
+					{
+						const dtOffMeshConnection *con = &tile->offMeshCons[oi];
+						float s[3], e[3], vs[3], ve[3];
+						const float *v0 = &tile->verts[p->verts[0] * 3];
+						const float *v1 = &tile->verts[p->verts[1] * 3];
+						nav_recast_to_quake(&con->pos[0], s);
+						nav_recast_to_quake(&con->pos[3], e);
+						nav_recast_to_quake(v0, vs);
+						nav_recast_to_quake(v1, ve);
+						fprintf(stderr, "Nav: OMLINK id=%u orig (%.0f %.0f %.0f)->(%.0f %.0f %.0f) snap (%.0f %.0f %.0f)->(%.0f %.0f %.0f) rad=%.0f\n",
+							con->userId, s[0], s[1], s[2], e[0], e[1], e[2],
+							vs[0], vs[1], vs[2], ve[0], ve[1], ve[2], con->rad);
+					}
+				}
 			}
 			fprintf(stderr, "Nav: Detour stored %d/%d off-mesh, linked=%d unlinked=%d\n",
 				tile->header->offMeshConCount,
