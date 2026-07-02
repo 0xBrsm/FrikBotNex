@@ -747,16 +747,63 @@ static void nav_default_config(nav_mesh_build_config_t *config)
    mesh.  Tall doors block passages bots path through (they open on
    touch), so those stay out.
 
-   Plats are deliberately excluded: baking the plat body at its
-   resting position fragments the surrounding mesh (dm3 lost edges),
-   and plat traversal is the off-mesh link system's job. */
+   Plats resting at the BOTTOM are excluded: baking the body at that
+   position leaves a column standing in the lower room, fragmenting
+   the surrounding mesh (dm3 lost edges) -- traversal is the off-mesh
+   link system's job.  Plats parked at the TOP (targetname'd plats
+   wait at pos1 until triggered, per plats.qc) are the opposite case:
+   the raised body IS the floor the map intends players to walk on,
+   and omitting it leaves a shaft-deep pit in the mesh (e4m8's
+   1008-unit elevator).  Bake those at their resting position; the
+   plat link still spans top<->bottom for traversal. */
 #define NAV_DOOR_FLOOR_MAX_THICKNESS 32.0f
+
+static int nav_plat_rests_at_top(edict_t *e)
+{
+	eval_t *pos1 = GetEdictFieldValue(e, "pos1");
+	if (!pos1) return 0;
+	return e->v.origin[0] == pos1->vector[0]
+		&& e->v.origin[1] == pos1->vector[1]
+		&& e->v.origin[2] == pos1->vector[2];
+}
+
+/* Can a player actually STAND on this brush's top face?  A START_OPEN
+   floor-door parked in a slot under the real floor (e2m2's extending
+   bridge) has no headroom anywhere on its top; baking it creates a
+   phantom walkable layer inside the closed cavity that captures
+   item/spawn snapping.  Sample a grid over the top face and require
+   player-height clearance at one of them before the brush qualifies. */
+static int nav_top_face_has_clearance(edict_t *e)
+{
+	vec3_t zero = {0, 0, 0}, start, end;
+	int ix, iy;
+	for (ix = 0; ix < 3; ix++)
+	{
+		for (iy = 0; iy < 3; iy++)
+		{
+			trace_t tr;
+			start[0] = e->v.absmin[0] + (e->v.absmax[0] - e->v.absmin[0]) * (0.25f + 0.25f * ix);
+			start[1] = e->v.absmin[1] + (e->v.absmax[1] - e->v.absmin[1]) * (0.25f + 0.25f * iy);
+			start[2] = e->v.absmax[2] + 2.0f;
+			end[0] = start[0];
+			end[1] = start[1];
+			end[2] = start[2] + 56.0f;
+			tr = SV_Move(start, zero, zero, end, MOVE_NOMONSTERS, e);
+			if (!tr.startsolid && tr.fraction == 1.0f)
+				return 1;
+		}
+	}
+	return 0;
+}
 
 static int nav_is_brush_entity(edict_t *e)
 {
 	char *classname = pr_strings + (int)e->v.classname;
 	if (!strcasecmp(classname, "door"))
-		return (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS;
+		return (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
+			&& nav_top_face_has_clearance(e);
+	if (!strcasecmp(classname, "plat"))
+		return nav_plat_rests_at_top(e);
 	return !strncasecmp(classname, "func_wall", 9)
 		|| !strncasecmp(classname, "func_episodegate", 16)
 		|| !strncasecmp(classname, "func_bossgate", 13)
@@ -786,6 +833,12 @@ static int nav_extract_bsp(model_t *worldmodel,
 		m = sv.models[(int)e->v.modelindex];
 		if (!m || m == worldmodel) continue;
 		if (!nav_is_brush_entity(e)) continue;
+		if (getenv("NAV_DUMP_BAKE") != NULL)
+			fprintf(stderr, "Nav: BAKE %s %s org=(%.0f %.0f %.0f) abs=(%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n",
+				pr_strings + (int)e->v.classname, sv.model_precache[(int)e->v.modelindex],
+				e->v.origin[0], e->v.origin[1], e->v.origin[2],
+				e->v.absmin[0], e->v.absmin[1], e->v.absmin[2],
+				e->v.absmax[0], e->v.absmax[1], e->v.absmax[2]);
 		nav_hull_add_model(m, e->v.origin);
 	}
 
@@ -1104,7 +1157,17 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		links[n].end[0] = links[n].start[0];
 		links[n].end[1] = links[n].start[1];
 		links[n].end[2] = top_z;
-		links[n].radius = 64.0f;
+		/* The radius is Detour's horizontal snap extent when tying each
+		   endpoint to a ground poly.  The plat body itself isn't meshed,
+		   so the endpoint must reach PAST the brush edge to the boarding
+		   floor around it -- a fixed radius strands any plat wider than
+		   2x that (e4m8's 190x206 exit lift never linked). */
+		{
+			float half_x = (e->v.absmax[0] - e->v.absmin[0]) * 0.5f;
+			float half_y = (e->v.absmax[1] - e->v.absmin[1]) * 0.5f;
+			float rad = (half_x > half_y ? half_x : half_y) + 24.0f;
+			links[n].radius = rad > 64.0f ? rad : 64.0f;
+		}
 		links[n].bidirectional = 1;
 		links[n].link_type = AI_PLAT_BOTTOM;
 		links[n].height_delta = top_z - bot_z;
@@ -2109,6 +2172,18 @@ void Nav_BuildForMap(void)
 					a[0], a[1], a[2], b[0], b[1], b[2],
 					ok ? "OK" : "FAIL", perr,
 					res.end_point[0], res.end_point[1], res.end_point[2]);
+				if (getenv("NAV_PATH_TEST_VERBOSE") != NULL)
+				{
+					int pi;
+					for (pi = 0; pi < res.path_ref_count; pi++)
+					{
+						float c[3];
+						int pk = nav_mesh_poly_center_by_ref(nav_mesh, res.path_refs[pi], c);
+						if (pk)
+							fprintf(stderr, "Nav: PATHTEST   [%d] (%.0f %.0f %.0f)%s\n",
+								pi, c[0], c[1], c[2], pk == 2 ? " OFFMESH" : "");
+					}
+				}
 			}
 			pt = strchr(pt, ';');
 			if (pt) pt++;
@@ -3321,6 +3396,11 @@ static void PF_nav_find_goal(void)
    Everything else (key doors, trigger doors, secret doors) starts blocked. */
 static int Nav_DoorStartsBlocked(edict_t *e)
 {
+	/* Triage aid: measure how much unreachability is door-gating. */
+	static int all_open = -1;
+	if (all_open < 0) all_open = getenv("NAV_ALL_DOORS_OPEN") != NULL;
+	if (all_open) return 0;
+
 	if ((int)e->v.items != 0)    return 1; /* key door */
 	if (e->v.targetname)         return 1; /* trigger door */
 	if (e->v.health > 0)         return 1; /* shootable / secret */
