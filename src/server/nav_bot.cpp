@@ -1474,7 +1474,7 @@ static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
 	l->required_speed = speed;
 	l->wait_time = 0;
 	fprintf(stderr, "Nav: LINK %s start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f) dz=%.0f spd=%.0f\n",
-		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : type == 8 ? "SURF" : "???",
+		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : type == 8 ? "SURF" : type == 9 ? "WALK" : "???",
 		start[0], start[1], start[2], end[0], end[1], end[2], dz, speed);
 	(*n)++;
 }
@@ -1797,8 +1797,6 @@ static int nav_link_callback(
 				/* Reverse: if drop height is within jump reach, also create
 				   a jump link from the landing floor back up to the edge.
 				   The bot jumps from below the ledge up to the top.
-				   Micro-drops (< jump min) stay one-way: they exist to
-				   ESCAPE artifact pockets, and nothing routes into one.
 				   No reverse jump out of liquid: jump impulse doesn't
 				   apply while swimming, so bots just nose the lip (dm5
 				   pool, 20 stalls/run).  Surface links handle water exit. */
@@ -1823,6 +1821,22 @@ static int nav_link_callback(
 							nav_link_push(&links, &n, &cap, end, mid, AI_JUMP, jspeed, drop_height);
 						}
 					}
+				}
+				/* Micro-drop (under step height): not a ledge, a STAIR the
+				   raster fused shut -- the engine walks a player back up an
+				   18u step for free.  When the landing floor (nearly) butts
+				   the edge, pair the drop with a reverse WALK so the step
+				   works both ways.  Without it a step-tall sill severed by
+				   a 1-cell raster wall is enterable only outbound (end's
+				   doorway threshold: the quad pen's only entrance).  The
+				   32u-wide hull spans a crevice up to half its width while
+				   stepping, and the raster wall itself reads as a 4-8u
+				   "gap" here, so allow up to 16u.  Liquid landings keep
+				   using surface links. */
+				else if (!land_in_liquid && drop_height < NAV_JUMP_HEIGHT_MIN
+					&& gap <= 16.0f)
+				{
+					nav_link_push(&links, &n, &cap, end, mid, AI_WALK, 10.0f, drop_height);
 				}
 			}
 		}
