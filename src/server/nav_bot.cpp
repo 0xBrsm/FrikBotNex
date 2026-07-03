@@ -858,16 +858,47 @@ static void nav_doors_open_for_build(void)
 	{
 		edict_t *e = EDICT_NUM(i);
 		eval_t *pos2;
+		vec3_t open_pos;
 		if (e->free) continue;
 		if (strcasecmp(pr_strings + (int)e->v.classname, "door")) continue;
 		if (nav_is_brush_entity(e)) continue;
 		pos2 = GetEdictFieldValue(e, "pos2");
 		if (pos2 == NULL) continue;
 		if (nav_opened_door_count >= NAV_MAX_OPEN_DOORS) break;
+		VectorCopy(pos2->vector, open_pos);
+		if (open_pos[0] == 0.0f && open_pos[1] == 0.0f && open_pos[2] == 0.0f)
+		{
+			/* Secret door: pos2 is computed lazily on first use, still
+			   zero here (== the closed origin, since brush entities park
+			   at the map origin).  Replicate fd_secret_use's dest2. */
+			eval_t *mangle = GetEdictFieldValue(e, "mangle");
+			eval_t *tw = GetEdictFieldValue(e, "t_width");
+			eval_t *tl = GetEdictFieldValue(e, "t_length");
+			vec3_t fwd, right, up;
+			float width, length, temp;
+			if (mangle == NULL) continue;
+			AngleVectors(mangle->vector, fwd, right, up);
+			temp = ((int)e->v.spawnflags & 2) ? -1.0f : 1.0f;
+			if (tw != NULL && tw->_float != 0.0f)
+				width = tw->_float;
+			else if ((int)e->v.spawnflags & 4)
+				width = fabsf(DotProduct(up, e->v.size));
+			else
+				width = fabsf(DotProduct(right, e->v.size));
+			if (tl != NULL && tl->_float != 0.0f)
+				length = tl->_float;
+			else
+				length = fabsf(DotProduct(fwd, e->v.size));
+			if ((int)e->v.spawnflags & 4)
+				VectorMA(e->v.origin, -width, up, open_pos);
+			else
+				VectorMA(e->v.origin, width * temp, right, open_pos);
+			VectorMA(open_pos, length, fwd, open_pos);
+		}
 		nav_opened_doors[nav_opened_door_count].e = e;
 		VectorCopy(e->v.origin, nav_opened_doors[nav_opened_door_count].org);
 		nav_opened_door_count++;
-		VectorCopy(pos2->vector, e->v.origin);
+		VectorCopy(open_pos, e->v.origin);
 		SV_LinkEdict(e, false);
 	}
 	if (nav_opened_door_count > 0)
