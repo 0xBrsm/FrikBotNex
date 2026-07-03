@@ -2450,7 +2450,26 @@ void Nav_BuildForMap(void)
 				spawns.push_back(ent);
 			}
 			else if (is_item)
+			{
+				/* Some stock maps embed items in world solid, outside the
+				   playable space (e2m5: two item_health in the void above
+				   the great hall's ceiling).  droptofloor's trace exits the
+				   solid so they survive spawn, but no player can EVER pick
+				   them up -- exclude them from the oracle rather than chase
+				   a navmesh route that cannot exist.  Check 1u above the
+				   origin: a legitimately-dropped item rests ON its floor,
+				   so origin+1 is always open space. */
+				vec3_t probe;
+				VectorCopy(ent.pos, probe);
+				probe[2] += 1;
+				if (SV_PointContents(probe) == CONTENTS_SOLID)
+				{
+					fprintf(stderr, "Nav: CONNECTIVITY: skipping %s at (%.0f %.0f %.0f): embedded in world solid (unobtainable by design)\n",
+						cn, ent.pos[0], ent.pos[1], ent.pos[2]);
+					continue;
+				}
 				items.push_back(ent);
+			}
 		}
 
 		/* A bot can respawn at ANY deathmatch spawn, so an item or spawn is
