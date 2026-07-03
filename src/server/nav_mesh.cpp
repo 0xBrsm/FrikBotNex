@@ -64,14 +64,14 @@ protected:
 	}
 };
 
-static void nav_quake_to_recast(const float *quake, float *recast)
+extern "C" void nav_quake_to_recast(const float *quake, float *recast)
 {
 	recast[0] = quake[0];
 	recast[1] = quake[2];
 	recast[2] = quake[1];
 }
 
-static void nav_recast_to_quake(const float *recast, float *quake)
+extern "C" void nav_recast_to_quake(const float *recast, float *quake)
 {
 	quake[0] = recast[0];
 	quake[1] = recast[2];
@@ -622,7 +622,12 @@ static int nav_mesh_find_nearest_internal(
 			return 0;
 		}
 	}
-	return *nearest_ref != 0 ? 1 : 0;
+	if (*nearest_ref == 0)
+	{
+		nav_set_error(error, error_size, "No polygon within query extents");
+		return 0;
+	}
+	return 1;
 }
 
 struct nav_heightfield_gap_fill_t
@@ -1009,6 +1014,33 @@ static void nav_collect_ground_centroids(const dtMeshTile *tile, int ground,
 	}
 }
 
+/* Union-find over ground<->ground poly adjacency only (off-mesh links never
+   bridge here -- ground ends at tile->header->offMeshBase) -- the
+   contiguous walkable-floor components shared by the link-generation
+   passes below.  When skip_disabled is set, an edge touching a disabled
+   poly (flags==0) doesn't bridge components either, so a flagged-off poly
+   can't smuggle two patches together (used by the drop/swim passes). */
+static std::vector<int> nav_mesh_ground_uf(const dtMeshTile *tile,
+	const dtNavMesh *mesh, int ground, bool skip_disabled)
+{
+	std::vector<int> ga(ground);
+	for (int i = 0; i < ground; i++) ga[i] = i;
+	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
+	for (int i = 0; i < ground; i++)
+	{
+		const dtPoly *p = &tile->polys[i];
+		if (skip_disabled && p->flags == 0) continue;
+		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+		{
+			if (tile->links[k].ref == 0) continue;
+			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+			if ((int)np < ground && (!skip_disabled || tile->polys[np].flags != 0))
+				ga[gf(i)] = gf((int)np);
+		}
+	}
+	return ga;
+}
+
 extern "C" int nav_mesh_compute_orphan_jumps(
 	nav_mesh_runtime_t *nav,
 	nav_jump_validate_fn validate, void *user,
@@ -1177,19 +1209,8 @@ int nav_mesh_compute_directed_links(
 	/* Ground-adjacency components: union only ground<->ground edges (an
 	   off-mesh link goes ground -> offmesh poly -> ground, so it never
 	   unions here -- exactly the contiguous-floor patches we want). */
-	std::vector<int> ga(ground);
-	for (int i = 0; i < ground; i++) ga[i] = i;
+	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
 	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground) ga[gf(i)] = gf((int)np);
-		}
-	}
 	std::vector<int> gacomp(ground, -1), gasize;
 	for (int i = 0; i < ground; i++)
 	{
@@ -1201,24 +1222,8 @@ int nav_mesh_compute_directed_links(
 	for (size_t c = 1; c < gasize.size(); c++)
 		if (gasize[c] > gasize[maingc]) maingc = (int)c;
 
-	/* Forward BFS from main over directed links (through off-mesh polys). */
-	std::vector<char> fwd(npolys, 0);
-	std::vector<int> stack;
-	for (int i = 0; i < ground; i++)
-		if (gacomp[i] == maingc) { fwd[i] = 1; stack.push_back(i); }
-	while (!stack.empty())
-	{
-		int i = stack.back(); stack.pop_back();
-		const dtPoly *p = &tile->polys[i];
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < npolys && !fwd[np]) { fwd[np] = 1; stack.push_back((int)np); }
-		}
-	}
-
-	/* Reverse adjacency, then backward BFS (ground that can reach main). */
+	/* Reverse adjacency from the tile (built once; per-round extras kept
+	   separately below). */
 	std::vector<std::vector<int>> rev(npolys);
 	for (int i = 0; i < npolys; i++)
 	{
@@ -1230,120 +1235,168 @@ int nav_mesh_compute_directed_links(
 			if ((int)np < npolys) rev[(int)np].push_back(i);
 		}
 	}
-	std::vector<char> bwd(npolys, 0);
-	for (int i = 0; i < ground; i++)
-		if (gacomp[i] == maingc) { bwd[i] = 1; stack.push_back(i); }
-	while (!stack.empty())
-	{
-		int i = stack.back(); stack.pop_back();
-		for (size_t e = 0; e < rev[i].size(); e++)
-		{
-			int j = rev[i][e];
-			if (!bwd[j]) { bwd[j] = 1; stack.push_back(j); }
-		}
-	}
-
-	/* Per-GA-component forward/backward reachability. */
-	std::vector<char> gc_fwd(gasize.size(), 0), gc_bwd(gasize.size(), 0);
-	for (int i = 0; i < ground; i++)
-	{
-		if (fwd[i]) gc_fwd[gacomp[i]] = 1;
-		if (bwd[i]) gc_bwd[gacomp[i]] = 1;
-	}
 
 	/* Quake-coord centroids. */
 	std::vector<float> q;
 	nav_collect_ground_centroids(tile, ground, q);
 
 	std::vector<nav_off_mesh_link_t> links;
-	/* For each off-main GA-comp connected only one way, add the missing
-	   direction.  ENTER (need IN, comp in B not F): a forward poly -> the
-	   comp.  EXIT (need OUT, comp in F not B): the comp -> a backward poly. */
-	for (int c = 0; c < (int)gasize.size(); c++)
+	/* Links accepted this call, as directed poly-index edges, so later
+	   rounds see the reachability the earlier repairs created.  A single
+	   snapshot pass cannot cascade: on hip2m6 the item ledge's only valid
+	   IN source poly is itself only main-reachable via another comp's
+	   repair link from the same pass, so the ledge stayed orphaned.
+	   Iterate to a fixpoint instead.  This also lets an isolated pocket
+	   earn an IN link in a later round (its round-1 OUT makes it
+	   B-not-F): unlike the reverted bidirectional hack, that IN is a
+	   fresh candidate search, independently validated as a real one-way
+	   move (jump up or survivable drop), so it cannot send bots at
+	   physically-infeasible reverse climbs. */
+	std::vector<std::vector<int>> extra_adj(npolys), extra_rev(npolys);
+	std::vector<int> stack;
+	int progress = 1, rounds = 0;
+	while (progress && rounds++ < 16)
 	{
-		if (c == maingc) continue;
-		int need_in = (gc_bwd[c] && !gc_fwd[c]);
-		int need_out = (gc_fwd[c] && !gc_bwd[c]);
-		/* A component with NO existing link either way (never reached by
-		   the JUMP/SUPER_JUMP passes, e.g. an isolated ledge or an item
-		   alcove) falls through both checks above and used to be skipped
-		   entirely -- permanently trapping any bot that spawns or lands
-		   there, and hiding any item sitting in it from every spawn.
-		   Search for an OUT candidate (that's the minimum a dead-end spot
-		   needs), but mark the resulting link bidirectional so an item-only
-		   pocket also becomes reachable FROM the main mesh, not just able
-		   to leave it. */
-		int isolated = (!gc_fwd[c] && !gc_bwd[c]);
-		if (!need_in && !need_out)
-		{
-			if (isolated)
-				need_out = 1;
-			else
-				continue;
-		}
+		progress = 0;
 
-		float bestcost = 1e9f, bestS[3] = {0,0,0}, bestE[3] = {0,0,0};
-		int bestType = 0;
-		for (int o = 0; o < ground; o++)
+		/* Forward BFS from main over directed links (through off-mesh
+		   polys), plus the edges accepted in earlier rounds. */
+		std::vector<char> fwd(npolys, 0);
+		for (int i = 0; i < ground; i++)
+			if (gacomp[i] == maingc) { fwd[i] = 1; stack.push_back(i); }
+		while (!stack.empty())
 		{
-			if (gacomp[o] != c) continue;
-			for (int m = 0; m < ground; m++)
+			int i = stack.back(); stack.pop_back();
+			const dtPoly *p = &tile->polys[i];
+			for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
 			{
-				/* IN link comes from a forward poly; OUT link goes to a
-				   backward poly. */
-				if (need_in && !fwd[m]) continue;
-				if (need_out && !bwd[m]) continue;
-				if (gacomp[m] == c) continue;
-				const float *qo = &q[o * 3], *qm = &q[m * 3];
-				float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
-				float hd = sqrtf(dx * dx + dy * dy);
-				float dz = qo[2] - qm[2], adz = dz < 0 ? -dz : dz;
-				if (hd > 320.0f || hd < 8.0f) continue;
-				if (adz > 320.0f) continue;
-				float cost = hd + adz;
-				if (cost >= bestcost) continue;
-
-				/* The link runs FROM the main side TO the comp for IN, and
-				   FROM the comp TO the main side for OUT.  Name the ends so
-				   validate sees the actual direction of travel. */
-				const float *from = need_in ? qm : qo;
-				const float *to   = need_in ? qo : qm;
-				int type = validate(from, to, user);
-				/* Never restore one-way connectivity with a rocket jump: bots
-				   grind RJ links (they can't reliably execute them, or own no
-				   launcher), so an area reachable only by RJ is a trap, not a
-				   fix.  Leave it one-way and let it stay that way. */
-				if (type == AI_SUPER_JUMP)
-					continue;
-				if (!type)
-				{
-					/* validate only models level/up moves.  A downward move
-					   is a drop -- survivable fall, clear-ish column, not into
-					   lava (the cycle's other half already exists, so the bot
-					   won't be stranded down there). */
-					float ddz = to[2] - from[2];
-					if (ddz < -18.0f && ddz > -320.0f)  /* below step height = a drop */
-						type = AI_DROP;
-				}
-				if (!type) continue;
-				bestcost = cost; bestType = type;
-				bestS[0] = from[0]; bestS[1] = from[1]; bestS[2] = from[2];
-				bestE[0] = to[0]; bestE[1] = to[1]; bestE[2] = to[2];
+				if (tile->links[k].ref == 0) continue;
+				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+				if ((int)np < npolys && !fwd[np]) { fwd[np] = 1; stack.push_back((int)np); }
+			}
+			for (size_t e = 0; e < extra_adj[i].size(); e++)
+			{
+				int j = extra_adj[i][e];
+				if (!fwd[j]) { fwd[j] = 1; stack.push_back(j); }
 			}
 		}
-		if (bestType)
-			/* Bidirectional here regressed real maps: DROP/JUMP links found
-			   by this merge pass aren't necessarily climbable in reverse
-			   (unlike the main JUMP passes above, which only ever link
-			   spots a bot can actually walk/jump between both ways), so
-			   forcing reverse traversal sent bots at physically-infeasible
-			   "climb the drop" moves -- new stuck/lava failures appeared on
-			   e1m1/e1m7/e2m2/e2m4/e2m7 (confirmed via nav_harness.sh full
-			   suite: 15/37 -> 14/37 despite fixing a couple of item spots).
-			   Back to one-way only; the isolated-component case still gets
-			   its OUT link so nothing is trapped, it just won't make an
-			   item-only pocket reachable in reverse. */
-			links.push_back(nav_make_link(bestS, bestE, bestType, 0, 32.0f));
+
+		/* Backward BFS (ground that can reach main). */
+		std::vector<char> bwd(npolys, 0);
+		for (int i = 0; i < ground; i++)
+			if (gacomp[i] == maingc) { bwd[i] = 1; stack.push_back(i); }
+		while (!stack.empty())
+		{
+			int i = stack.back(); stack.pop_back();
+			for (size_t e = 0; e < rev[i].size(); e++)
+			{
+				int j = rev[i][e];
+				if (!bwd[j]) { bwd[j] = 1; stack.push_back(j); }
+			}
+			for (size_t e = 0; e < extra_rev[i].size(); e++)
+			{
+				int j = extra_rev[i][e];
+				if (!bwd[j]) { bwd[j] = 1; stack.push_back(j); }
+			}
+		}
+
+		/* Per-GA-component forward/backward reachability. */
+		std::vector<char> gc_fwd(gasize.size(), 0), gc_bwd(gasize.size(), 0);
+		for (int i = 0; i < ground; i++)
+		{
+			if (fwd[i]) gc_fwd[gacomp[i]] = 1;
+			if (bwd[i]) gc_bwd[gacomp[i]] = 1;
+		}
+
+		/* For each off-main GA-comp connected only one way, add the missing
+		   direction.  ENTER (need IN, comp in B not F): a forward poly -> the
+		   comp.  EXIT (need OUT, comp in F not B): the comp -> a backward poly. */
+		for (int c = 0; c < (int)gasize.size(); c++)
+		{
+			if (c == maingc) continue;
+			int need_in = (gc_bwd[c] && !gc_fwd[c]);
+			int need_out = (gc_fwd[c] && !gc_bwd[c]);
+			/* A component with NO existing link either way (never reached by
+			   the JUMP/SUPER_JUMP passes, e.g. an isolated ledge or an item
+			   alcove) falls through both checks above and used to be skipped
+			   entirely -- permanently trapping any bot that spawns or lands
+			   there, and hiding any item sitting in it from every spawn.
+			   Search for an OUT candidate (that's the minimum a dead-end spot
+			   needs); a later round can then give it a validated IN. */
+			int isolated = (!gc_fwd[c] && !gc_bwd[c]);
+			if (!need_in && !need_out)
+			{
+				if (isolated)
+					need_out = 1;
+				else
+					continue;
+			}
+
+			float bestcost = 1e9f, bestS[3] = {0,0,0}, bestE[3] = {0,0,0};
+			int bestType = 0, bestFrom = -1, bestTo = -1;
+			for (int o = 0; o < ground; o++)
+			{
+				if (gacomp[o] != c) continue;
+				for (int m = 0; m < ground; m++)
+				{
+					/* IN link comes from a forward poly; OUT link goes to a
+					   backward poly. */
+					if (need_in && !fwd[m]) continue;
+					if (need_out && !bwd[m]) continue;
+					if (gacomp[m] == c) continue;
+					const float *qo = &q[o * 3], *qm = &q[m * 3];
+					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
+					float hd = sqrtf(dx * dx + dy * dy);
+					float dz = qo[2] - qm[2], adz = dz < 0 ? -dz : dz;
+					if (hd > 320.0f || hd < 8.0f) continue;
+					if (adz > 320.0f) continue;
+					float cost = hd + adz;
+					if (cost >= bestcost) continue;
+
+					/* The link runs FROM the main side TO the comp for IN, and
+					   FROM the comp TO the main side for OUT.  Name the ends so
+					   validate sees the actual direction of travel. */
+					const float *from = need_in ? qm : qo;
+					const float *to   = need_in ? qo : qm;
+					int type = validate(from, to, user);
+					/* Never restore one-way connectivity with a rocket jump: bots
+					   grind RJ links (they can't reliably execute them, or own no
+					   launcher), so an area reachable only by RJ is a trap, not a
+					   fix.  Leave it one-way and let it stay that way. */
+					if (type == AI_SUPER_JUMP)
+						continue;
+					if (!type)
+					{
+						/* validate only models level/up moves.  A downward move
+						   is a drop -- survivable fall, clear-ish column, not into
+						   lava (the cycle's other half already exists, so the bot
+						   won't be stranded down there). */
+						float ddz = to[2] - from[2];
+						if (ddz < -18.0f && ddz > -320.0f)  /* below step height = a drop */
+							type = AI_DROP;
+					}
+					if (!type) continue;
+					bestcost = cost; bestType = type;
+					bestS[0] = from[0]; bestS[1] = from[1]; bestS[2] = from[2];
+					bestE[0] = to[0]; bestE[1] = to[1]; bestE[2] = to[2];
+					bestFrom = need_in ? m : o;
+					bestTo   = need_in ? o : m;
+				}
+			}
+			if (bestType)
+			{
+				/* One-way only: DROP/JUMP links found by this merge pass
+				   aren't necessarily traversable in reverse (the reverted
+				   bidirectional attempt sent bots at "climb the drop" moves,
+				   regressing e1m1/e1m7/e2m2/e2m4/e2m7).  If the pocket needs
+				   the other direction too, a later round finds and validates
+				   it as its own link. */
+				links.push_back(nav_make_link(bestS, bestE, bestType, 0, 32.0f));
+				extra_adj[bestFrom].push_back(bestTo);
+				extra_rev[bestTo].push_back(bestFrom);
+				progress = 1;
+			}
+		}
 	}
 
 	if (links.empty())
@@ -1391,19 +1444,8 @@ int nav_mesh_compute_gap_jumps(
 
 	/* Ground-adjacency components (ground<->ground links only): contiguous
 	   walkable patches.  Same construction as the directed pass. */
-	std::vector<int> ga(ground);
-	for (int i = 0; i < ground; i++) ga[i] = i;
+	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
 	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground) ga[gf(i)] = gf((int)np);
-		}
-	}
 	std::vector<int> gacomp(ground);
 	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
 
@@ -1515,19 +1557,8 @@ int nav_mesh_compute_rocket_jumps(
 	if (ground <= 0)
 		return 0;
 
-	std::vector<int> ga(ground);
-	for (int i = 0; i < ground; i++) ga[i] = i;
+	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
 	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground) ga[gf(i)] = gf((int)np);
-		}
-	}
 	std::vector<int> gacomp(ground);
 	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
 
@@ -1647,20 +1678,8 @@ int nav_mesh_compute_deep_drops(
 
 	/* Walk-adjacency components (off-mesh hops excluded on purpose --
 	   the findPath gates below are what see those). */
-	std::vector<int> ga(ground);
-	for (int i = 0; i < ground; i++) ga[i] = i;
+	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
 	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		if (p->flags == 0) continue; /* disabled polys must not bridge components */
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
-		}
-	}
 	std::vector<int> gacomp(ground);
 	std::vector<int> compsize(ground, 0);
 	for (int i = 0; i < ground; i++) { gacomp[i] = gf(i); compsize[gacomp[i]]++; }
@@ -1980,20 +1999,8 @@ int nav_mesh_compute_swim_links(
 		return 0;
 
 	/* Walk-adjacency components, same as the deep-drop pass. */
-	std::vector<int> ga(ground);
-	for (int i = 0; i < ground; i++) ga[i] = i;
+	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
 	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	for (int i = 0; i < ground; i++)
-	{
-		const dtPoly *p = &tile->polys[i];
-		if (p->flags == 0) continue;
-		for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-		{
-			if (tile->links[k].ref == 0) continue;
-			unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-			if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
-		}
-	}
 	std::vector<int> gacomp(ground);
 	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
 
@@ -2244,20 +2251,8 @@ int nav_mesh_gap_probe(
 	{
 		std::vector<float> qc;
 		nav_collect_ground_centroids(tile, ground, qc);
-		std::vector<int> ga(ground);
-		for (int i = 0; i < ground; i++) ga[i] = i;
+		std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
 		auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-		for (int i = 0; i < ground; i++)
-		{
-			const dtPoly *p = &tile->polys[i];
-			if (p->flags == 0) continue;
-			for (unsigned int k = p->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-			{
-				if (tile->links[k].ref == 0) continue;
-				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-				if ((int)np < ground && tile->polys[np].flags != 0) ga[gf(i)] = gf((int)np);
-			}
-		}
 		for (int i = 0; i < ground; i++)
 			fprintf(stderr, "POLYDUMP %d (%.0f %.0f %.0f) f=%d c=%d\n",
 				i, qc[i*3], qc[i*3+1], qc[i*3+2], tile->polys[i].flags, gf(i));
@@ -4216,18 +4211,7 @@ static int nav_poly_center(const nav_mesh_runtime_t *navmesh,
 		|| poly->vertCount == 0
 		|| poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
 		return 0;
-	center[0] = center[1] = center[2] = 0;
-	for (int i = 0; i < poly->vertCount; i++)
-	{
-		const float *v = &tile->verts[poly->verts[i] * 3];
-		center[0] += v[0];
-		center[1] += v[1];
-		center[2] += v[2];
-	}
-	const float inv = 1.0f / (float)poly->vertCount;
-	center[0] *= inv;
-	center[1] *= inv;
-	center[2] *= inv;
+	nav_mesh_poly_center(tile, poly, center);
 	return 1;
 }
 

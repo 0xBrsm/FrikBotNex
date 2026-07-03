@@ -793,6 +793,30 @@ static int nav_top_face_has_clearance(edict_t *e)
 	return 0;
 }
 
+/* A spawn point or item resting on a door's top face is map-author
+   evidence the door is meant to be stood on -- bake doors like that
+   even when they're too narrow for the room-sized footprint test
+   (hip2m6's 110u-wide pit lid has a DM spawn standing on it). */
+static int nav_door_top_supports_entity(edict_t *e)
+{
+	int i;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *o = EDICT_NUM(i);
+		const char *cn;
+		if (o->free || o == e) continue;
+		cn = pr_strings + (int)o->v.classname;
+		if (strcmp(cn, "info_player_deathmatch") && strcmp(cn, "info_player_start")
+			&& strncmp(cn, "item_", 5) && strncmp(cn, "weapon_", 7))
+			continue;
+		if (o->v.origin[0] < e->v.absmin[0] - 16.0f || o->v.origin[0] > e->v.absmax[0] + 16.0f) continue;
+		if (o->v.origin[1] < e->v.absmin[1] - 16.0f || o->v.origin[1] > e->v.absmax[1] + 16.0f) continue;
+		if (o->v.origin[2] < e->v.absmax[2] - 4.0f || o->v.origin[2] > e->v.absmax[2] + 40.0f) continue;
+		return 1;
+	}
+	return 0;
+}
+
 /* A func_door acting as a room-sized collapsing floor (e2m6's oubliette):
    opens downward, footprint wide enough to stand on, parked closed at its
    top position, with standing room above.  These get baked as floor AND
@@ -807,7 +831,8 @@ static int nav_is_floor_collapse_door(edict_t *e)
 	return pos1 && pos2
 		&& pos2->vector[2] < pos1->vector[2] - 32.0f
 		&& e->v.origin[2] == pos1->vector[2]
-		&& min_horiz >= 128.0f
+		&& (min_horiz >= 128.0f
+			|| (min_horiz >= 48.0f && nav_door_top_supports_entity(e)))
 		&& nav_top_face_has_clearance(e);
 }
 

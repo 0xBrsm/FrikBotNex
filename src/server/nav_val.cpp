@@ -15,155 +15,6 @@ extern "C" {
 #include "quakedef.h"
 }
 
-/* TEMP DEBUG — stall probes.  Live-bot stall positions (STALL bprint)
-   paired with the goal the bot was navigating to.  Dumps the start
-   snap, full findPath result, and every straight-path corner with
-   off-mesh poly markers, to explain corners appearing overhead. */
-typedef struct {
-	const char *map;
-	float s[3];
-	float e[3];
-} nav_stall_probe_t;
-static const nav_stall_probe_t nav_stall_probes[] = {
-	{"dm4",  {624, -202, -104},  {1136, -592, 0}},   /* Lore/Max -> armor2 */
-	{"dm4",  {116, -368, -104},  {840, -584, 0}},    /* Erwin under stairs -> spikes */
-	{"dm4",  {880, -400, -104},  {840, -584, 0}},    /* Max under slats */
-	{"dm4",  {368, -1061, 24},   {440, -784, -128}}, /* Max ledge -> rockets */
-	{"e2m1", {398, 1331, -108},  {384, 1384, -94}},  /* Erwin/Hudson pin */
-	{"e1m1", {976, 1812, -408},  {896, 1840, -526}}, /* Lore at door t10 */
-	{"dm6",  {1533, -484, 40},   {1736, -344, 144}}, /* 4-bot pile-up -> armorInv */
-	{"dm6",  {152, -1920, 40},   {56, -2008, 64}},   /* pedestal pin -> armor1 */
-	{"dm6",  {197.6f, -1909.2f, 40}, {192, -1908, 18}}, /* Erwin snap-rank pin */
-};
-
-static void Nav_StallProbes(const nav_mesh_runtime_t *mesh, const char *mapname)
-{
-	dtQueryFilter filter;
-	nav_mesh_setup_filter(&filter);
-
-	for (size_t pi = 0; pi < sizeof(nav_stall_probes) / sizeof(nav_stall_probes[0]); pi++)
-	{
-		const nav_stall_probe_t *pr = &nav_stall_probes[pi];
-		if (strcasecmp(mapname, pr->map))
-			continue;
-
-		fprintf(stderr, "Nav: STALLPROBE (%.0f,%.0f,%.0f)->(%.0f,%.0f,%.0f)\n",
-			pr->s[0], pr->s[1], pr->s[2], pr->e[0], pr->e[1], pr->e[2]);
-
-		nav_mesh_nearest_result_t ns, ne;
-		char nerr[96];
-		if (!nav_mesh_find_nearest(mesh, pr->s, &ns, nerr, sizeof(nerr)))
-		{
-			fprintf(stderr, "  start MISS: %s\n", nerr);
-			continue;
-		}
-		fprintf(stderr, "  start snap (%.0f,%.0f,%.0f) dz=%+.0f ref=%llu\n",
-			ns.nearest_point[0], ns.nearest_point[1], ns.nearest_point[2],
-			ns.nearest_point[2] - pr->s[2], (unsigned long long)ns.poly_ref);
-
-		/* Actor-snap candidate dump: every poly in the biased box with
-		   old (3D-nearest) and new (horizontal-first) scores. */
-		{
-			float rc[3] = {pr->s[0], pr->s[2], pr->s[1]};
-			float center[3], half[3];
-			dtPolyRef cand[64];
-			int cn = 0;
-			nav_mesh_actor_snap_box(mesh, rc, center, half);
-			if (dtStatusSucceed(mesh->query->queryPolygons(
-					center, half, &filter, cand, &cn, 64)))
-			{
-				for (int ci = 0; ci < cn; ci++)
-				{
-					float pt[3];
-					bool over = false;
-					if (dtStatusFailed(mesh->query->closestPointOnPoly(
-							cand[ci], rc, pt, &over)))
-						continue;
-					float dx = pt[0] - rc[0];
-					float dyv = pt[1] - rc[1];
-					float dz = pt[2] - rc[2];
-					float horiz = sqrtf(dx * dx + dz * dz);
-					float dy = pt[1] - (rc[1] - 24.0f);
-					fprintf(stderr,
-						"  actorcand ref=%llu pt=(%.0f,%.0f,%.0f) horiz=%.1f dy=%+.1f old=%.1f new=%.1f%s%s\n",
-						(unsigned long long)cand[ci], pt[0], pt[2], pt[1],
-						horiz, dy,
-						sqrtf(dx * dx + dyv * dyv + dz * dz),
-						horiz * 4.0f + fabsf(dy),
-						over ? " OVER" : "",
-						(pt[1] > rc[1] + 8.0f) ? " CAPPED" : "");
-				}
-			}
-		}
-		if (!nav_mesh_find_nearest(mesh, pr->e, &ne, nerr, sizeof(nerr)))
-		{
-			fprintf(stderr, "  end MISS: %s\n", nerr);
-			continue;
-		}
-		fprintf(stderr, "  end snap (%.0f,%.0f,%.0f) dz=%+.0f ref=%llu\n",
-			ne.nearest_point[0], ne.nearest_point[1], ne.nearest_point[2],
-			ne.nearest_point[2] - pr->e[2], (unsigned long long)ne.poly_ref);
-
-		float rs[3] = {ns.nearest_point[0], ns.nearest_point[2], ns.nearest_point[1]};
-		float re[3] = {ne.nearest_point[0], ne.nearest_point[2], ne.nearest_point[1]};
-		dtPolyRef path[256];
-		int pc = 0;
-		dtStatus st = mesh->query->findPath(
-			(dtPolyRef)ns.poly_ref, (dtPolyRef)ne.poly_ref,
-			rs, re, &filter, path, &pc, 256);
-		fprintf(stderr, "  findPath %s polys=%d\n",
-			dtStatusFailed(st) ? "FAIL" :
-			dtStatusDetail(st, DT_PARTIAL_RESULT) ? "PARTIAL" : "OK", pc);
-		if (dtStatusFailed(st) || pc == 0)
-			continue;
-
-		for (int i = 0; i < pc; i++)
-		{
-			const dtMeshTile *tile = NULL;
-			const dtPoly *poly = NULL;
-			if (dtStatusFailed(mesh->navmesh->getTileAndPolyByRef(path[i], &tile, &poly)))
-				continue;
-			float cx = 0, cy = 0, cz = 0;
-			for (int v = 0; v < poly->vertCount; v++)
-			{
-				const float *vp = &tile->verts[poly->verts[v] * 3];
-				cx += vp[0]; cy += vp[1]; cz += vp[2];
-			}
-			if (poly->vertCount)
-			{
-				cx /= poly->vertCount; cy /= poly->vertCount; cz /= poly->vertCount;
-			}
-			fprintf(stderr, "   p%d ref=%llu type=%s center=(%.0f,%.0f,%.0f)\n",
-				i, (unsigned long long)path[i],
-				poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION ? "OFFMESH" : "ground",
-				cx, cz, cy);
-		}
-
-		float spos[64 * 3];
-		unsigned char sflags[64];
-		dtPolyRef srefs[64];
-		int sc = 0;
-		mesh->query->findStraightPath(rs, re, path, pc,
-			spos, sflags, srefs, &sc, 64, DT_STRAIGHTPATH_AREA_CROSSINGS);
-		for (int i = 0; i < sc; i++)
-		{
-			const dtMeshTile *tile = NULL;
-			const dtPoly *poly = NULL;
-			int offmesh = 0;
-			unsigned char area = 0;
-			if (srefs[i] && dtStatusSucceed(
-					mesh->navmesh->getTileAndPolyByRef(srefs[i], &tile, &poly)))
-			{
-				offmesh = (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION);
-				area = poly->getArea();
-			}
-			fprintf(stderr, "   c%d (%.0f,%.0f,%.0f) sflags=%d area=%d%s\n",
-				i, spos[i * 3], spos[i * 3 + 2], spos[i * 3 + 1],
-				(int)sflags[i], (int)area, offmesh ? " OFFMESH" : "");
-		}
-	}
-}
-
 void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 {
 	int mi, ei;
@@ -173,8 +24,6 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 
 	if (mesh == NULL || mapname == NULL)
 		return;
-
-	Nav_StallProbes(mesh, mapname);
 
 	/* Find map data */
 	for (mi = 0; mi < NAV_VAL_MAP_COUNT; mi++)
@@ -218,8 +67,8 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 		}
 
 		float rca[3], rcb[3];
-		rca[0] = nra.nearest_point[0]; rca[1] = nra.nearest_point[2]; rca[2] = nra.nearest_point[1];
-		rcb[0] = nrb.nearest_point[0]; rcb[1] = nrb.nearest_point[2]; rcb[2] = nrb.nearest_point[1];
+		nav_quake_to_recast(nra.nearest_point, rca);
+		nav_quake_to_recast(nrb.nearest_point, rcb);
 
 		dtPolyRef path[512];
 		int pc = 0;
@@ -374,8 +223,8 @@ void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname)
 			continue;
 
 		float rca[3], rcb[3];
-		rca[0]=nra.nearest_point[0]; rca[1]=nra.nearest_point[2]; rca[2]=nra.nearest_point[1];
-		rcb[0]=nrb.nearest_point[0]; rcb[1]=nrb.nearest_point[2]; rcb[2]=nrb.nearest_point[1];
+		nav_quake_to_recast(nra.nearest_point, rca);
+		nav_quake_to_recast(nrb.nearest_point, rcb);
 		dtPolyRef path[512]; int pc = 0;
 		dtStatus st = mesh->query->findPath(
 			(dtPolyRef)nra.poly_ref, (dtPolyRef)nrb.poly_ref,
