@@ -837,6 +837,56 @@ static int nav_is_brush_entity(edict_t *e)
 		|| !strncasecmp(classname, "func_bossgate", 13);
 }
 
+/* Openable doors are SOLID_BSP, so every build-time SV_Move validation
+   trace (jump apex arcs, walk sweeps, drop fall columns) hits them
+   CLOSED and vetoes links through doorways the door will vacate in
+   play (e1m4 armor sill: a 6u-thick triggered door across the only
+   jump-up).  Hold every non-baked door at its open position (pos2)
+   for the duration of the link passes, then put them back.  Baked
+   doors stay closed: the raster has them closed, and traces must
+   match the mesh. */
+#define NAV_MAX_OPEN_DOORS 128
+static struct { edict_t *e; vec3_t org; } nav_opened_doors[NAV_MAX_OPEN_DOORS];
+static int nav_opened_door_count;
+
+static void nav_doors_open_for_build(void)
+{
+	int i;
+
+	nav_opened_door_count = 0;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *e = EDICT_NUM(i);
+		eval_t *pos2;
+		if (e->free) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "door")) continue;
+		if (nav_is_brush_entity(e)) continue;
+		pos2 = GetEdictFieldValue(e, "pos2");
+		if (pos2 == NULL) continue;
+		if (nav_opened_door_count >= NAV_MAX_OPEN_DOORS) break;
+		nav_opened_doors[nav_opened_door_count].e = e;
+		VectorCopy(e->v.origin, nav_opened_doors[nav_opened_door_count].org);
+		nav_opened_door_count++;
+		VectorCopy(pos2->vector, e->v.origin);
+		SV_LinkEdict(e, false);
+	}
+	if (nav_opened_door_count > 0)
+		fprintf(stderr, "Nav: %d doors held open for link validation\n", nav_opened_door_count);
+}
+
+static void nav_doors_restore(void)
+{
+	int i;
+
+	for (i = 0; i < nav_opened_door_count; i++)
+	{
+		edict_t *e = nav_opened_doors[i].e;
+		VectorCopy(nav_opened_doors[i].org, e->v.origin);
+		SV_LinkEdict(e, false);
+	}
+	nav_opened_door_count = 0;
+}
+
 /* Polygonize clip hull 1 of the world plus static brush entities.
    See nav_hull.cpp for why hull geometry instead of render faces. */
 static int nav_extract_bsp(model_t *worldmodel,
@@ -1974,6 +2024,8 @@ void Nav_BuildForMap(void)
 		entity_count += plat_count + train_count + push_count;
 	}
 
+	nav_doors_open_for_build();
+
 	/* Single-pass build: entity links provided upfront, jump/drop links
 	   detected mid-build via callback after contours are ready. */
 	memset(&summary, 0, sizeof(summary));
@@ -1986,6 +2038,7 @@ void Nav_BuildForMap(void)
 	if (nav_mesh == NULL)
 	{
 		Con_Printf("Nav: build failed: %s\n", error);
+		nav_doors_restore();
 		free(verts); free(tris); free(entity_links);
 		return;
 	}
@@ -2015,6 +2068,7 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
@@ -2045,6 +2099,7 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
@@ -2076,6 +2131,7 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
@@ -2106,6 +2162,7 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
@@ -2138,6 +2195,7 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
@@ -2178,11 +2236,14 @@ void Nav_BuildForMap(void)
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_doors_restore();
 				free(verts); free(tris); free(entity_links);
 				return;
 			}
 		}
 	}
+
+	nav_doors_restore();
 
 	free(verts);
 	free(tris);
