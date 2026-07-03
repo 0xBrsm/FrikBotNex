@@ -866,11 +866,14 @@ static void nav_doors_open_for_build(void)
 		if (pos2 == NULL) continue;
 		if (nav_opened_door_count >= NAV_MAX_OPEN_DOORS) break;
 		VectorCopy(pos2->vector, open_pos);
-		if (open_pos[0] == 0.0f && open_pos[1] == 0.0f && open_pos[2] == 0.0f)
+		if (e->v.movedir[0] == 0.0f && e->v.movedir[1] == 0.0f
+			&& e->v.movedir[2] == 0.0f)
 		{
-			/* Secret door: pos2 is computed lazily on first use, still
-			   zero here (== the closed origin, since brush entities park
-			   at the map origin).  Replicate fd_secret_use's dest2. */
+			/* No movedir means fd_secret, not func_door (secrets never
+			   call SetMovedir): pos2 is computed lazily on first use,
+			   still zero here.  Replicate fd_secret_use's dest2.  (A
+			   zero pos2 alone is NOT a secret tell -- START_OPEN doors
+			   swap pos1/pos2 at spawn, so their open offset IS zero.) */
 			eval_t *mangle = GetEdictFieldValue(e, "mangle");
 			eval_t *tw = GetEdictFieldValue(e, "t_width");
 			eval_t *tl = GetEdictFieldValue(e, "t_length");
@@ -918,6 +921,16 @@ static void nav_doors_restore(void)
 	nav_opened_door_count = 0;
 }
 
+static int nav_door_held_open(edict_t *e)
+{
+	int i;
+
+	for (i = 0; i < nav_opened_door_count; i++)
+		if (nav_opened_doors[i].e == e)
+			return 1;
+	return 0;
+}
+
 /* Polygonize clip hull 1 of the world plus static brush entities.
    See nav_hull.cpp for why hull geometry instead of render faces. */
 static int nav_extract_bsp(model_t *worldmodel,
@@ -940,7 +953,7 @@ static int nav_extract_bsp(model_t *worldmodel,
 		if (e->free) continue;
 		m = sv.models[(int)e->v.modelindex];
 		if (!m || m == worldmodel) continue;
-		if (!nav_is_brush_entity(e)) continue;
+		if (!nav_is_brush_entity(e) && !nav_door_held_open(e)) continue;
 		if (getenv("NAV_DUMP_BAKE") != NULL)
 			fprintf(stderr, "Nav: BAKE %s %s org=(%.0f %.0f %.0f) abs=(%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n",
 				pr_strings + (int)e->v.classname, sv.model_precache[(int)e->v.modelindex],
@@ -1999,9 +2012,17 @@ void Nav_BuildForMap(void)
 
 	t_start = Sys_FloatTime();
 
+	/* Doors are held open before extraction so their bodies rasterize at
+	   the OPEN position: a passage door's open body tucks into its wall
+	   slot (no mesh change), while a step/bridge door's open body IS the
+	   walk surface players use (e2m3's shoot-button step).  Traces during
+	   link validation then match the raster exactly. */
+	nav_doors_open_for_build();
+
 	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count))
 	{
 		Con_Printf("Nav: BSP extraction failed\n");
+		nav_doors_restore();
 		return;
 	}
 	Con_Printf("Nav: BSP extracted %d verts, %d tris\n", vert_count, tri_count);
@@ -2054,8 +2075,6 @@ void Nav_BuildForMap(void)
 			entity_count, plat_count, train_count, push_count);
 		entity_count += plat_count + train_count + push_count;
 	}
-
-	nav_doors_open_for_build();
 
 	/* Level exits: their component is escapable by definition (you leave
 	   the level), so the deep-drop no-trap gate must accept it. */
