@@ -56,6 +56,8 @@ struct NavRcContext : public rcContext
 protected:
 	void doLog(const rcLogCategory category, const char *msg, const int len) override
 	{
+		if (getenv("NAV_RECAST_LOG") != NULL)
+			fprintf(stderr, "Nav: recast[%d]: %.*s\n", (int)category, len, msg);
 		if (category != RC_LOG_ERROR)
 			return;
 		last_error.assign(msg, static_cast<size_t>(len));
@@ -293,6 +295,162 @@ static int nav_mesh_build_regions(
 		0,
 		config->minRegionArea,
 		config->mergeRegionArea);
+}
+
+/* Watershed can emit "overlapping regions": one region id whose spans
+   form disjoint patches or fold back over themselves (layered hull-1
+   geometry — ramps climbing over floors, floors under baked brush
+   entities).  rcBuildContours is only defined for simple regions: the
+   boundary walk on a folded region escapes through its "Should not
+   happen" exit, leaving an OPEN contour that cuts across the room, and
+   every span outside it silently gets NO polys — a mesh hole the
+   item-connectivity oracle reports as a snap failure.  Global
+   repartitioning (monotone/layer) trades one set of holes for another,
+   so repair surgically: find the broken region ids and re-shard ONLY
+   their spans into single-row runs.  A 1-cell-tall region can neither
+   fold nor pinch, so its contour is always a simple ring; poly
+   adjacency is edge-based downstream, so walkability across run seams
+   is preserved.  Returns the number of regions repaired. */
+static int nav_mesh_repair_broken_regions(rcCompactHeightfield *compact)
+{
+	const int w = compact->width;
+	const int h = compact->height;
+	const int nspans = compact->spanCount;
+	std::vector<unsigned char> bad(compact->maxRegions, 0);
+	int nbad = 0;
+
+	/* Broken test 1: two spans of the same region in one cell. */
+	for (int ci = 0; ci < w * h; ++ci)
+	{
+		const rcCompactCell &c = compact->cells[ci];
+		for (int i = (int)c.index, ni = (int)(c.index + c.count); i < ni; ++i)
+		{
+			const unsigned short reg = compact->spans[i].reg;
+			if (reg == 0 || (reg & RC_BORDER_REG) || bad[reg])
+				continue;
+			for (int j = (int)c.index; j < i; ++j)
+				if (compact->spans[j].reg == reg)
+				{
+					bad[reg] = 1;
+					nbad++;
+					break;
+				}
+		}
+	}
+
+	/* Broken test 2: region spans form more than one 4-connected
+	   component (only the first patch would get a contour). */
+	{
+		std::vector<int> span_x(nspans), span_z(nspans);
+		std::vector<unsigned char> visited(nspans, 0);
+		std::vector<unsigned char> reg_seen(compact->maxRegions, 0);
+		std::vector<int> stack;
+
+		for (int z = 0; z < h; ++z)
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = compact->cells[x + z * w];
+				for (int i = (int)c.index, ni = (int)(c.index + c.count); i < ni; ++i)
+				{
+					span_x[i] = x;
+					span_z[i] = z;
+				}
+			}
+
+		for (int i = 0; i < nspans; ++i)
+		{
+			const unsigned short reg = compact->spans[i].reg;
+			if (visited[i] || reg == 0 || (reg & RC_BORDER_REG))
+				continue;
+			if (reg_seen[reg])
+			{
+				if (!bad[reg])
+				{
+					bad[reg] = 1;
+					nbad++;
+				}
+				continue;
+			}
+			reg_seen[reg] = 1;
+			stack.clear();
+			stack.push_back(i);
+			visited[i] = 1;
+			while (!stack.empty())
+			{
+				const int cur = stack.back();
+				stack.pop_back();
+				const rcCompactSpan &s = compact->spans[cur];
+				for (int dir = 0; dir < 4; ++dir)
+				{
+					if (rcGetCon(s, dir) == RC_NOT_CONNECTED)
+						continue;
+					const int ax = span_x[cur] + rcGetDirOffsetX(dir);
+					const int az = span_z[cur] + rcGetDirOffsetY(dir);
+					const int ai = (int)compact->cells[ax + az * w].index + rcGetCon(s, dir);
+					if (!visited[ai] && compact->spans[ai].reg == reg)
+					{
+						visited[ai] = 1;
+						stack.push_back(ai);
+					}
+				}
+			}
+		}
+	}
+
+	if (nbad == 0)
+		return 0;
+
+	/* Re-shard the broken regions' spans into single-row runs.  A run
+	   extends west→east while the west-connected neighbor belongs to
+	   the same original region and its run hasn't already claimed a
+	   span in this cell (two layers may share one west neighbor). */
+	{
+		std::vector<unsigned short> orig(nspans);
+		std::vector<unsigned short> newreg(nspans, 0);
+		std::vector<unsigned short> cell_runs;
+
+		for (int i = 0; i < nspans; ++i)
+			orig[i] = compact->spans[i].reg;
+
+		for (int z = 0; z < h; ++z)
+			for (int x = 0; x < w; ++x)
+			{
+				const rcCompactCell &c = compact->cells[x + z * w];
+				cell_runs.clear();
+				for (int i = (int)c.index, ni = (int)(c.index + c.count); i < ni; ++i)
+				{
+					const unsigned short reg = orig[i];
+					if (reg == 0 || (reg & RC_BORDER_REG) || !bad[reg])
+						continue;
+					unsigned short run = 0;
+					const rcCompactSpan &s = compact->spans[i];
+					if (x > 0 && rcGetCon(s, 0) != RC_NOT_CONNECTED)
+					{
+						const int ai = (int)compact->cells[(x - 1) + z * w].index + rcGetCon(s, 0);
+						if (orig[ai] == reg && newreg[ai] != 0)
+						{
+							run = newreg[ai];
+							for (size_t k = 0; k < cell_runs.size(); ++k)
+								if (cell_runs[k] == run)
+								{
+									run = 0;
+									break;
+								}
+						}
+					}
+					if (run == 0)
+					{
+						if (compact->maxRegions >= RC_BORDER_REG)
+							return nbad; /* id space exhausted; keep mesh valid */
+						run = compact->maxRegions++;
+					}
+					newreg[i] = run;
+					compact->spans[i].reg = run;
+					cell_runs.push_back(run);
+				}
+			}
+	}
+	return nbad;
 }
 
 /* Actor-origin poly search box, biased downward.  Actors stand ON
@@ -2636,6 +2794,29 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	rcFilterWalkableLowHeightSpans(&ctx, rc_config.walkableHeight, *guard.solid);
 #endif /* custom ledge filter disabled — using standard + BFS restore */
 
+	/* NAV_DUMP_SPANS="x y" (Quake coords): print the filtered heightfield
+	   column there plus its 8 neighbors, to tell which filter ate a floor. */
+	if (const char *spanenv = getenv("NAV_DUMP_SPANS"))
+	{
+		float qx, qy;
+		if (sscanf(spanenv, "%f %f", &qx, &qy) == 2)
+		{
+			int cx = (int)((qx - rc_config.bmin[0]) / rc_config.cs);
+			int cz = (int)((qy - rc_config.bmin[2]) / rc_config.cs);
+			for (int dz = -1; dz <= 1; dz++)
+				for (int dx = -1; dx <= 1; dx++)
+				{
+					int x = cx + dx, z = cz + dz;
+					if (x < 0 || z < 0 || x >= guard.solid->width || z >= guard.solid->height) continue;
+					for (rcSpan *s = guard.solid->spans[x + z * guard.solid->width]; s; s = s->next)
+						fprintf(stderr, "Nav: SPANDUMP cell(%d %d) q(%.0f %.0f) z=%.0f..%.0f area=%d\n",
+							x, z, rc_config.bmin[0] + x * rc_config.cs, rc_config.bmin[2] + z * rc_config.cs,
+							rc_config.bmin[1] + s->smin * rc_config.ch,
+							rc_config.bmin[1] + s->smax * rc_config.ch, (int)s->area);
+				}
+		}
+	}
+
 	guard.compact = rcAllocCompactHeightfield();
 	if (guard.compact == nullptr)
 	{
@@ -3056,6 +3237,35 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build navigation regions");
 		return nullptr;
 	}
+	{
+		int repaired = nav_mesh_repair_broken_regions(guard.compact);
+		if (repaired > 0)
+			fprintf(stderr, "Nav: repaired %d overlapping/split watershed regions\n", repaired);
+	}
+
+	/* NAV_DUMP_SPANS second stage: compact spans (area/region) post-region
+	   build at the same column, to separate region loss from contour loss. */
+	if (const char *spanenv2 = getenv("NAV_DUMP_SPANS"))
+	{
+		float qx, qy;
+		int rad = 1;
+		if (sscanf(spanenv2, "%f %f %d", &qx, &qy, &rad) >= 2)
+		{
+			int cx = (int)((qx - rc_config.bmin[0]) / rc_config.cs);
+			int cz = (int)((qy - rc_config.bmin[2]) / rc_config.cs);
+			for (int dz = -rad; dz <= rad; dz++)
+				for (int dx = -rad; dx <= rad; dx++)
+				{
+					int x = cx + dx, z = cz + dz;
+					if (x < 0 || z < 0 || x >= guard.compact->width || z >= guard.compact->height) continue;
+					const rcCompactCell &c = guard.compact->cells[x + z * guard.compact->width];
+					for (int si = (int)c.index, sn = (int)(c.index + c.count); si < sn; ++si)
+						fprintf(stderr, "Nav: CSPANDUMP cell(%d %d) y=%d area=%d reg=%d dist=%d\n",
+							x, z, (int)guard.compact->spans[si].y, (int)guard.compact->areas[si],
+							(int)guard.compact->spans[si].reg, (int)guard.compact->dist[si]);
+				}
+		}
+	}
 
 	guard.contours = rcAllocContourSet();
 	if (guard.contours == nullptr)
@@ -3067,6 +3277,46 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	{
 		nav_set_error(error, error_size, "Failed to build contours");
 		return nullptr;
+	}
+
+	/* NAV_DUMP_SPANS third stage: contours, to separate contour loss from
+	   polymesh loss.  Prints every contour's region + vert count + bbox. */
+	if (getenv("NAV_DUMP_SPANS") != NULL)
+	{
+		for (int ci = 0; ci < guard.contours->nconts; ci++)
+		{
+			const rcContour &cont = guard.contours->conts[ci];
+			float xmin = FLT_MAX, xmax = -FLT_MAX, zmin = FLT_MAX, zmax = -FLT_MAX;
+			for (int vi = 0; vi < cont.nverts; vi++)
+			{
+				float wx = rc_config.bmin[0] + cont.verts[vi * 4 + 0] * rc_config.cs;
+				float wz = rc_config.bmin[2] + cont.verts[vi * 4 + 2] * rc_config.cs;
+				if (wx < xmin) xmin = wx;
+				if (wx > xmax) xmax = wx;
+				if (wz < zmin) zmin = wz;
+				if (wz > zmax) zmax = wz;
+			}
+			fprintf(stderr, "Nav: CONTDUMP %d reg=%d nverts=%d q(%.0f %.0f)-(%.0f %.0f)\n",
+				ci, (int)cont.reg, cont.nverts, xmin, zmin, xmax, zmax);
+			float qx, qy;
+			if (sscanf(getenv("NAV_DUMP_SPANS"), "%f %f", &qx, &qy) == 2
+				&& qx >= xmin && qx <= xmax && qy >= zmin && qy <= zmax)
+			{
+				for (int vi = 0; vi < cont.nverts; vi++)
+					fprintf(stderr, "Nav: CONTVERT %d %d (%.0f %.0f %.0f) r=%d\n",
+						ci, vi,
+						rc_config.bmin[0] + cont.verts[vi * 4 + 0] * rc_config.cs,
+						rc_config.bmin[2] + cont.verts[vi * 4 + 2] * rc_config.cs,
+						rc_config.bmin[1] + cont.verts[vi * 4 + 1] * rc_config.ch,
+						cont.verts[vi * 4 + 3] & RC_CONTOUR_REG_MASK);
+				for (int vi = 0; vi < cont.nrverts; vi++)
+					fprintf(stderr, "Nav: CONTRAW %d %d (%.0f %.0f %.0f)\n",
+						ci, vi,
+						rc_config.bmin[0] + cont.rverts[vi * 4 + 0] * rc_config.cs,
+						rc_config.bmin[2] + cont.rverts[vi * 4 + 2] * rc_config.cs,
+						rc_config.bmin[1] + cont.rverts[vi * 4 + 1] * rc_config.ch);
+			}
+		}
 	}
 
 	/* Extract boundary edges from contours and invoke callback for

@@ -869,7 +869,30 @@ static int nav_extract_bsp(model_t *worldmodel,
 		nav_hull_add_model(m, e->v.origin);
 	}
 
-	return nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count);
+	{
+		int ok = nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count);
+		const char *box = getenv("NAV_DUMP_TRIS");
+		if (ok && box)
+		{
+			float x0, y0, x1, y1;
+			if (sscanf(box, "%f %f %f %f", &x0, &y0, &x1, &y1) == 4)
+			{
+				int t;
+				for (t = 0; t < *out_tri_count; t++)
+				{
+					float *a = *out_verts + (*out_tris)[t * 3 + 0] * 3;
+					float *b = *out_verts + (*out_tris)[t * 3 + 1] * 3;
+					float *c = *out_verts + (*out_tris)[t * 3 + 2] * 3;
+					float cx = (a[0] + b[0] + c[0]) / 3.0f;
+					float cy = (a[1] + b[1] + c[1]) / 3.0f;
+					if (cx < x0 || cx > x1 || cy < y0 || cy > y1) continue;
+					fprintf(stderr, "Nav: TRIDUMP %d (%.0f %.0f %.0f) (%.0f %.0f %.0f) (%.0f %.0f %.0f)\n",
+						t, a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+				}
+			}
+		}
+		return ok;
+	}
 }
 
 /* ---- Teleporter off-mesh links ---- */
