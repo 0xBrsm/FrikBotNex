@@ -47,6 +47,12 @@ PAK_INDEX = {}
 
 
 def read_pak_file(name):
+    # Loose files (e.g. mission-pack maps dropped into the game dir)
+    # override pak contents, same as the engine's search order.
+    for gamedir in (QUAKE_ID1.parent / "ffa", QUAKE_ID1):
+        loose = gamedir / name
+        if loose.is_file():
+            return loose.read_bytes()
     if not PAK_INDEX:
         for pak, fname, off, size in pak_files():
             PAK_INDEX[fname] = (pak, off, size)  # later paks override earlier

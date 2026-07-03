@@ -29,13 +29,17 @@ extern "C" {
 #include <string.h>
 #include <vector>
 
-/* Quake↔Recast coordinate conversion (Quake: X,Y,Z-up  Recast: X,Z,Y-up) */
-static inline void nav_q2r(const float *q, float *r) { r[0]=q[0]; r[1]=q[2]; r[2]=q[1]; }
-static inline void nav_r2q(const float *r, float *q) { q[0]=r[0]; q[1]=r[2]; q[2]=r[1]; }
-
 #include <math.h>
 
 static float nav_frand(void) { return (float)rand() / (float)RAND_MAX; }
+
+/* NAV_DD_DEBUG opts into verbose deep-drop/swim validator logging. */
+static int nav_dd_debug_enabled(void)
+{
+	static int dbg = -1;
+	if (dbg < 0) dbg = getenv("NAV_DD_DEBUG") != NULL;
+	return dbg;
+}
 
 extern "C" {
 extern builtin_t *pr_builtins;
@@ -110,7 +114,6 @@ extern ddef_t *ED_FindGlobal(char *name);
 /* ---- Per-bot path corridor ---- */
 
 static nav_corridor_t *nav_bot_corridors[MAX_SCOREBOARD];
-static unsigned long long nav_bot_link_ref[MAX_SCOREBOARD]; /* last off-mesh poly ref per bot */
 static nav_mesh_runtime_t *nav_mesh;
 static void nav_build_block_map(void);
 
@@ -267,9 +270,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	float drop = from[2] - to[2];
 	float dx = to[0] - from[0], dy = to[1] - from[1];
 	float hd = sqrtf(dx * dx + dy * dy);
-	static int dd_dbg = -1;
-	if (dd_dbg < 0) dd_dbg = getenv("NAV_DD_DEBUG") != NULL;
-#define DDFAIL(stage) do { if (dd_dbg) fprintf(stderr, \
+#define DDFAIL(stage) do { if (nav_dd_debug_enabled()) fprintf(stderr, \
 	"DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): %s\n", \
 	from[0], from[1], from[2], to[0], to[1], to[2], stage); return 0; } while (0)
 	(void)user;
@@ -307,7 +308,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 		int oi;
 		char miss[160];
 		miss[0] = 0;
-#define DDOFF(why) do { if (dd_dbg) { size_t l = strlen(miss); \
+#define DDOFF(why) do { if (nav_dd_debug_enabled()) { size_t l = strlen(miss); \
 	snprintf(miss + l, sizeof(miss) - l, " o%.0f=%s", kOff[oi], why); } } while (0)
 		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
 		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
@@ -394,7 +395,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 #undef DDOFF
 		/* No clean plunge found -- the landing may still be plumb below
 		   the ledge with a clear column; let the dry path decide. */
-		if (dd_dbg)
+		if (nav_dd_debug_enabled())
 			fprintf(stderr, "DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): water-entry-miss%s\n",
 				from[0], from[1], from[2], to[0], to[1], to[2], miss);
 	}
@@ -421,7 +422,7 @@ dry_fall:
 		int oi, li, ok = 0;
 		char miss[200];
 		miss[0] = 0;
-#define DDOFF(why) do { if (dd_dbg && li == 0) { size_t l = strlen(miss); \
+#define DDOFF(why) do { if (nav_dd_debug_enabled() && li == 0) { size_t l = strlen(miss); \
 	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", kRel[oi], why); } } while (0)
 		ts = sqrtf(2.0f * drop / 800.0f);
 		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
@@ -472,7 +473,7 @@ dry_fall:
 #undef DDOFF
 		if (!ok)
 		{
-			if (dd_dbg)
+			if (nav_dd_debug_enabled())
 				fprintf(stderr, "DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): column-miss%s\n",
 					from[0], from[1], from[2], to[0], to[1], to[2], miss);
 			return 0;
@@ -588,10 +589,8 @@ static int nav_swim_link_validate(const float *from, const float *to, void *user
 	}
 
 	{
-		static int sw_dbg = -1;
-		if (sw_dbg < 0) sw_dbg = getenv("NAV_DD_DEBUG") != NULL;
 		wet = nav_swim_seg_wet(fs, fe);
-		if (!wet && sw_dbg)
+		if (!wet && nav_dd_debug_enabled())
 			fprintf(stderr, "SWVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): straight %s\n",
 				fs[0], fs[1], fs[2], fe[0], fe[1], fe[2], nav_swim_seg_why);
 	}
@@ -651,9 +650,7 @@ static int nav_swim_link_validate(const float *from, const float *to, void *user
 		}
 		if (!fits)
 		{
-			static int sw_dbg2 = -1;
-			if (sw_dbg2 < 0) sw_dbg2 = getenv("NAV_DD_DEBUG") != NULL;
-			if (sw_dbg2)
+			if (nav_dd_debug_enabled())
 				fprintf(stderr, "SWVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): hullfit@%d\n",
 					from[0], from[1], from[2], to[0], to[1], to[2], i);
 			return 0;
@@ -673,12 +670,12 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 
 	nav_mesh_setup_filter(&filter);
-	nav_q2r(qpos, rc_pos);
+	nav_quake_to_recast(qpos, rc_pos);
 	*out_ref = 0;
 	if (!nav_mesh_actor_floor_snap(nav_mesh, &filter, rc_pos, out_ref, out_nearest, &over_poly))
 		return 0;
 
-	nav_r2q(out_nearest, test);
+	nav_recast_to_quake(out_nearest, test);
 	if (nav_xy_dist_sq(qpos, test) > NAV_START_SNAP_MAX_DIST * NAV_START_SNAP_MAX_DIST)
 		return 0;
 	if (!over_poly && nav_xy_dist_sq(qpos, test) > 8.0f * 8.0f)
@@ -989,6 +986,16 @@ static int nav_extract_bsp(model_t *worldmodel,
 	}
 }
 
+/* Grow a link array by doubling once it's full. */
+static void nav_link_ensure_cap(nav_off_mesh_link_t **links, int n, int *cap)
+{
+	if (n >= *cap)
+	{
+		*cap *= 2;
+		*links = (nav_off_mesh_link_t *)realloc(*links, (size_t)*cap * sizeof(**links));
+	}
+}
+
 /* ---- Teleporter off-mesh links ---- */
 
 static int nav_collect_teleporters(nav_off_mesh_link_t **out_links)
@@ -1233,7 +1240,7 @@ static int nav_collect_push_links(nav_off_mesh_link_t **out_links)
 				continue;
 		}
 
-		if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+		nav_link_ensure_cap(&links, n, &cap);
 		links[n].start[0] = start[0];
 		links[n].start[1] = start[1];
 		links[n].start[2] = start[2];
@@ -1295,7 +1302,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		speed = (spd && spd->_float > 0) ? spd->_float : 150.0f;
 		travel = (top_z - bot_z) / speed;
 
-		if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+		nav_link_ensure_cap(&links, n, &cap);
 
 		/* Center of platform XY */
 		links[n].start[0] = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
@@ -1346,7 +1353,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 				case 2: in_y = e->v.absmin[1] + 24; out_y = e->v.absmin[1] - 32; break;
 				case 3: in_y = e->v.absmax[1] - 24; out_y = e->v.absmax[1] + 32; break;
 				}
-				if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+				nav_link_ensure_cap(&links, n, &cap);
 				links[n].start[0] = in_x;
 				links[n].start[1] = in_y;
 				links[n].start[2] = bot_z;
@@ -1421,7 +1428,7 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 				   Trains move so their MINS corner sits at the path_corner
 				   (func_train_find: origin = corner - mins), so the bot
 				   stands at corner + size/2 XY, corner z + size z. */
-				if (n >= cap) { cap *= 2; links = (nav_off_mesh_link_t *)realloc(links, cap * sizeof(*links)); }
+				nav_link_ensure_cap(&links, n, &cap);
 				links[n].start[0] = pc->v.origin[0] + e->v.size[0] * 0.5f;
 				links[n].start[1] = pc->v.origin[1] + e->v.size[1] * 0.5f;
 				links[n].start[2] = pc->v.origin[2] + e->v.size[2];
@@ -1474,7 +1481,8 @@ static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
 	l->required_speed = speed;
 	l->wait_time = 0;
 	fprintf(stderr, "Nav: LINK %s start=(%.0f %.0f %.0f) end=(%.0f %.0f %.0f) dz=%.0f spd=%.0f\n",
-		type == 2 ? "JUMP" : type == 3 ? "DROP" : type == 7 ? "RJ" : type == 8 ? "SURF" : type == 9 ? "WALK" : "???",
+		type == AI_JUMP ? "JUMP" : type == AI_DROP ? "DROP" : type == AI_SUPER_JUMP ? "RJ" :
+			type == AI_SURFACE ? "SURF" : type == AI_WALK ? "WALK" : "???",
 		start[0], start[1], start[2], end[0], end[1], end[2], dz, speed);
 	(*n)++;
 }
@@ -1971,7 +1979,7 @@ static void nav_cache_item_polys(void)
 
 		float qpos[3], rpos[3];
 		nav_ent_pos(e, qpos);
-		nav_q2r(qpos, rpos);
+		nav_quake_to_recast(qpos, rpos);
 
 		dtPolyRef ref = 0;
 		float nearest[3];
@@ -2452,13 +2460,24 @@ void Nav_BuildForMap(void)
 				/* Spawn points are often placed in mid-air (e4m6 hangs
 				   them 480-650u up) -- the player falls to the floor on
 				   spawn.  Path from where the player LANDS, not from the
-				   floating origin, which has no floor poly under it. */
+				   floating origin, which has no floor poly under it.
+				   The trace can START inside hull-1 solid when the spawn
+				   hangs just under a ceiling (hull expansion swallows it:
+				   hip2m3's deck spawns) -- step the start down until it
+				   exits solid, like gravity does with a stuck spawner. */
 				vec3_t ts, te, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
 				trace_t tr;
-				VectorCopy(ent.pos, ts);
-				VectorCopy(ent.pos, te);
-				te[2] -= 2048;
-				tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
+				int nudge;
+				for (nudge = 0; nudge <= 64; nudge += 8)
+				{
+					VectorCopy(ent.pos, ts);
+					ts[2] -= nudge;
+					VectorCopy(ts, te);
+					te[2] = ent.pos[2] - 2048;
+					tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
+					if (!tr.startsolid)
+						break;
+				}
 				if (!tr.startsolid && !tr.allsolid && tr.fraction < 1.0f)
 					ent.pos[2] = tr.endpos[2];
 				spawns.push_back(ent);
@@ -3136,7 +3155,7 @@ static void PF_nav_path_steer(void)
 	G_FLOAT(OFS_RETURN + 1) = corner[1];
 	G_FLOAT(OFS_RETURN + 2) = corner[2];
 
-	/* encode off-mesh link type and cache ref for nav_link_info */
+	/* encode off-mesh link type in corner z for the QC side */
 	if (flags & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
 	{
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
@@ -3146,11 +3165,8 @@ static void PF_nav_path_steer(void)
 			   corner z: z' = z + 10000*(1+type).  Additive (+10000+type)
 			   was ambiguous — type and z can't be separated. */
 			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f * (1.0f + (float)lt);
-			nav_bot_link_ref[slot] = ref;
 		}
 	}
-	else
-		nav_bot_link_ref[slot] = 0;
 }
 
 
@@ -3458,7 +3474,7 @@ static void PF_nav_find_goal(void)
 					float oext[3] = {64.0f, 128.0f, 64.0f};
 					dtPolyRef oref = 0;
 					nav_brush_center(opener, oq);
-					nav_q2r(oq, orc);
+					nav_quake_to_recast(oq, orc);
 					query->findNearestPoly(orc, oext, &plain_filter, &oref, onear);
 					if (oref != 0)
 					{
@@ -3624,8 +3640,8 @@ static void PF_nav_find_goal(void)
 	{
 		float bot_start_q[3];
 		float best_goal_q[3];
-		nav_r2q(bot_nearest, bot_start_q);
-		nav_r2q(best_goal_rc, best_goal_q);
+		nav_recast_to_quake(bot_nearest, bot_start_q);
+		nav_recast_to_quake(best_goal_rc, best_goal_q);
 
 		unsigned long long refs[NAV_MESH_MAX_PATH_REFS];
 		for (i = 0; i < best_path_count; i++)
@@ -3691,7 +3707,7 @@ static void nav_build_block_map(void)
 		center[0] = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
 		center[1] = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
 		center[2] = (e->v.absmin[2] + e->v.absmax[2]) * 0.5f;
-		nav_q2r(center, rc_center);
+		nav_quake_to_recast(center, rc_center);
 
 		extents[0] = (e->v.absmax[0] - e->v.absmin[0]) * 0.5f;
 		extents[1] = (e->v.absmax[2] - e->v.absmin[2]) * 0.5f + 16.0f; /* Recast Y = Quake Z */
@@ -3751,37 +3767,6 @@ static void PF_nav_unblock(void)
 			return;
 		}
 	}
-}
-
-/* vector nav_link_info() = #91
-   Returns (required_speed, height_delta, link_type) for the current
-   off-mesh link the bot is approaching.  Returns '0 0 0' if not on a link. */
-static void PF_nav_link_info(void)
-{
-	int slot;
-	unsigned long long ref;
-	const dtOffMeshConnection *con;
-	int idx;
-
-	G_FLOAT(OFS_RETURN + 0) = 0.0f;
-	G_FLOAT(OFS_RETURN + 1) = 0.0f;
-	G_FLOAT(OFS_RETURN + 2) = 0.0f;
-
-	slot = nav_bot_slot();
-	if (slot < 0 || nav_mesh == NULL) return;
-
-	ref = nav_bot_link_ref[slot];
-	if (ref == 0) return;
-
-	con = nav_mesh->navmesh->getOffMeshConnectionByRef(static_cast<dtPolyRef>(ref));
-	if (con == NULL) return;
-
-	idx = static_cast<int>(con->userId);
-	if (idx < 0 || idx >= nav_mesh->link_count) return;
-
-	G_FLOAT(OFS_RETURN + 0) = nav_mesh->links[idx].required_speed;
-	G_FLOAT(OFS_RETURN + 1) = nav_mesh->links[idx].height_delta;
-	G_FLOAT(OFS_RETURN + 2) = (float)nav_mesh->links[idx].link_type;
 }
 
 /* void nav_report_stats(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) = #92
@@ -3911,7 +3896,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 8] = PF_nav_stub;      /* was nav_wp_pos */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 9] = PF_nav_block;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_stub;     /* was nav_link_info */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
 
