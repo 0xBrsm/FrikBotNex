@@ -2026,6 +2026,26 @@ void Nav_BuildForMap(void)
 
 	nav_doors_open_for_build();
 
+	/* Level exits: their component is escapable by definition (you leave
+	   the level), so the deep-drop no-trap gate must accept it. */
+	{
+		float exits[32][3];
+		int nexits = 0, ei;
+		for (ei = 1; ei < sv.num_edicts && nexits < 32; ei++)
+		{
+			edict_t *e = EDICT_NUM(ei);
+			if (e->free) continue;
+			if (strcasecmp(pr_strings + (int)e->v.classname, "trigger_changelevel")) continue;
+			exits[nexits][0] = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
+			exits[nexits][1] = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
+			exits[nexits][2] = (e->v.absmin[2] + e->v.absmax[2]) * 0.5f;
+			nexits++;
+		}
+		nav_mesh_set_exit_points(&exits[0][0], nexits);
+		if (nexits > 0)
+			fprintf(stderr, "Nav: %d level-exit points registered as escapable\n", nexits);
+	}
+
 	/* Single-pass build: entity links provided upfront, jump/drop links
 	   detected mid-build via callback after contours are ready. */
 	memset(&summary, 0, sizeof(summary));

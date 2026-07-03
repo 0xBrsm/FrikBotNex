@@ -134,6 +134,22 @@ void nav_mesh_setup_filter(dtQueryFilter *filter)
 	filter->setAreaCost(NAV_AREA_NEAR_WALL, 3.0f);
 }
 
+/* Level-exit points (trigger_changelevel volumes): a component holding
+   one is escapable by definition -- players leave the level there -- so
+   the deep-drop no-trap gate must not treat it as a trap (e2m4's
+   moat/exit courtyard has no walking route back into the map). */
+#define NAV_MAX_EXIT_POINTS 32
+static float nav_exit_points[NAV_MAX_EXIT_POINTS][3];
+static int nav_exit_point_count;
+
+void nav_mesh_set_exit_points(const float *pts, int count)
+{
+	if (count > NAV_MAX_EXIT_POINTS)
+		count = NAV_MAX_EXIT_POINTS;
+	nav_exit_point_count = count;
+	memcpy(nav_exit_points, pts, (size_t)count * 3 * sizeof(float));
+}
+
 /* Helper: map link type to Detour area ID. */
 static unsigned char nav_area_for_link(int link_type)
 {
@@ -1662,6 +1678,24 @@ int nav_mesh_compute_deep_drops(
 	dtQueryFilter filter;
 	nav_mesh_setup_filter(&filter);
 
+	/* Components that contain a level exit are escapable by definition. */
+	std::vector<char> compexit(ground, 0);
+	for (int e = 0; e < nav_exit_point_count; e++)
+	{
+		float re[3], nearest[3];
+		const float ext[3] = { 160.0f, 160.0f, 160.0f };
+		dtPolyRef ref = 0;
+		nav_quake_to_recast(nav_exit_points[e], re);
+		navmesh->query->findNearestPoly(re, ext, &filter, &ref, nearest);
+		if (ref != 0)
+		{
+			unsigned int s, t, np;
+			mesh->decodePolyId(ref, s, t, np);
+			if ((int)np < ground)
+				compexit[gacomp[np]] = 1;
+		}
+	}
+
 	std::vector<int> seenLo, seenHi;
 	auto pair_seen = [&](int x, int y) {
 		int lo = x < y ? x : y, hi = x < y ? y : x;
@@ -1859,7 +1893,7 @@ int nav_mesh_compute_deep_drops(
 			/* No-trap gate: the landing must already path back OUT -- up to the
 			   start, or to the main mesh -- before we offer a way in.  A pit
 			   with no exit never gets a link (the cap-320 dm3 regression). */
-			int escapes = (gacomp[lo] == maincomp);
+			int escapes = (gacomp[lo] == maincomp) || compexit[gacomp[lo]];
 			if (!escapes)
 			{
 				dtStatus up = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)hi,
@@ -2157,7 +2191,9 @@ int nav_mesh_compute_swim_links(
 			{
 				if (dbg_i)
 					fprintf(stderr, "SWDBG i=%d j=%d: validated but already connected\n", i, j);
-				break;
+				/* Keep trying other components: an already-linked neighbor
+				   must not starve a farther, genuinely stranded one. */
+				continue;
 			}
 
 			links.push_back(nav_make_link(qa, qb, AI_DROP, 1, 32.0f));

@@ -299,6 +299,12 @@ int nav_mesh_compute_rocket_jumps(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
+/* Register level-exit points (trigger_changelevel centers) before the
+   post-build passes: a component containing one is escapable by
+   definition, so the deep-drop no-trap gate lets links in.  pts is
+   count x/y/z triplets (Quake coords); copied, caller keeps ownership. */
+void nav_mesh_set_exit_points(const float *pts, int count);
+
 /* Post-build pass: one-way walk-off DROP links (48-700u, horizontal reach
    physics-limited by fall time) into lower regions that have no other way
    in -- but ONLY
