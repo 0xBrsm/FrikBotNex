@@ -888,6 +888,16 @@ static void nav_doors_open_for_build(void)
 		if (pos2 == NULL) continue;
 		if (nav_opened_door_count >= NAV_MAX_OPEN_DOORS) break;
 		VectorCopy(pos2->vector, open_pos);
+		/* START_OPEN func_doors swapped pos1/pos2 at spawn: they REST at
+		   their open position and pos2 is the authored CLOSED spot, so
+		   "hold at pos2" would wrongly assemble them shut (hipend's boss
+		   dais meshed as a floor no DM game ever has).  They're already
+		   open -- hold them right where they are.  (movedir!=0 keeps
+		   fd_secret out: its spawnflag 1 means open-once, not start-open.) */
+		if (((int)e->v.spawnflags & 1)
+			&& (e->v.movedir[0] != 0.0f || e->v.movedir[1] != 0.0f
+				|| e->v.movedir[2] != 0.0f))
+			VectorCopy(e->v.origin, open_pos);
 		if (e->v.movedir[0] == 0.0f && e->v.movedir[1] == 0.0f
 			&& e->v.movedir[2] == 0.0f)
 		{
@@ -2623,9 +2633,6 @@ void Nav_BuildForMap(void)
 				}
 				if (!reached)
 				{
-					item_unreachable++;
-					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn (%s)\n",
-						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], lasterr);
 					/* Pinpoint the physical gap: closest pair between the
 					   spawn-reachable poly set and the item's island. */
 					std::vector<float> flat;
@@ -2637,8 +2644,26 @@ void Nav_BuildForMap(void)
 					}
 					float gfrom[3], gto[3];
 					char gerr[64];
-					if (nav_mesh_gap_probe(nav_mesh, flat.data(), (int)spawns.size(),
-							items[i].pos, gfrom, gto, gerr, sizeof(gerr)))
+					int have_gap = nav_mesh_gap_probe(nav_mesh, flat.data(), (int)spawns.size(),
+						items[i].pos, gfrom, gto, gerr, sizeof(gerr));
+					/* If even the CLOSEST approach to the island is a taller
+					   ascent than any movement primitive covers (320u is the
+					   repair-link envelope: beyond jumps, plats, and rocket
+					   jumps alike), no player gets there without a game event
+					   the map never fires in deathmatch (hipend's boss dais
+					   power-ups, 384u up on corner pillars).  Unobtainable by
+					   design, not a navmesh gap. */
+					if (have_gap && gto[2] - gfrom[2] > 320.0f)
+					{
+						fprintf(stderr, "Nav: CONNECTIVITY: skipping %s at (%.0f %.0f %.0f): island %.0fu above all reachable mesh (event-gated, unobtainable by design)\n",
+							items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2],
+							gto[2] - gfrom[2]);
+						continue;
+					}
+					item_unreachable++;
+					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn (%s)\n",
+						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], lasterr);
+					if (have_gap)
 						fprintf(stderr, "Nav: CONNECTIVITY gap: reach ends (%.0f %.0f %.0f), island starts (%.0f %.0f %.0f), dz=%.0f hd=%.0f\n",
 							gfrom[0], gfrom[1], gfrom[2], gto[0], gto[1], gto[2],
 							gfrom[2] - gto[2],
