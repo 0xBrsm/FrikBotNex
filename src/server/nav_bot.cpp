@@ -221,6 +221,42 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 		tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
 		if (!tr.startsolid && tr.fraction > 0.97f)
 			return AI_WALK;
+
+		/* Low-passage fallback: the 18u step-lift above demands 74u of
+		   headroom, vetoing flat runs through short doorways (hip2m4's
+		   62u crypt doorway: lintel at +62 fails both the lifted sweep
+		   and the jump apex arc).  Drop each end to its hull-truth floor
+		   -- raster quantization inflates centroid z by up to a cell or
+		   two, which alone can eat the clearance margin -- and sweep an
+		   UNLIFTED player box.  No step allowance means any 18u+ bump
+		   mid-path still rejects, so this only accepts genuinely flat,
+		   low-ceiling runs a real player walks through. */
+		{
+			vec3_t zero2 = {0, 0, 0};
+			vec3_t ds, de;
+			float fz1 = from[2], fz2 = to[2];
+			trace_t dtr;
+			ds[0] = from[0]; ds[1] = from[1]; ds[2] = from[2] + 4;
+			de[0] = from[0]; de[1] = from[1]; de[2] = from[2] - 40;
+			dtr = SV_Move(ds, zero2, zero2, de, MOVE_NOMONSTERS, NULL);
+			if (!dtr.startsolid && dtr.fraction < 1.0f)
+				fz1 = dtr.endpos[2];
+			ds[0] = to[0]; ds[1] = to[1]; ds[2] = to[2] + 4;
+			de[0] = to[0]; de[1] = to[1]; de[2] = to[2] - 40;
+			dtr = SV_Move(ds, zero2, zero2, de, MOVE_NOMONSTERS, NULL);
+			if (!dtr.startsolid && dtr.fraction < 1.0f)
+				fz2 = dtr.endpos[2];
+			if (fabs(fz1 - fz2) <= NAV_JUMP_HEIGHT_MIN)
+			{
+				/* +1: the down-trace endpos rests ON the floor plane; a box
+				   whose bottom sits exactly there reports startsolid. */
+				ts[0] = from[0]; ts[1] = from[1]; ts[2] = fz1 + 24 + 1;
+				te[0] = to[0]; te[1] = to[1]; te[2] = fz2 + 24 + 1;
+				tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
+				if (!tr.startsolid && tr.fraction > 0.97f)
+					return AI_WALK;
+			}
+		}
 	}
 
 	/* JUMP: clear dz against gravity (apex v0^2/2g ~45u up), run distance <=
