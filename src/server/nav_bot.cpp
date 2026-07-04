@@ -829,6 +829,16 @@ static int nav_top_face_has_clearance(edict_t *e)
 	return 0;
 }
 
+static int nav_cn_is_spawn(const char *cn)
+{
+	return !strcmp(cn, "info_player_deathmatch") || !strcmp(cn, "info_player_start");
+}
+
+static int nav_cn_is_item(const char *cn)
+{
+	return !strncmp(cn, "item_", 5) || !strncmp(cn, "weapon_", 7);
+}
+
 /* A spawn point or item resting on a door's top face is map-author
    evidence the door is meant to be stood on -- bake doors like that
    even when they're too narrow for the room-sized footprint test
@@ -842,8 +852,7 @@ static int nav_door_top_supports_entity(edict_t *e)
 		const char *cn;
 		if (o->free || o == e) continue;
 		cn = pr_strings + (int)o->v.classname;
-		if (strcmp(cn, "info_player_deathmatch") && strcmp(cn, "info_player_start")
-			&& strncmp(cn, "item_", 5) && strncmp(cn, "weapon_", 7))
+		if (!nav_cn_is_spawn(cn) && !nav_cn_is_item(cn))
 			continue;
 		if (o->v.origin[0] < e->v.absmin[0] - 16.0f || o->v.origin[0] > e->v.absmax[0] + 16.0f) continue;
 		if (o->v.origin[1] < e->v.absmin[1] - 16.0f || o->v.origin[1] > e->v.absmax[1] + 16.0f) continue;
@@ -1554,11 +1563,7 @@ extern cvar_t sv_maxspeed;
 static void nav_link_push(nav_off_mesh_link_t **links, int *n, int *cap,
 	const float *start, const float *end, int type, float speed, float dz)
 {
-	if (*n >= *cap)
-	{
-		*cap *= 2;
-		*links = (nav_off_mesh_link_t *)realloc(*links, (size_t)*cap * sizeof(**links));
-	}
+	nav_link_ensure_cap(links, *n, cap);
 	nav_off_mesh_link_t *l = &(*links)[*n];
 	l->start[0] = start[0]; l->start[1] = start[1]; l->start[2] = start[2];
 	l->end[0] = end[0]; l->end[1] = end[1]; l->end[2] = end[2];
@@ -2104,6 +2109,37 @@ static int nav_merge_links(
 
 /* ---- Build ---- */
 
+struct nav_conn_entry { const char *cn; float pos[3]; };
+
+/* Can `from` path to any spawn (other than skip_spawn) or any item?
+   Used both for direct oracle checks and for fallback candidate points
+   (walk-off, jump-grab) that stand in for an unreachable spawn/item. */
+static int nav_reaches_any(const nav_mesh_runtime_t *nav_mesh, const float *from,
+	const std::vector<nav_conn_entry> &spawns, const std::vector<nav_conn_entry> &items,
+	int skip_spawn_idx, char *lasterr, size_t lasterr_size)
+{
+	for (size_t j = 0; j < spawns.size(); j++)
+	{
+		if ((int)j == skip_spawn_idx) continue;
+		nav_mesh_path_result_t path_result;
+		char perr[128];
+		if (nav_mesh_find_path(nav_mesh, from, spawns[j].pos, &path_result, perr, sizeof(perr)))
+			return 1;
+		else if (lasterr)
+			memcpy(lasterr, perr, lasterr_size < sizeof(perr) ? lasterr_size : sizeof(perr));
+	}
+	for (size_t j = 0; j < items.size(); j++)
+	{
+		nav_mesh_path_result_t path_result;
+		char perr[128];
+		if (nav_mesh_find_path(nav_mesh, from, items[j].pos, &path_result, perr, sizeof(perr)))
+			return 1;
+		else if (lasterr)
+			memcpy(lasterr, perr, lasterr_size < sizeof(perr) ? lasterr_size : sizeof(perr));
+	}
+	return 0;
+}
+
 void Nav_BuildForMap(void)
 {
 	nav_mesh_build_config_t config;
@@ -2448,8 +2484,7 @@ void Nav_BuildForMap(void)
 			edict_t *e = EDICT_NUM(si);
 			if (e->free) continue;
 			const char *cn = pr_strings + (int)e->v.classname;
-			if (strcmp(cn, "info_player_deathmatch") != 0 &&
-				strcmp(cn, "info_player_start") != 0)
+			if (!nav_cn_is_spawn(cn))
 				continue;
 
 			/* BSP floor trace: point trace down from spawn origin */
@@ -2527,7 +2562,6 @@ void Nav_BuildForMap(void)
 	   No hand-authored waypoints required, so this runs on any map. ---- */
 	if (nav_mesh != NULL)
 	{
-		struct nav_conn_entry { const char *cn; float pos[3]; };
 		std::vector<nav_conn_entry> spawns;
 		std::vector<nav_conn_entry> items;
 		int si;
@@ -2537,9 +2571,8 @@ void Nav_BuildForMap(void)
 			edict_t *e = EDICT_NUM(si);
 			if (e->free) continue;
 			const char *cn = pr_strings + (int)e->v.classname;
-			int is_spawn = (strcmp(cn, "info_player_deathmatch") == 0 ||
-				strcmp(cn, "info_player_start") == 0);
-			int is_item = (strncmp(cn, "item_", 5) == 0 || strncmp(cn, "weapon_", 7) == 0);
+			int is_spawn = nav_cn_is_spawn(cn);
+			int is_item = nav_cn_is_item(cn);
 			nav_conn_entry ent;
 			ent.cn = cn;
 			VectorCopy(e->v.origin, ent.pos);
@@ -2654,27 +2687,8 @@ void Nav_BuildForMap(void)
 			   even if no other spawn happens to be reachable from it). */
 			for (size_t i = 0; i < spawns.size(); i++)
 			{
-				int reached = 0;
 				char lasterr[128] = "";
-				for (size_t j = 0; j < spawns.size() && !reached; j++)
-				{
-					if (j == i) continue;
-					nav_mesh_path_result_t path_result;
-					char perr[128];
-					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, spawns[j].pos, &path_result, perr, sizeof(perr)))
-						reached = 1;
-					else
-						memcpy(lasterr, perr, sizeof(lasterr));
-				}
-				for (size_t j = 0; j < items.size() && !reached; j++)
-				{
-					nav_mesh_path_result_t path_result;
-					char perr[128];
-					if (nav_mesh_find_path(nav_mesh, spawns[i].pos, items[j].pos, &path_result, perr, sizeof(perr)))
-						reached = 1;
-					else
-						memcpy(lasterr, perr, sizeof(lasterr));
-				}
+				int reached = nav_reaches_any(nav_mesh, spawns[i].pos, spawns, items, (int)i, lasterr, sizeof(lasterr));
 				if (!reached)
 				{
 					/* Walk-off fallback: a spawn perched on mesh-less
@@ -2722,21 +2736,7 @@ void Nav_BuildForMap(void)
 							continue;
 						if (fabsf(dtr.endpos[2] - (cand[c][2] + 24)) > 18.0f)
 							continue;
-						for (size_t j = 0; j < spawns.size() && !reached; j++)
-						{
-							if (j == i) continue;
-							nav_mesh_path_result_t path_result;
-							char perr[128];
-							if (nav_mesh_find_path(nav_mesh, cand[c], spawns[j].pos, &path_result, perr, sizeof(perr)))
-								reached = 1;
-						}
-						for (size_t j = 0; j < items.size() && !reached; j++)
-						{
-							nav_mesh_path_result_t path_result;
-							char perr[128];
-							if (nav_mesh_find_path(nav_mesh, cand[c], items[j].pos, &path_result, perr, sizeof(perr)))
-								reached = 1;
-						}
+						reached = nav_reaches_any(nav_mesh, cand[c], spawns, items, (int)i, NULL, 0);
 						if (reached)
 							fprintf(stderr, "Nav: CONNECTIVITY: spawn at (%.0f %.0f %.0f) reachable via walk-off to (%.0f %.0f %.0f)\n",
 								spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2],
