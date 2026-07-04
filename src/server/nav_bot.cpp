@@ -2647,13 +2647,14 @@ void Nav_BuildForMap(void)
 					int have_gap = nav_mesh_gap_probe(nav_mesh, flat.data(), (int)spawns.size(),
 						items[i].pos, gfrom, gto, gerr, sizeof(gerr));
 					/* If even the CLOSEST approach to the island is a taller
-					   ascent than any movement primitive covers (320u is the
-					   repair-link envelope: beyond jumps, plats, and rocket
-					   jumps alike), no player gets there without a game event
-					   the map never fires in deathmatch (hipend's boss dais
-					   power-ups, 384u up on corner pillars).  Unobtainable by
-					   design, not a navmesh gap. */
-					if (have_gap && gto[2] - gfrom[2] > 320.0f)
+					   ascent than any movement primitive covers -- 256u is one
+					   rocket's lift, the tallest climb in the whole link
+					   arsenal -- no player gets there without a game event the
+					   map never fires in deathmatch (hipend's boss dais
+					   power-ups 384u up on pillars, hip1m2's exit walkway 272u
+					   up its rotate-lift tower).  Unobtainable by design, not
+					   a navmesh gap. */
+					if (have_gap && gto[2] - gfrom[2] > 256.0f)
 					{
 						fprintf(stderr, "Nav: CONNECTIVITY: skipping %s at (%.0f %.0f %.0f): island %.0fu above all reachable mesh (event-gated, unobtainable by design)\n",
 							items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2],
