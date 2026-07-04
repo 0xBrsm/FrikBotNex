@@ -1245,6 +1245,24 @@ int nav_mesh_compute_directed_links(
 	std::vector<float> q;
 	nav_collect_ground_centroids(tile, ground, q);
 
+	int dbg_comp = -1;
+	if (const char *db = getenv("NAV_DIR_DEBUG"))
+	{
+		float tx, ty, tz;
+		if (sscanf(db, "%f %f %f", &tx, &ty, &tz) == 3)
+		{
+			float best = 1e9f;
+			for (int i = 0; i < ground; i++)
+			{
+				float dx = q[i * 3] - tx, dy = q[i * 3 + 1] - ty, dz = q[i * 3 + 2] - tz;
+				float d = dx * dx + dy * dy + dz * dz;
+				if (d < best) { best = d; dbg_comp = gacomp[i]; }
+			}
+			fprintf(stderr, "Nav: DIRDBG target comp=%d size=%d main=%d (nearest dist %.0f)\n",
+				dbg_comp, dbg_comp >= 0 ? gasize[dbg_comp] : 0, maingc, sqrtf(best));
+		}
+	}
+
 	std::vector<nav_off_mesh_link_t> links;
 	/* Links accepted this call, as directed poly-index edges, so later
 	   rounds see the reachability the earlier repairs created.  A single
@@ -1334,11 +1352,21 @@ int nav_mesh_compute_directed_links(
 				if (isolated)
 					need_out = 1;
 				else
+				{
+					if (c == dbg_comp)
+						fprintf(stderr, "Nav: DIRDBG round=%d comp=%d healthy (fwd=%d bwd=%d), skipped\n",
+							rounds, c, gc_fwd[c], gc_bwd[c]);
 					continue;
+				}
 			}
 
 			float bestcost = 1e9f, bestS[3] = {0,0,0}, bestE[3] = {0,0,0};
 			int bestType = 0, bestFrom = -1, bestTo = -1;
+			int dbg = (c == dbg_comp);
+			int rej_near = 0, rej_far = 0, rej_dz = 0, rej_val = 0, rej_dir = 0;
+			if (dbg)
+				fprintf(stderr, "Nav: DIRDBG round=%d comp=%d fwd=%d bwd=%d need_in=%d need_out=%d iso=%d\n",
+					rounds, c, gc_fwd[c], gc_bwd[c], need_in, need_out, isolated);
 			for (int o = 0; o < ground; o++)
 			{
 				if (gacomp[o] != c) continue;
@@ -1346,15 +1374,16 @@ int nav_mesh_compute_directed_links(
 				{
 					/* IN link comes from a forward poly; OUT link goes to a
 					   backward poly. */
-					if (need_in && !fwd[m]) continue;
-					if (need_out && !bwd[m]) continue;
+					if (need_in && !fwd[m]) { rej_dir++; continue; }
+					if (need_out && !bwd[m]) { rej_dir++; continue; }
 					if (gacomp[m] == c) continue;
 					const float *qo = &q[o * 3], *qm = &q[m * 3];
 					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
 					float hd = sqrtf(dx * dx + dy * dy);
 					float dz = qo[2] - qm[2], adz = dz < 0 ? -dz : dz;
-					if (hd > 320.0f || hd < 8.0f) continue;
-					if (adz > 320.0f) continue;
+					if (hd > 320.0f) { rej_far++; continue; }
+					if (hd < 8.0f) { rej_near++; continue; }
+					if (adz > 320.0f) { rej_dz++; continue; }
 					float cost = hd + adz;
 					if (cost >= bestcost) continue;
 
@@ -1380,7 +1409,14 @@ int nav_mesh_compute_directed_links(
 						if (ddz < -18.0f && ddz > -320.0f)  /* below step height = a drop */
 							type = AI_DROP;
 					}
-					if (!type) continue;
+					if (!type)
+					{
+						rej_val++;
+						if (dbg && rej_val <= 10)
+							fprintf(stderr, "Nav: DIRDBG valfail (%.0f %.0f %.0f)->(%.0f %.0f %.0f) hd=%.0f dz=%.0f\n",
+								from[0], from[1], from[2], to[0], to[1], to[2], hd, dz);
+						continue;
+					}
 					bestcost = cost; bestType = type;
 					bestS[0] = from[0]; bestS[1] = from[1]; bestS[2] = from[2];
 					bestE[0] = to[0]; bestE[1] = to[1]; bestE[2] = to[2];
@@ -1388,6 +1424,10 @@ int nav_mesh_compute_directed_links(
 					bestTo   = need_in ? o : m;
 				}
 			}
+			if (dbg)
+				fprintf(stderr, "Nav: DIRDBG comp=%d result type=%d cost=%.0f from=(%.0f %.0f %.0f) to=(%.0f %.0f %.0f) rej near=%d far=%d dz=%d val=%d dir=%d\n",
+					c, bestType, bestcost, bestS[0], bestS[1], bestS[2], bestE[0], bestE[1], bestE[2],
+					rej_near, rej_far, rej_dz, rej_val, rej_dir);
 			if (bestType)
 			{
 				/* One-way only: DROP/JUMP links found by this merge pass
@@ -3738,9 +3778,17 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 						nav_recast_to_quake(&con->pos[3], e);
 						nav_recast_to_quake(v0, vs);
 						nav_recast_to_quake(v1, ve);
-						fprintf(stderr, "Nav: OMLINK id=%u orig (%.0f %.0f %.0f)->(%.0f %.0f %.0f) snap (%.0f %.0f %.0f)->(%.0f %.0f %.0f) rad=%.0f\n",
+						fprintf(stderr, "Nav: OMLINK id=%u orig (%.0f %.0f %.0f)->(%.0f %.0f %.0f) snap (%.0f %.0f %.0f)->(%.0f %.0f %.0f) rad=%.0f",
 							con->userId, s[0], s[1], s[2], e[0], e[1], e[2],
 							vs[0], vs[1], vs[2], ve[0], ve[1], ve[2], con->rad);
+						for (unsigned int lk = p->firstLink; lk != DT_NULL_LINK; lk = tile->links[lk].next)
+						{
+							unsigned int ls, lt, lp;
+							if (tile->links[lk].ref == 0) continue;
+							nm->decodePolyId(tile->links[lk].ref, ls, lt, lp);
+							fprintf(stderr, " ->%u", lp);
+						}
+						fprintf(stderr, "\n");
 					}
 				}
 			}
@@ -3748,6 +3796,31 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 				tile->header->offMeshConCount,
 				off_mesh_link_count + callback_link_count,
 				linked, unlinked);
+			if (const char *pd = getenv("NAV_DUMP_POLYS_BOX"))
+			{
+				float bx0, by0, bx1, by1;
+				if (sscanf(pd, "%f %f %f %f", &bx0, &by0, &bx1, &by1) == 4)
+				{
+					const int ground = tile->header->offMeshBase;
+					std::vector<float> qc;
+					nav_collect_ground_centroids(tile, ground, qc);
+					for (int i = 0; i < ground; i++)
+					{
+						if (qc[i*3] < bx0 || qc[i*3] > bx1 || qc[i*3+1] < by0 || qc[i*3+1] > by1)
+							continue;
+						fprintf(stderr, "Nav: PBOX %d (%.0f %.0f %.0f) flags=%d nverts=%d",
+							i, qc[i*3], qc[i*3+1], qc[i*3+2], tile->polys[i].flags,
+							tile->polys[i].vertCount);
+						for (int vi = 0; vi < tile->polys[i].vertCount; vi++)
+						{
+							float vq[3];
+							nav_recast_to_quake(&tile->verts[tile->polys[i].verts[vi] * 3], vq);
+							fprintf(stderr, " [%.0f %.0f %.0f]", vq[0], vq[1], vq[2]);
+						}
+						fprintf(stderr, "\n");
+					}
+				}
+			}
 		}
 	}
 
