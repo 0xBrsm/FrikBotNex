@@ -1,0 +1,14 @@
+--- a/Detour/Source/DetourNavMesh.cpp
++++ b/Detour/Source/DetourNavMesh.cpp
+@@ -787,7 +787,10 @@
+ 		if (posOverPoly)
+ 		{
+ 			d = dtAbs(diff[1]) - tile->header->walkableClimb;
+-			d = d > 0 ? d*d : 0;			
++			// FrikBotNex: tie-break stacked polys that are all within climb
++			// by true vertical distance (scaled so any in-climb candidate
++			// still beats out-of-climb and boundary candidates).
++			d = d > 0 ? d*d : dtSqr(diff[1]) * 1e-4f;
+ 		}
+ 		else
+ 		{

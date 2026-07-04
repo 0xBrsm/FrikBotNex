@@ -55,6 +55,13 @@ cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/Detour" "$(dirname "${OUT_DIR}")/
 cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/DetourTileCache" "$(dirname "${OUT_DIR}")/vendor/recastnavigation/"
 cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/DetourCrowd" "$(dirname "${OUT_DIR}")/vendor/recastnavigation/"
 
+# Apply our vendor patches (submodule stays pristine)
+for patch in "${FRIKBOT_ROOT}"/src/build/patches/recastnavigation-*.patch; do
+  [[ -f "${patch}" ]] || continue
+  echo "  vendor patch: $(basename "${patch}")"
+  (cd "$(dirname "${OUT_DIR}")/vendor/recastnavigation" && patch -p1 --forward -r /dev/null < "${patch}") || true
+done
+
 # Build
 make_jobs="$(nproc 2>/dev/null || echo 1)"
 pushd "${OUT_DIR}" >/dev/null
