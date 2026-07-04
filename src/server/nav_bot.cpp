@@ -872,6 +872,22 @@ static int nav_is_floor_collapse_door(edict_t *e)
 		&& nav_top_face_has_clearance(e);
 }
 
+/* A door-lift: an up-moving door parked at its bottom stop with an item
+   or spawn resting on the top face (hip1m5's keylift RL).  The parked
+   top IS the item's floor -- holding the door open for link passes
+   would raster it away and orphan the item.  Same map-author-evidence
+   test the collapse-door rule uses, mirrored for bottom-parked risers. */
+static int nav_is_door_lift(edict_t *e)
+{
+	eval_t *pos1 = GetEdictFieldValue(e, "pos1");
+	eval_t *pos2 = GetEdictFieldValue(e, "pos2");
+	return pos1 && pos2
+		&& pos2->vector[2] > pos1->vector[2] + 32.0f
+		&& e->v.origin[2] == pos1->vector[2]
+		&& nav_door_top_supports_entity(e)
+		&& nav_top_face_has_clearance(e);
+}
+
 static int nav_is_brush_entity(edict_t *e)
 {
 	char *classname = pr_strings + (int)e->v.classname;
@@ -881,8 +897,9 @@ static int nav_is_brush_entity(edict_t *e)
 			return nav_top_face_has_clearance(e);
 		/* Tall doors are usually passages -- never bake those.  But a
 		   room-sized collapsing floor (see nav_is_floor_collapse_door)
-		   is the floor the mesh needs. */
-		return nav_is_floor_collapse_door(e);
+		   or a bottom-parked lift carrying an item is the floor the
+		   mesh needs. */
+		return nav_is_floor_collapse_door(e) || nav_is_door_lift(e);
 	}
 	if (!strcasecmp(classname, "plat"))
 		return nav_plat_rests_at_top(e);
