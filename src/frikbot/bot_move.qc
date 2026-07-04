@@ -53,6 +53,8 @@ this notice in its entirety.
 .float _failed_goal_time; // cooldown expiry for _failed_goal
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
+.entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
+.vector _plat_link_wp;    // corner that cache was computed for
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -320,9 +322,9 @@ void() bot_get =
 		return;
 
 	// Backing off: we were standing in a moving door's lane (secret
-	// doors slide through the spot bots queue at — e2m4: door fired,
-	// then ground against the waiting crowd forever). Step away and
-	// let it finish before resuming the corridor.
+	// doors slide through the spot bots queue at, grinding against a
+	// waiting crowd forever if we don't move). Step away and let it
+	// finish before resuming the corridor.
 	if (time < self._nav_backoff)
 	{
 		self.b_wishdir = self._backoff_dir;
@@ -368,7 +370,7 @@ void() bot_get =
 		self._m_move_mode = MM_NAV;
 
 	// off-mesh link actions
-	if (link_type == 3) // AI_DROP
+	if (link_type == AI_DROP)
 	{
 		if (self.waterlevel < 2 && !(self.flags & FL_ONGROUND))
 		{
@@ -391,7 +393,7 @@ void() bot_get =
 				self.b_wishdir = normalize(flat_to_wp);
 		}
 	}
-	else if (link_type == 2) // AI_JUMP
+	else if (link_type == AI_JUMP)
 	{
 		// Run at the edge and jump. Window must be wider than the
 		// corridor's 36u link-advance trigger, or the corner changes
@@ -407,8 +409,7 @@ void() bot_get =
 
 		// Don't commit the jump into a blocked lane: a bot body (or
 		// wall) between here and the link start just bounces the
-		// jumper in place, and airborne frames can't steer around it
-		// (dm6 pedestal: Max pogoed on Erwin for 22% of the run).
+		// jumper in place, and airborne frames can't steer around it.
 		if (jdist < 64 && (self.flags & FL_ONGROUND))
 		{
 			traceline(self.origin, wp + '0 0 24', FALSE, self);
@@ -416,14 +417,13 @@ void() bot_get =
 				self.button2 = TRUE;
 		}
 	}
-	else if (link_type == 7) // AI_SUPER_JUMP
+	else if (link_type == AI_SUPER_JUMP)
 	{
 		// No launcher, no rocket jump. Without it the bot just spams a
 		// weapon switch that can never land (impulse 7 to a gun it doesn't
-		// own) and grinds the link forever (dm2: bots pinned 90%+ under an
-		// RJ-only ledge). Bail on the goal — the area's rocket-only items
-		// go unwanted instead of fatal, and pathing falls back to a route
-		// the bot can actually walk.
+		// own) and grinds the link forever. Bail on the goal — the area's
+		// rocket-only items go unwanted instead of fatal, and pathing
+		// falls back to a route the bot can actually walk.
 		if (!(self.items & IT_ROCKET_LAUNCHER))
 		{
 			if (self.target1.flags & FL_ITEM)
@@ -443,7 +443,7 @@ void() bot_get =
 			self.button0 = TRUE;
 		}
 	}
-	else if (link_type == 8) // AI_SURFACE
+	else if (link_type == AI_SURFACE)
 	{
 		if (self.waterlevel > 2)
 		{
@@ -451,14 +451,14 @@ void() bot_get =
 			self.button2 = TRUE;
 		}
 	}
-	else if (link_type == 4 || link_type == 5) // AI_PLAT_BOTTOM / AI_RIDE_TRAIN
+	else if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
 	{
 		// Riding: standing on a moving lift/train makes zero XY progress
 		// by design — hold position so we don't pace off the edge. The
 		// abandon timeout below gets an 8x window for these links (a
 		// full wait + ride cycle), but never a free pass: an outright
 		// reset here turned every plat-adjacent stall into a permanent
-		// pin (dm2: bot frozen at 100%stk while the busy plat cycled).
+		// pin.
 		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
 		if (trace_ent != world
 			&& (trace_ent.classname == "plat" || trace_ent.classname == "train"))
@@ -466,35 +466,50 @@ void() bot_get =
 			if (trace_ent.velocity != '0 0 0')
 				self.b_wishdir = '0 0 0';
 		}
-		else if (link_type == 4)
+		else if (link_type == AI_PLAT_BOTTOM)
 		{
 			// Not aboard. If the plat serving this link is ABOVE the
 			// corner we're heading for, hold at the shaft lip — walking
 			// to the exact center means dropping into the pit under it
 			// (and blocking its return). Position, not state: a bot at
 			// the TOP lip must board a top-parked plat or walk off over
-			// a lowered one, never stand waiting (dm2: 8s top-lip
-			// freezes). The 8x abandon window below covers the wait; a
-			// dead plat (targeted, never triggered) still times out.
+			// a lowered one, never stand waiting. The 8x abandon window
+			// below covers the wait; a dead plat (targeted, never
+			// triggered) still times out.
 			local entity pl, bestpl;
 			local vector pc;
 			local float pd, bestpd;
 
-			bestpl = world;
-			bestpd = 99999;
-			pl = find(world, classname, "plat");
-			while (pl != world)
+			// The serving plat is a function of the link corner (wp), which
+			// only changes when the corridor advances -- re-scanning every
+			// plat in the level every frame while a bot waits at the lip is
+			// wasted work. Cache the lookup per corner instead.
+			if (self._plat_link_pl == world
+				|| self._plat_link_pl.classname != "plat"
+				|| vlen(wp - self._plat_link_wp) > 1)
 			{
-				pc = (pl.absmin + pl.absmax) * 0.5;
-				pc_z = wp_z;
-				pd = vlen(pc - wp);
-				if (pd < bestpd)
+				bestpl = world;
+				bestpd = 99999;
+				pl = find(world, classname, "plat");
+				while (pl != world)
 				{
-					bestpd = pd;
-					bestpl = pl;
+					pc = (pl.absmin + pl.absmax) * 0.5;
+					pc_z = wp_z;
+					pd = vlen(pc - wp);
+					if (pd < bestpd)
+					{
+						bestpd = pd;
+						bestpl = pl;
+					}
+					pl = find(pl, classname, "plat");
 				}
-				pl = find(pl, classname, "plat");
+				self._plat_link_pl = bestpl;
+				self._plat_link_wp = wp;
 			}
+			bestpl = self._plat_link_pl;
+			pc = (bestpl.absmin + bestpl.absmax) * 0.5;
+			pc_z = wp_z;
+			bestpd = vlen(pc - wp);
 			if (bestpl != world && bestpd < 128
 				&& bestpl.absmax_z > wp_z + 32
 				&& self.origin_z < bestpl.absmax_z)
@@ -505,9 +520,9 @@ void() bot_get =
 					self.b_wishdir = '0 0 0';
 			}
 			// A plat actively moving through this link's shaft: stepping
-			// toward it just grinds the bot against its side/underside
-			// (e1m7/e4m8 lift wells). Hold until it parks, then board.
-			// Moving is transient, so this can't become a standing freeze.
+			// toward it just grinds the bot against its side/underside.
+			// Hold until it parks, then board. Moving is transient, so
+			// this can't become a standing freeze.
 			else if (bestpl != world && bestpd < 96
 				&& bestpl.velocity != '0 0 0')
 			{
@@ -571,33 +586,28 @@ void() bot_get =
 		// clear side; wall-slide physics takes over from there.
 		// Probes must see entity boxes (nomonsters FALSE): two bots
 		// meeting head-on pin each other box-to-box, and a probe that
-		// skips SOLID_SLIDEBOX reports "all clear" through the blocker
-		// (dm6 pedestal corner: 3-bot train frozen 35+ seconds).
+		// skips SOLID_SLIDEBOX reports "all clear" through the blocker.
 		// Jump links recover too: while still walking the approach, a
 		// blocked jumper needs the same veer/side-step as flat ground
 		// (the jump itself is gated on a clear lane above). Plat/train
 		// approaches too: the boarding point can sit past a wall corner
-		// the straight-line steer grinds on forever (dm2: Erwin frozen
-		// 30+s walking full-speed into a wall short of a lift shaft).
+		// the straight-line steer grinds on forever.
 		// Drop approaches too: several bots beelining for the same ledge
 		// corner box each other in the open room behind it, and with no
-		// veer they grind full-speed into each other forever (dm5: 4-bot
-		// pileup short of the lightning-gun drop). The ledge-departure
-		// itself is untouched: this only fires on-ground, before the bot
-		// has committed to running off.
+		// veer they grind full-speed into each other forever. The
+		// ledge-departure itself is untouched: this only fires on-ground,
+		// before the bot has committed to running off.
 		// Airborne wedges too: a bot can end up pressed flat against a
 		// wall while falling (not resting on anything, so FL_ONGROUND
 		// never sets) and just grind straight into it under gravity,
-		// sliding down the face for 60-90s until it happens to clear the
-		// wall's bottom edge (dm1: Erwin wedged mid-air, wishdir jammed
-		// into a vertical wall, NAVSTUCK forensic showed fwd trace fraction
-		// 0.00 the entire time). A real jump/drop arc never takes anywhere
-		// near 2s, so once _nav_pin_strikes has actually latched (a full
-		// realized 2s window of <24u net movement) it's safe to veer even
-		// mid-air -- this can't misfire on a legitimate airborne link.
+		// sliding down the face until it happens to clear the wall's
+		// bottom edge. A real jump/drop arc never takes anywhere near 2s,
+		// so once _nav_pin_strikes has actually latched (a full realized
+		// 2s window of <24u net movement) it's safe to veer even mid-air
+		// -- this can't misfire on a legitimate airborne link.
 		if (self._progress_stall > 4
-			&& (link_type == 0 || link_type == 2 || link_type == 3
-				|| link_type == 4 || link_type == 5)
+			&& (link_type == 0 || link_type == AI_JUMP || link_type == AI_DROP
+				|| link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
 			&& self.b_wishdir != '0 0 0'
 			&& ((self.flags & FL_ONGROUND) || self._nav_pin_strikes > 0))
 		{
@@ -619,14 +629,12 @@ void() bot_get =
 				// Both shoulders blocked at the same depth: a body (or
 				// flat wall) dead ahead — asymmetry veer can't fire, so
 				// side-step square and let the stall reset once the lane
-				// clears (dm6: bot parked on the corner poly froze the
-				// queue behind it indefinitely). Split the side-step by
-				// player slot (colormap is the engine's per-client edict
-				// number) so a pile of bots stuck the same way doesn't
-				// all step in lockstep and just rotate in place forever
-				// (dm5: 4 bots wedged short of the lightning-gun drop
-				// kept re-forming the same circular jam every time they
-				// all turned the identical direction).
+				// clears. Split the side-step by player slot (colormap
+				// is the engine's per-client edict number) so a pile of
+				// bots stuck the same way doesn't all step in lockstep
+				// and just rotate in place forever, re-forming the same
+				// circular jam every time they all turn the identical
+				// direction.
 				if (self.colormap & 1)
 					self.b_wishdir = normalize(rt);
 				else
@@ -636,11 +644,10 @@ void() bot_get =
 
 		// Net-displacement pin check: the stall counter above resets
 		// whenever the steering corner moves >32u, and at a ledge edge
-		// navigate() can flip between two corners forever (e1m1 slime
-		// pool: corner alternated -428/-526 every few frames, stall
-		// never reached the limit, bot pinned 140+ seconds). Corners
-		// lie; the bot's own position doesn't — measure 2s windows
-		// like the combat pin does.
+		// navigate() can flip between two corners forever, each flip
+		// resetting the stall before it reaches the limit. Corners lie;
+		// the bot's own position doesn't — measure 2s windows like the
+		// combat pin does.
 		if (time > self._nav_pin)
 		{
 			local vector nav_moved;
@@ -656,7 +663,7 @@ void() bot_get =
 			// Pinned with a shootable mover toward the corner? Shoot it
 			// open instead of abandoning. The stall>4 trigger above never
 			// fires here: bouncing off the door keeps inching xy_dist
-			// closer, resetting the counter (e2m4 secret door, 81% stk).
+			// closer, resetting the counter.
 			if (self._nav_pin_strikes > 0 && !self.enemy)
 			{
 				local vector pdir;
@@ -690,7 +697,7 @@ void() bot_get =
 		// lift links: zero XY progress is normal while waiting for and
 		// riding the plat — budget a full return + ride cycle (~8s)
 		// before declaring the goal dead
-		if (link_type == 4 || link_type == 5)
+		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
 			stall_limit = stall_limit * 8;
 		if (self._progress_stall > stall_limit)
 		{
@@ -712,9 +719,9 @@ void() bot_get =
 			}
 			// A door that's MOVING is a door we're standing on: secret
 			// doors slide through the queue spot, grinding against the
-			// crowd forever (e2m4: fd_secret_use cleared takedamage,
-			// then the slide never finished — td 0, hp 10000, 120
-			// stalls). Step back, give it room, keep the goal.
+			// crowd forever if takedamage got cleared mid-open and the
+			// slide never finished. Step back, give it room, keep the
+			// goal.
 			if (trace_ent != world && trace_ent.classname == "door"
 				&& trace_ent.velocity != '0 0 0')
 			{
@@ -731,8 +738,7 @@ void() bot_get =
 			// Cool the goal down: the scorer is deterministic, so an
 			// immediate re-pick chooses the same goal and re-creates the
 			// same jam. Cool ANY real goal, not just items — a func_button
-			// opener the bot can't reach is re-picked every frame otherwise
-			// (dm2: a crowd pinned under one touch-button).
+			// opener the bot can't reach is re-picked every frame otherwise.
 			if (self.target1 != world && self.target1 != self)
 			{
 				self._failed_goal = self.target1;
