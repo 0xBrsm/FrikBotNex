@@ -346,6 +346,15 @@ int nav_mesh_find_nearest(
 	nav_mesh_nearest_result_t *result,
 	char *error, size_t error_size);
 
+/* Every enabled poly overlapping point+-half_extents (Quake coords), as
+   closest-points to the query point, nearest first.  No snap cap. */
+int nav_mesh_query_poly_points(
+	const nav_mesh_runtime_t *navmesh,
+	const float *point,
+	const float *half_extents,
+	float (*out_points)[3],
+	int max_points);
+
 int nav_mesh_collect_polys(
 	const nav_mesh_runtime_t *navmesh,
 	nav_mesh_poly_record_t **records, int *record_count,

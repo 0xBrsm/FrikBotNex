@@ -3860,6 +3860,55 @@ extern "C" int nav_mesh_find_nearest(
 	return 1;
 }
 
+/* Every enabled poly overlapping the box, as closest-points to the query
+   point, nearest first.  No snap-distance cap: callers doing physical
+   reach tests (jump-grab pickups) supply their own geometry limits. */
+extern "C" int nav_mesh_query_poly_points(
+	const nav_mesh_runtime_t *navmesh,
+	const float *point,
+	const float *half_extents,
+	float (*out_points)[3],
+	int max_points)
+{
+	float rc_point[3], rc_extents[3];
+	dtPolyRef polys[32];
+	int npolys = 0;
+	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
+	struct cand_t { float d; float pt[3]; };
+	cand_t cands[32];
+	int n, i, j;
+
+	if (navmesh == nullptr || navmesh->query == nullptr || max_points <= 0)
+		return 0;
+	nav_quake_to_recast(point, rc_point);
+	nav_quake_to_recast(half_extents, rc_extents);
+	if (dtStatusFailed(navmesh->query->queryPolygons(rc_point, rc_extents, &filter, polys, &npolys, 32)))
+		return 0;
+	n = 0;
+	for (i = 0; i < npolys; i++)
+	{
+		float pt[3];
+		bool over = false;
+		if (dtStatusFailed(navmesh->query->closestPointOnPoly(polys[i], rc_point, pt, &over)))
+			continue;
+		cands[n].d = dtVdistSqr(rc_point, pt);
+		dtVcopy(cands[n].pt, pt);
+		n++;
+	}
+	for (i = 1; i < n; i++)
+	{
+		cand_t key = cands[i];
+		for (j = i - 1; j >= 0 && cands[j].d > key.d; j--)
+			cands[j + 1] = cands[j];
+		cands[j + 1] = key;
+	}
+	if (n > max_points)
+		n = max_points;
+	for (i = 0; i < n; i++)
+		nav_recast_to_quake(cands[i].pt, out_points[i]);
+	return n;
+}
+
 extern "C" int nav_mesh_collect_polys(
 	const nav_mesh_runtime_t *navmesh,
 	nav_mesh_poly_record_t **records,

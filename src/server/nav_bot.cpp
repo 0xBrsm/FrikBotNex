@@ -2686,6 +2686,51 @@ void Nav_BuildForMap(void)
 				}
 				if (!reached)
 				{
+					/* Jump-grab fallback: pickup is AABB touch, so an item
+					   perched on mesh-less micro-geometry (an eroded pillar
+					   top, a lip too small to poly) is still obtainable by
+					   jumping AT it from nearby mesh -- touch happens
+					   mid-arc, no landing needed (hip3m1's invuln pillar).
+					   Take-off feet + jump apex (45) + body height (56) +
+					   item box reach gives origin <= poly + 102.  Sweep the
+					   player box from the apex over the take-off point to
+					   the item to prove nothing walls off the arc, then
+					   require a spawn to actually path to the take-off. */
+					float he[3] = {128, 128, 112};
+					float cand[8][3];
+					vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+					int nc = nav_mesh_query_poly_points(nav_mesh, items[i].pos, he, cand, 8);
+					for (int c = 0; c < nc && !reached; c++)
+					{
+						float dz = items[i].pos[2] - cand[c][2];
+						vec3_t js, je;
+						trace_t jtr;
+						if (dz > 102.0f)
+							continue;
+						js[0] = cand[c][0]; js[1] = cand[c][1]; js[2] = cand[c][2] + 24 + 45;
+						je[0] = items[i].pos[0]; je[1] = items[i].pos[1];
+						je[2] = js[2];
+						if (je[2] > items[i].pos[2] + 81.0f) je[2] = items[i].pos[2] + 81.0f;
+						if (je[2] < items[i].pos[2] - 33.0f) je[2] = items[i].pos[2] - 33.0f;
+						jtr = SV_Move(js, pmins, pmaxs, je, MOVE_NOMONSTERS, NULL);
+						if (jtr.startsolid || jtr.fraction < 0.95f)
+							continue;
+						for (size_t j = 0; j < spawns.size() && !reached; j++)
+						{
+							nav_mesh_path_result_t path_result;
+							char perr[128];
+							if (nav_mesh_find_path(nav_mesh, spawns[j].pos, cand[c], &path_result, perr, sizeof(perr)))
+							{
+								reached = 1;
+								fprintf(stderr, "Nav: CONNECTIVITY: %s at (%.0f %.0f %.0f) reachable via jump-grab from (%.0f %.0f %.0f)\n",
+									items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2],
+									cand[c][0], cand[c][1], cand[c][2]);
+							}
+						}
+					}
+				}
+				if (!reached)
+				{
 					/* Pinpoint the physical gap: closest pair between the
 					   spawn-reachable poly set and the item's island. */
 					std::vector<float> flat;
