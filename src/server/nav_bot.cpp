@@ -2589,6 +2589,29 @@ void Nav_BuildForMap(void)
 						cn, ent.pos[0], ent.pos[1], ent.pos[2]);
 					continue;
 				}
+				/* The oracle samples items before their droptofloor think
+				   (time 0.2) runs, so replicate it: trace the item box down
+				   256.  No floor -> the engine removes the item ("bonus item
+				   fell out of level"; hip3m2 authors an invuln on a train
+				   that doesn't exist in DM), so exclude it.  Floor found ->
+				   the item comes to rest THERE, so test that position. */
+				{
+					vec3_t de;
+					trace_t dtr;
+					VectorCopy(ent.pos, de);
+					de[2] -= 256;
+					dtr = SV_Move(ent.pos, e->v.mins, e->v.maxs, de, MOVE_NOMONSTERS, e);
+					if (!dtr.startsolid)
+					{
+						if (dtr.fraction == 1.0f)
+						{
+							fprintf(stderr, "Nav: CONNECTIVITY: skipping %s at (%.0f %.0f %.0f): no floor within 256, engine removes it at spawn\n",
+								cn, ent.pos[0], ent.pos[1], ent.pos[2]);
+							continue;
+						}
+						VectorCopy(dtr.endpos, ent.pos);
+					}
+				}
 				items.push_back(ent);
 			}
 		}
