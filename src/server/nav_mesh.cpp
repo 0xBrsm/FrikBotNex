@@ -289,11 +289,16 @@ static float nav_mesh_snap_horizontal_limit(const nav_mesh_runtime_t *navmesh, c
 {
 	float limit;
 
-	limit = fmaxf(extents[0], extents[2]) * 0.75f;
 	if (navmesh != nullptr && extents == navmesh->query_half_extents_actor_origin)
-		limit = fminf(limit, 24.0f);
+		limit = fminf(fmaxf(extents[0], extents[2]) * 0.75f, 24.0f);
 	else
-		limit = fminf(limit, 48.0f);
+		/* Goal snapping serves item pickup, and pickup is pure AABB
+		   touch: player half-width (16) + item half-width (16) +
+		   FL_ITEM expansion (15) = 47u of true horizontal reach --
+		   even through thin walls, since touch never traces. A poly
+		   whose closest point is within that reach really can grab
+		   the item (hip1m5's SNG window sill sits 40u out). */
+		limit = fminf(fmaxf(extents[0], extents[2]), 47.0f);
 	return fmaxf(limit, 16.0f);
 }
 
