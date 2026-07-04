@@ -2654,6 +2654,74 @@ void Nav_BuildForMap(void)
 				}
 				if (!reached)
 				{
+					/* Walk-off fallback: a spawn perched on mesh-less
+					   micro-geometry (sub-cell steps, eroded perches) is
+					   still viable if a player standing there can simply
+					   walk off and fall onto nearby mesh (hip3m2's stepped
+					   ziggurat spawns).  Sweep the player box horizontally
+					   at spawn height to over a nearby lower poly point,
+					   then straight down to it; if both sweeps are clean,
+					   the candidate point is where the player lands, so
+					   test outbound connectivity from there instead. */
+					float he[3] = {128, 128, 216};
+					float cand[8][3];
+					vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+					int nc = nav_mesh_query_poly_points(nav_mesh, spawns[i].pos, he, cand, 8);
+					for (int c = 0; c < nc && !reached; c++)
+					{
+						float dz = spawns[i].pos[2] - cand[c][2];
+						vec3_t hs, hm, de;
+						trace_t htr, dtr;
+						if (dz < -18.0f || dz > 216.0f)
+							continue;
+						hs[0] = spawns[i].pos[0]; hs[1] = spawns[i].pos[1];
+						hs[2] = spawns[i].pos[2] + 1;
+						hm[0] = cand[c][0]; hm[1] = cand[c][1]; hm[2] = hs[2];
+						htr = SV_Move(hs, pmins, pmaxs, hm, MOVE_NOMONSTERS, NULL);
+						if (htr.startsolid)
+						{
+							/* Spawns authored flush against a wall start
+							   inside the expanded hull; nudge one player
+							   width toward the candidate and retry. */
+							float dx = hm[0] - hs[0], dy = hm[1] - hs[1];
+							float len = sqrtf(dx * dx + dy * dy);
+							if (len < 1.0f)
+								continue;
+							hs[0] += dx / len * 16.0f;
+							hs[1] += dy / len * 16.0f;
+							htr = SV_Move(hs, pmins, pmaxs, hm, MOVE_NOMONSTERS, NULL);
+						}
+						if (htr.startsolid || htr.fraction < 0.97f)
+							continue;
+						de[0] = hm[0]; de[1] = hm[1]; de[2] = cand[c][2] + 24;
+						dtr = SV_Move(hm, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+						if (dtr.startsolid || dtr.allsolid)
+							continue;
+						if (fabsf(dtr.endpos[2] - (cand[c][2] + 24)) > 18.0f)
+							continue;
+						for (size_t j = 0; j < spawns.size() && !reached; j++)
+						{
+							if (j == i) continue;
+							nav_mesh_path_result_t path_result;
+							char perr[128];
+							if (nav_mesh_find_path(nav_mesh, cand[c], spawns[j].pos, &path_result, perr, sizeof(perr)))
+								reached = 1;
+						}
+						for (size_t j = 0; j < items.size() && !reached; j++)
+						{
+							nav_mesh_path_result_t path_result;
+							char perr[128];
+							if (nav_mesh_find_path(nav_mesh, cand[c], items[j].pos, &path_result, perr, sizeof(perr)))
+								reached = 1;
+						}
+						if (reached)
+							fprintf(stderr, "Nav: CONNECTIVITY: spawn at (%.0f %.0f %.0f) reachable via walk-off to (%.0f %.0f %.0f)\n",
+								spawns[i].pos[0], spawns[i].pos[1], spawns[i].pos[2],
+								cand[c][0], cand[c][1], cand[c][2]);
+					}
+				}
+				if (!reached)
+				{
 					spawn_unreachable++;
 					/* Wide-extents probe: says whether the mesh is merely
 					   out of the actor snap's reach or absent entirely. */
