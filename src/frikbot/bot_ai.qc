@@ -99,7 +99,10 @@ void() bot_aim =
 	if (self.b_aim_delay == 0)
 		self.b_aim_delay = time;
 
-	if (self.enemy.solid == SOLID_BSP)
+	// bmodel movers AND box-solid shoot-triggers live at origin '0 0 0' —
+	// aim at the brush center, not the world origin
+	if (self.enemy.solid == SOLID_BSP
+		|| (self.enemy.solid == SOLID_BBOX && !(self.enemy.flags & FL_CLIENT)))
 	{
 		view = realorigin(self.enemy) - self.origin;
 	}
@@ -188,10 +191,7 @@ float nav_debug_next;
 .float _m_idle_roam;   // frames idle with roam target (self)
 .float _m_polys_seen;  // unique polys visited (coverage proxy)
 .float _m_last_poly;   // last poly ref seen (for change detection)
-
-// wall probe: previous frame floor heights for gradient detection
-.float _wp_floor_left;
-.float _wp_floor_right;
+.float _m_stuck_streak; // consecutive stuck frames (wedge detection)
 
 void() bot_server_spawn =
 {
@@ -204,7 +204,6 @@ void() bot_server_spawn =
 
 void() bot_debug_metrics =
 {
-	local string s;
 	local vector vel;
 
 	if (self.health < 1)
@@ -219,10 +218,42 @@ void() bot_debug_metrics =
 	if (vlen(vel) < 1)
 	{
 		if (self.b_wishdir != '0 0 0')
+		{
 			self._m_stuck = self._m_stuck + 1;
+			self._m_stuck_streak = self._m_stuck_streak + 1;
+			// One-shot forensic dump the moment a stuck run looks like a
+			// genuine wedge (~3s), not just a corner the recovery system
+			// is already handling (that resolves in ~1s, see bot_get).
+			if (self._m_stuck_streak == 30)
+			{
+				local string tgt_name;
+				local float tgt_dist;
+				if (self.target1 == self)
+				{
+					tgt_name = "ROAM";
+					tgt_dist = 0;
+				}
+				else if (self.target1)
+				{
+					tgt_name = self.target1.classname;
+					tgt_dist = rint(vlen(self.target1.origin - self.origin));
+				}
+				else
+				{
+					tgt_name = "NONE";
+					tgt_dist = 0;
+				}
+				nav_debug_event(self._m_stuck_streak, tgt_name, tgt_dist);
+			}
+		}
 		else
+		{
 			self._m_idle = self._m_idle + 1;
+			self._m_stuck_streak = 0;
+		}
 	}
+	else
+		self._m_stuck_streak = 0;
 	self._m_last_origin = self.origin;
 
 	// idle breakdown: no target vs roam
@@ -272,29 +303,41 @@ void() bot_debug_metrics =
 	if (self._m_frames < 1)
 		return;
 
-	bprint("["); bprint(self.netname); bprint("] ");
-	s = ftos(rint(100 * self._m_stuck / self._m_frames));
-	bprint("stk="); bprint(s);
-	s = ftos(rint(100 * self._m_idle_notgt / self._m_frames));
-	bprint("% no_tgt="); bprint(s);
-	s = ftos(rint(100 * self._m_idle_roam / self._m_frames));
-	bprint("% roam_idle="); bprint(s);
-	s = ftos(rint(100 * self._m_lava / self._m_frames));
-	bprint("% lav="); bprint(s);
-	bprint("% cov=");
-	s = ftos(self._m_polys_seen); bprint(s);
-	bprint(" ");
-	if (self.target1 == self)
-		bprint("tgt=ROAM");
-	else if (self.target1)
 	{
-		bprint("tgt="); bprint(self.target1.classname);
-		s = ftos(rint(vlen(self.target1.origin - self.origin)));
-		bprint(" d="); bprint(s);
+		local vector core, env, lava_entries;
+		local string tgt_name;
+		local float tgt_dist;
+
+		core_x = rint(100 * self._m_stuck / self._m_frames);
+		core_y = rint(100 * self._m_idle_notgt / self._m_frames);
+		core_z = rint(100 * self._m_idle_roam / self._m_frames);
+
+		env_x = rint(100 * self._m_lava / self._m_frames);
+		env_y = self._m_polys_seen;
+		env_z = self._m_le_roam;
+
+		lava_entries_x = self._m_le_nav;
+		lava_entries_y = self._m_le_beeline;
+		lava_entries_z = self._m_le_combat;
+
+		if (self.target1 == self)
+		{
+			tgt_name = "ROAM";
+			tgt_dist = 0;
+		}
+		else if (self.target1)
+		{
+			tgt_name = self.target1.classname;
+			tgt_dist = rint(vlen(self.target1.origin - self.origin));
+		}
+		else
+		{
+			tgt_name = "NONE";
+			tgt_dist = 0;
+		}
+
+		nav_report_stats(core, env, lava_entries, tgt_name, tgt_dist);
 	}
-	else
-		bprint("tgt=NONE");
-	bprint("\n");
 
 	// reset counters
 	self._m_stuck = 0;
@@ -326,6 +369,7 @@ void() BotAI =
 		self.b_ambush_time = 0;
 		self.b_combat_time = 0;
 		self.b_combat_state = CSTATE_NONE;
+		self._combat_pin = 0;
 		self.b_react_time = 0;
 		self.b_wep_commit_time = 0;
 		bot_opp_model_reset();
@@ -376,12 +420,30 @@ void() BotAI =
 	// validate current enemy
 	if (self.enemy)
 	{
-		if (self.enemy.health <= 0 || !self.enemy.takedamage || bot_nocombat)
+		// bot_nocombat means "don't fight players" — shootable doors,
+		// buttons and triggers are navigation, those locks must
+		// survive nav-testing mode
+		if (self.enemy.health <= 0 || !self.enemy.takedamage
+			|| (bot_nocombat && (self.enemy.flags & FL_CLIENT)))
 			self.enemy = world;
 	}
 	// only scan when we don't have one (scratch1 disables combat)
 	if (!self.enemy && !bot_nocombat)
 		bot_find_enemy();
+
+	// a shootable opener as the goal (button with health, shoot-trigger
+	// like e1m6 t31): touching can't fire these — once we're close,
+	// make it the enemy and let combat aim gun it down
+	if (!self.enemy && self.target1
+		&& !(self.target1.flags & FL_ITEM)
+		&& !(self.target1.flags & FL_CLIENT)
+		&& self.target1.health > 0 && self.target1.takedamage)
+	{
+		local vector _oc;
+		_oc = (self.target1.absmin + self.target1.absmax) * 0.5;
+		if (vlen(_oc - self.origin) < 256)
+			bot_engage_mover(self.target1);
+	}
 
 	// --- act: fight, navigate, or roam ---
 	if (self.enemy)
@@ -397,69 +459,60 @@ void() BotAI =
 			if (!item_head)
 				map_stuff();
 			self.target1 = nav_find_goal();
+			if (self.target1)
+			{
+				// reset progress tracker for new goal
+				self._progress_best = 99999;
+				self._progress_stall = 0;
+			}
+			else
+			{
+				// no goal — walk in a random direction to find new area
+				makevectors('0 1 0' * (random() * 360));
+				self.b_wishdir = v_forward;
+			}
 		}
 
-		// clear target if item was picked up (model gone)
+		// clear target if item was picked up — items only: triggers are
+		// born with an empty model string (InitTrigger), and a fired
+		// trigger_once frees itself (classname goes empty too)
 		if (self.target1)
-			if (self.target1.model == string_null)
+		{
+			if (self.target1.flags & FL_ITEM)
 			{
-				self.target1 = world;
+				if (self.target1.model == string_null)
+					self.target1 = world;
 			}
+			else if (self.target1.classname == ""
+				|| self.target1.solid == SOLID_NOT)
+				self.target1 = world; // fired/freed opener — errand done
+		}
+
+		// a pressed button is a finished errand — drop it and re-pick;
+		// the door it opened clears the block map on the next goal pass
+		if (self.target1)
+		{
+			if (self.target1.classname == "func_button"
+				&& self.target1.state != STATE_BOTTOM)
+				self.target1 = world;
+		}
+
+		// walk-through trigger goal: standing inside means it fired —
+		// done, re-pick (trigger_multiple stays alive after firing)
+		if (self.target1)
+		{
+			if (self.target1.solid == SOLID_TRIGGER
+				&& self.origin_x > self.target1.absmin_x - 16
+				&& self.origin_x < self.target1.absmax_x + 16
+				&& self.origin_y > self.target1.absmin_y - 16
+				&& self.origin_y < self.target1.absmax_y + 16
+				&& self.origin_z > self.target1.absmin_z - 24
+				&& self.origin_z < self.target1.absmax_z + 24)
+				self.target1 = world;
+		}
 
 		if (self.target1)
 			bot_get();
-	}
-
-	// --- wall probe: trace from bbox corners along movement direction ---
-	{
-		local vector dir, rt, org;
-		local float blocked_left, blocked_right;
-
-		if (self.b_wishdir != '0 0 0')
-			dir = self.b_wishdir;
-		else
-		{
-			makevectors(self.angles);
-			dir = v_forward;
-		}
-		// right vector from direction (2D perpendicular)
-		makevectors(vectoangles(dir));
-		rt = v_right;
-
-		org = self.origin + dir * 64; // probe point 64u ahead
-		blocked_left = 0;
-		blocked_right = 0;
-
-		// trace down from hull top to hull bottom at each bbox corner
-		// compare floor height to previous frame — gradient > 18u = wall
-		traceline(org - rt * 16 + '0 0 32', org - rt * 16 - '0 0 24', TRUE, self);
-		if (trace_endpos_z - self._wp_floor_left > 18)
-			blocked_left = 1;
-		self._wp_floor_left = trace_endpos_z;
-
-		traceline(org + rt * 16 + '0 0 32', org + rt * 16 - '0 0 24', TRUE, self);
-		if (trace_endpos_z - self._wp_floor_right > 18)
-			blocked_right = 1;
-		self._wp_floor_right = trace_endpos_z;
-
-		if (blocked_left || blocked_right)
-		{
-			if (blocked_left && !blocked_right)
-				self.b_wishdir = normalize(dir + rt * 0.7);
-			else if (blocked_right && !blocked_left)
-				self.b_wishdir = normalize(dir - rt * 0.7);
-			else
-			{
-				// both sides blocked — stop, rotate via bot_look until clear
-				self.b_wishdir = '0 0 0';
-				self.b_angle_y = self.v_angle_y + 90;
-			}
-		}
-		else if (!self.target1)
-		{
-			// no target and clear ahead — walk forward to find new area
-			self.b_wishdir = dir;
-		}
 	}
 
 	// --- set look target ---

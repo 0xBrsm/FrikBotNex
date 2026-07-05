@@ -15,6 +15,11 @@
 .float b_wep_commit_time;
 .float b_combat_state;
 .float b_combat_time;
+.float _combat_pin;        // next pin-window check time
+.vector _pin_org;          // position at start of pin window
+.float _pin_strikes;       // consecutive low-displacement windows
+.entity _failed_enemy;     // foe abandoned after a combat pin
+.float _failed_enemy_time; // re-acquire cooldown expiry for _failed_enemy
 .float _m_goals_reached;
 
 // goal weights (set by act_normal at spawn)
@@ -83,7 +88,21 @@ vector(entity bot, float index)	nav_path_debug = #85;
 entity()				nav_find_goal = #86;
 void(entity e)				nav_block = #89;
 void(entity e)				nav_unblock = #90;
+void(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) nav_report_stats = #92;
+void(float streak, string tgt, float tgt_dist) nav_debug_event = #93;
 float		nav_booted;
+
+// off-mesh link types — must match the AI_* enum in src/server/nav_mesh.h
+float AI_TELELINK    = 1;	// teleporter: walk in, instant transport
+float AI_JUMP        = 2;	// jump up: press jump on approach
+float AI_DROP        = 3;	// drop down: walk off edge
+float AI_PLAT_BOTTOM = 4;	// platform: wait at bottom, ride up
+float AI_RIDE_TRAIN  = 5;	// train/elevator: stand on, ride
+float AI_DOORFLAG    = 6;	// door: wait or trigger
+float AI_SUPER_JUMP  = 7;	// rocket jump: RL aim down fire+jump
+float AI_SURFACE     = 8;	// water: swim up to surface
+float AI_WALK        = 9;	// walk across: continuous floor the mesh
+				// failed to link; bot just walks to the link end
 
 
 // ai & misc

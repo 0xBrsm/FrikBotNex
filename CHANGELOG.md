@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0 — Full Map Connectivity
+
+Closed out the navmesh connectivity work: every spawn can reach every item,
+no manual DM waypoints needed, and bots fight again now that the mesh is
+trusted.
+
+- **Connectivity harness** — `nav_harness.sh` + `nav_triage.py` prove full
+  reachability: 37/37 id1 maps and 31/31 mission-pack maps pass with zero
+  unreachable items
+- **Off-mesh link fallbacks** — jump-grab and spawn walk-off for mesh-less
+  micro-geometry, drop-to-floor now matches in-game, plat/door bake fixes
+- **Per-map fixes** — hip2m3/hip2m6/hipend, e2m6, e3m5, dm1/dm5 picked off
+  one at a time via the harness
+- **Bot combat back on by default** — `bot_nocombat` flipped `1` -> `0` now
+  that the mesh is solid, verified with frags on all 6 DM maps
+- **Review cleanup** — null-entity guard, UB pointer-arithmetic fix in
+  `nav_hull.cpp`, float-coordinate regex fix in `nav_triage.py`
+
 ## 0.3.0 — Detour Best Practice
 
 Rewrote navmesh integration to follow Detour best practices.

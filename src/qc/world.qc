@@ -356,7 +356,9 @@ void() StartFrame =
 	skill = cvar("skill");
 	framecount = framecount + 1;
 
-	// navmesh debug: cycle through polys, draw nearby ones as particles
+	// navmesh debug: cycle through nearby debug markers.
+	// nav_path_debug(world, i) already returns positions lifted above the
+	// navmesh surface so the particles stay visible.
 	if (cvar("nav_debug"))
 	{
 		local vector pt, ppos;

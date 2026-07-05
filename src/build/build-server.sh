@@ -37,7 +37,9 @@ popd >/dev/null
 cp "${FRIKBOT_ROOT}/src/build/Makefile.dedicated" "${OUT_DIR}/"
 cp "${FRIKBOT_ROOT}/src/server/net_bot.c" "${FRIKBOT_ROOT}/src/server/net_bot.h" "${OUT_DIR}/"
 cp "${FRIKBOT_ROOT}/src/server/nav_bot.cpp" "${FRIKBOT_ROOT}/src/server/nav_bot.h" "${OUT_DIR}/"
+cp "${FRIKBOT_ROOT}/src/server/nav_hull.cpp" "${FRIKBOT_ROOT}/src/server/nav_hull.h" "${OUT_DIR}/"
 cp "${FRIKBOT_ROOT}/src/server/nav_mesh.h" "${FRIKBOT_ROOT}/src/server/nav_mesh.cpp" "${OUT_DIR}/"
+cp "${FRIKBOT_ROOT}/src/server/nav_val.cpp" "${FRIKBOT_ROOT}/src/server/nav_val_data.h" "${OUT_DIR}/"
 
 # Apply our patches (on top of NexQuake's)
 for patch in "${FRIKBOT_ROOT}"/src/server/*.patch; do
@@ -52,6 +54,13 @@ cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/Recast" "$(dirname "${OUT_DIR}")/
 cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/Detour" "$(dirname "${OUT_DIR}")/vendor/recastnavigation/"
 cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/DetourTileCache" "$(dirname "${OUT_DIR}")/vendor/recastnavigation/"
 cp -r "${FRIKBOT_ROOT}/vendor/recastnavigation/DetourCrowd" "$(dirname "${OUT_DIR}")/vendor/recastnavigation/"
+
+# Apply our vendor patches (submodule stays pristine)
+for patch in "${FRIKBOT_ROOT}"/src/build/patches/recastnavigation-*.patch; do
+  [[ -f "${patch}" ]] || continue
+  echo "  vendor patch: $(basename "${patch}")"
+  (cd "$(dirname "${OUT_DIR}")/vendor/recastnavigation" && patch -p1 --forward -r /dev/null < "${patch}") || true
+done
 
 # Build
 make_jobs="$(nproc 2>/dev/null || echo 1)"

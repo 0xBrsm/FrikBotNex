@@ -15,7 +15,7 @@ and then emits normal clc_move packets from QC-populated fields.
 static int bot_driverlevel = -1;
 
 // Bot cvars (registered early so autoexec/commandline can set them)
-static cvar_t bot_nocombat_cvar = {"bot_nocombat", "1"};
+static cvar_t bot_nocombat_cvar = {"bot_nocombat", "0"};
 static cvar_t bot_fixedgoal_cvar = {"bot_fixedgoal", "0"};
 
 // QC field offsets (cached on first use via ED_FindField).

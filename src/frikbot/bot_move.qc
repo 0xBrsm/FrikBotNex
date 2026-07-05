@@ -41,9 +41,23 @@ this notice in its entirety.
 
 */
 
-// ---- Stuck recovery ----
-.float _stuck_count;
-.vector _stuck_origin;
+// ---- Progress tracking (single recovery system) ----
+.float _progress_best;    // best XY distance to corner seen this goal
+.float _progress_stall;   // frames with no improvement
+.entity _progress_tgt;    // goal the progress baseline belongs to
+.vector _progress_wp;     // corner the progress baseline belongs to
+.float _nav_pin;          // next net-displacement check (corner-independent)
+.vector _nav_pin_org;     // position at last check
+.float _nav_pin_strikes;  // consecutive dead 2s windows
+.entity _failed_goal;     // goal abandoned after a stall (engine skips it)
+.float _failed_goal_time; // cooldown expiry for _failed_goal
+.float _nav_backoff;      // until this time, walk _backoff_dir instead
+.vector _backoff_dir;     // retreat direction (give a moving door room)
+.entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
+.vector _plat_link_wp;    // corner that cache was computed for
+
+// ---- Debug ----
+.float _dbg_notgt_time;   // throttle for no-target logging
 
 // ---- Sense fields ----
 
@@ -56,6 +70,106 @@ this notice in its entirety.
 .float sense_my_size;
 .float sense_enemy_size;
 .float sense_friendly_block;
+
+// ---- Combat engagement ----
+
+// Arm the pin window: clocks bot_fight reads to time the no-progress
+// strikes that abandon a hopeless fight, and to keep a just-acquired
+// enemy from being dropped on the very next frame.
+void() bot_arm_pin =
+{
+	self._combat_pin = time + 2;
+	self._pin_org = self.origin;
+	self._pin_strikes = 0;
+};
+
+// Acquire e as the enemy and arm the combat clocks, the way
+// bot_find_enemy does — stale clocks make bot_fight drop the target.
+void(entity e) bot_engage_mover =
+{
+	self.enemy = e;
+	self.b_react_time = time;
+	self.b_combat_time = time;
+	bot_arm_pin();
+};
+
+// If a fresh traceline put a shootable mover (door/button with health)
+// in the lane and we aren't already fighting, gun it open. Returns
+// whether it engaged. Caller runs the traceline; we read trace_ent.
+float() bot_shoot_lane_mover =
+{
+	if (self.enemy)
+		return FALSE;
+	if (trace_ent != world
+		&& (trace_ent.classname == "door"
+			|| trace_ent.classname == "func_button")
+		&& trace_ent.health > 0 && trace_ent.takedamage)
+	{
+		bot_engage_mover(trace_ent);
+		return TRUE;
+	}
+	return FALSE;
+};
+
+// Newton's-method square root — QuakeC has no sqrt builtin and vlen only
+// roots a sum of squares. Six iterations from 1.0 cover the fall-time math.
+float(float n) bot_sqrt =
+{
+	local float r, i;
+	if (n <= 0)
+		return 0;
+	r = 1;
+	i = 0;
+	while (i < 6)
+	{
+		r = (r + n / r) * 0.5;
+		i = i + 1;
+	}
+	return r;
+};
+
+// Mid-flight guidance for a drop. Steer toward the horizontal velocity that
+// puts the bot on `corner` when its arc descends back to that height.
+// SV_AirAccelerate brakes hard against our motion (~160ups/frame) but only
+// nudges forward at 30 — so this erases an overshoot to stick a near landing
+// the bot would otherwise sail over, while a too-slow arc still gets the
+// forward push. Drops only: a jump must KEEP its launch momentum to clear the
+// gap, and braking it just drops the bot short into a re-jump loop.
+void(vector corner) bot_air_guide =
+{
+	local vector to_wp, hv, desired, steer;
+	local float dz, disc, t, gap;
+
+	to_wp = corner - self.origin;
+	to_wp_z = 0;
+	gap = vlen(to_wp);
+
+	// time until the arc falls back through the landing height
+	dz = corner_z - self.origin_z;
+	disc = self.velocity_z * self.velocity_z - 2 * sv_gravity * dz;
+	if (disc < 0)
+	{
+		// arc never reaches that height — just hold course for the corner
+		if (gap > 0.1)
+			self.b_wishdir = normalize(to_wp);
+		return;
+	}
+	t = (self.velocity_z + bot_sqrt(disc)) / sv_gravity;
+	if (t < 0.05)
+		t = 0.05;
+
+	hv = self.velocity;
+	hv_z = 0;
+	if (gap > 1)
+		desired = normalize(to_wp) * (gap / t);
+	else
+		desired = '0 0 0';
+	steer = desired - hv;
+	if (vlen(steer) > 1)
+		self.b_wishdir = normalize(steer);
+	else
+		self.b_wishdir = '0 0 0';
+};
 
 // ---- Spatial awareness ----
 
@@ -186,106 +300,37 @@ void() bot_build_movevect =
 	spd = sv_maxspeed * 2;
 	self.movevect_x = (self.b_wishdir * v_forward) * spd;
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
-};
-
-// When a stair waypoint sits on the side edge of the nav ramp, walk along the
-// blocking wall until we find the first tread instead of sliding into the side.
-float(vector along, vector wall_normal, float floor_z, float dist) bot_stair_probe =
-{
-	local vector trace_start, trace_end, probe;
-	local float rise;
-
-	trace_start = self.origin;
-	trace_start_z = trace_start_z - 20;
-	trace_end = self.origin + along * dist;
-	trace_end_z = trace_end_z - 20;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction < 1)
-		return 0;
-
-	probe = self.origin + along * dist - wall_normal * 24;
-	if (pointcontents(probe + '0 0 8') == CONTENT_SOLID)
-		return 0;
-
-	trace_start = probe;
-	trace_start_z = trace_start_z + 24;
-	trace_end = probe;
-	trace_end_z = trace_end_z - 40;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction == 1)
-		return 0;
-
-	rise = trace_endpos_z - floor_z;
-	if (rise < 6 || rise > 24)
-		return 0;
-
-	return rise;
-};
-
-vector(vector wall_normal, float step_height) bot_stair_entry_dir =
-{
-	local vector wall_tangent, trace_start, trace_end, choice;
-	local float floor_z, rise1, rise2, align;
-
-	choice = '0 0 0';
-
-	if (!(self.flags & FL_ONGROUND))
-		return choice;
-	if (step_height <= 4 || step_height >= 128)
-		return choice;
-
-	wall_normal_z = 0;
-	if (vlen(wall_normal) < 0.1)
-		return choice;
-	wall_normal = normalize(wall_normal);
-
-	trace_start = self.origin;
-	trace_start_z = trace_start_z + 24;
-	trace_end = self.origin;
-	trace_end_z = trace_end_z - 64;
-	traceline(trace_start, trace_end, TRUE, self);
-	if (trace_fraction == 1)
-		return choice;
-	floor_z = trace_endpos_z;
-
-	wall_tangent_x = wall_normal_y;
-	wall_tangent_y = wall_normal_x * -1;
-	wall_tangent_z = 0;
-
-	align = self.b_wishdir * wall_tangent;
-
-	// sweep along wall at increasing distances to find stair mouth
-	local float probe_dist;
-	probe_dist = 32;
-	while (probe_dist <= 224)
-	{
-		rise1 = bot_stair_probe(wall_tangent, wall_normal, floor_z, probe_dist);
-		rise2 = bot_stair_probe(wall_tangent * -1, wall_normal, floor_z, probe_dist);
-		if (rise1 || rise2)
-		{
-			if (rise1 && !rise2) return wall_tangent;
-			if (rise2 && !rise1) return wall_tangent * -1;
-			if (align >= 0) return wall_tangent;
-			return wall_tangent * -1;
-		}
-		probe_dist = probe_dist + 32;
-	}
-
-	return choice;
+	// swimming: send the vertical component as upmove so the bot can
+	// actually descend/ascend (SV_WaterMove adds cmd.upmove to wishvel)
+	if (self.waterlevel > 1)
+		self.movevect_z = self.b_wishdir_z * spd;
+	else
+		self.movevect_z = 0;
 };
 
 // ---- Navigation ----
 
-// bot_get: follow cached path corridor to target item
+// bot_get: follow cached path corridor to target item.
+// Single-authority steering: navigate() returns corner, bot walks toward it.
+// Single recovery: if no progress for 1 second, abandon goal.
 void() bot_get =
 {
-	local vector wp, steer, diff;
-	local float step_height, link_type;
+	local vector wp, steer;
+	local float link_type;
 
 	if (!self.target1)
 		return;
 
-	// get next steering corner from dtPathCorridor
+	// Backing off: we were standing in a moving door's lane (secret
+	// doors slide through the spot bots queue at, grinding against a
+	// waiting crowd forever if we don't move). Step away and let it
+	// finish before resuming the corridor.
+	if (time < self._nav_backoff)
+	{
+		self.b_wishdir = self._backoff_dir;
+		return;
+	}
+
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
 	{
@@ -293,19 +338,28 @@ void() bot_get =
 		return;
 	}
 
-	// decode off-mesh link type from Z encoding
+	// decode off-mesh link type from Z encoding: z' = z + 10000*(1+type)
 	link_type = 0;
 	if (wp_z > 9000)
 	{
-		link_type = wp_z - 10000;
-		wp_z = wp_z - 10000 - link_type;
+		link_type = rint(wp_z / 10000) - 1;
+		wp_z = wp_z - (link_type + 1) * 10000;
 	}
 
-	// compute direction to corner (3D for facing, 2D for movement)
+	// single-authority steering: walk toward the nav corner.
+	// On ground the vertical is dead weight: corners sit at feet level
+	// (up to 24u below origin), and normalizing the 3D vector both
+	// starves the horizontal push (near a low corner most of the unit
+	// vector points down) and tilts the shoulder probes into the floor.
+	// Swimming keeps z — that's the only case with vertical control —
+	// but measured from the FEET (origin-24), where corners live: there
+	// is no step-up while swimming, so a terrace lip above the feet yet
+	// below the origin must steer UP to clear, not level into the lip.
 	steer = wp - self.origin;
-	step_height = steer_z;
-
-	// set b_wishdir with full 3D direction for look angle
+	if (self.waterlevel < 2)
+		steer_z = 0;
+	else
+		steer_z = steer_z + 24;
 	if (vlen(steer) > 0.1)
 		self.b_wishdir = normalize(steer);
 	else
@@ -315,38 +369,72 @@ void() bot_get =
 	else
 		self._m_move_mode = MM_NAV;
 
-	// wall avoidance + stair finding
+	// off-mesh link actions
+	if (link_type == AI_DROP)
 	{
-		local vector trace_start, trace_end, wall_normal, slide, stair_dir;
-		trace_start = self.origin;
-		trace_start_z = trace_start_z - 20;
-		trace_end = trace_start + self.b_wishdir * 32;
-		traceline(trace_start, trace_end, TRUE, self);
-		if (trace_fraction < 1)
+		if (self.waterlevel < 2 && !(self.flags & FL_ONGROUND))
 		{
-			wall_normal = trace_plane_normal;
-			stair_dir = bot_stair_entry_dir(wall_normal, step_height);
-			if (stair_dir != '0 0 0')
-				self.b_wishdir = stair_dir;
+			// Airborne: guide the landing onto the corner.
+			bot_air_guide(wp);
+		}
+		else
+		{
+			// Run off the ledge toward the corner. Flatten steering so the
+			// corner's -z doesn't starve horizontal speed; swimming keeps
+			// the vertical (feet-referenced) to swim to an underwater link.
+			local vector flat_to_wp;
+
+			flat_to_wp = wp - self.origin;
+			if (self.waterlevel < 2)
+				flat_to_wp_z = 0;
 			else
-			{
-				wall_normal_z = 0;
-				slide = self.b_wishdir - wall_normal * (self.b_wishdir * wall_normal);
-				if (vlen(slide) > 0.1)
-					self.b_wishdir = normalize(slide);
-			}
+				flat_to_wp_z = flat_to_wp_z + 24;
+			if (vlen(flat_to_wp) > 0.1)
+				self.b_wishdir = normalize(flat_to_wp);
 		}
 	}
+	else if (link_type == AI_JUMP)
+	{
+		// Run at the edge and jump. Window must be wider than the
+		// corridor's 36u link-advance trigger, or the corner changes
+		// before the bot ever gets within jumping range.
+		local vector jflat;
+		local float jdist;
 
-	// off-mesh link actions
-	if (link_type == 2) // AI_JUMP
-	{
-		if (self.flags & FL_ONGROUND)
-			self.button2 = TRUE;
+		jflat = wp - self.origin;
+		jflat_z = 0;
+		jdist = vlen(jflat);
+		if (jdist > 0.1)
+			self.b_wishdir = normalize(jflat);
+
+		// Don't commit the jump into a blocked lane: a bot body (or
+		// wall) between here and the link start just bounces the
+		// jumper in place, and airborne frames can't steer around it.
+		if (jdist < 64 && (self.flags & FL_ONGROUND))
+		{
+			traceline(self.origin, wp + '0 0 24', FALSE, self);
+			if (trace_fraction == 1)
+				self.button2 = TRUE;
+		}
 	}
-	else if (link_type == 7) // AI_SUPER_JUMP
+	else if (link_type == AI_SUPER_JUMP)
 	{
-		if (self.weapon != 32)
+		// No launcher, no rocket jump. Without it the bot just spams a
+		// weapon switch that can never land (impulse 7 to a gun it doesn't
+		// own) and grinds the link forever. Bail on the goal — the area's
+		// rocket-only items go unwanted instead of fatal, and pathing
+		// falls back to a route the bot can actually walk.
+		if (!(self.items & IT_ROCKET_LAUNCHER))
+		{
+			if (self.target1.flags & FL_ITEM)
+			{
+				self._failed_goal = self.target1;
+				self._failed_goal_time = time + 30;
+			}
+			self.target1 = world;
+			return;
+		}
+		if (self.weapon != IT_ROCKET_LAUNCHER)
 			self.impulse = 7;
 		else if (self.flags & FL_ONGROUND)
 		{
@@ -355,7 +443,7 @@ void() bot_get =
 			self.button0 = TRUE;
 		}
 	}
-	else if (link_type == 8) // AI_SURFACE
+	else if (link_type == AI_SURFACE)
 	{
 		if (self.waterlevel > 2)
 		{
@@ -363,42 +451,299 @@ void() bot_get =
 			self.button2 = TRUE;
 		}
 	}
-	else if (link_type == 4 || link_type == 5) // AI_PLAT / AI_TRAIN
+	else if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
 	{
+		// Riding: standing on a moving lift/train makes zero XY progress
+		// by design — hold position so we don't pace off the edge. The
+		// abandon timeout below gets an 8x window for these links (a
+		// full wait + ride cycle), but never a free pass: an outright
+		// reset here turned every plat-adjacent stall into a permanent
+		// pin.
 		traceline(self.origin, self.origin - '0 0 64', TRUE, self);
-		if (trace_ent != world && trace_ent.velocity != '0 0 0')
-			self.b_wishdir = '0 0 0';
-	}
-	else if (link_type == 6) // AI_DOORFLAG
-	{
-		traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
-		if (trace_ent != world && trace_ent.classname == "door")
-			if (trace_ent.health > 0)
-			{
-				self.enemy = trace_ent;
-				self.button0 = TRUE;
-			}
-	}
-
-	// stuck detection
-	diff = self.origin - self._stuck_origin;
-	diff_z = 0;
-	if (vlen(diff) < 1)
-		self._stuck_count = self._stuck_count + 1;
-	else
-		self._stuck_count = 0;
-	self._stuck_origin = self.origin;
-
-	if (self._stuck_count > 5)
-	{
-		local vector dir;
-		dir = self.b_wishdir;
-		self.b_wishdir_x = dir_y;
-		self.b_wishdir_y = dir_x * -1;
-
-		if (self._stuck_count > 15)
+		if (trace_ent != world
+			&& (trace_ent.classname == "plat" || trace_ent.classname == "train"))
 		{
-			self._stuck_count = 0;
+			if (trace_ent.velocity != '0 0 0')
+				self.b_wishdir = '0 0 0';
+		}
+		else if (link_type == AI_PLAT_BOTTOM)
+		{
+			// Not aboard. If the plat serving this link is ABOVE the
+			// corner we're heading for, hold at the shaft lip — walking
+			// to the exact center means dropping into the pit under it
+			// (and blocking its return). Position, not state: a bot at
+			// the TOP lip must board a top-parked plat or walk off over
+			// a lowered one, never stand waiting. The 8x abandon window
+			// below covers the wait; a dead plat (targeted, never
+			// triggered) still times out.
+			local entity pl, bestpl;
+			local vector pc;
+			local float pd, bestpd;
+
+			// The serving plat is a function of the link corner (wp), which
+			// only changes when the corridor advances -- re-scanning every
+			// plat in the level every frame while a bot waits at the lip is
+			// wasted work. Cache the lookup per corner instead.
+			if (self._plat_link_pl == world
+				|| self._plat_link_pl.classname != "plat"
+				|| vlen(wp - self._plat_link_wp) > 1)
+			{
+				bestpl = world;
+				bestpd = 99999;
+				pl = find(world, classname, "plat");
+				while (pl != world)
+				{
+					pc = (pl.absmin + pl.absmax) * 0.5;
+					pc_z = wp_z;
+					pd = vlen(pc - wp);
+					if (pd < bestpd)
+					{
+						bestpd = pd;
+						bestpl = pl;
+					}
+					pl = find(pl, classname, "plat");
+				}
+				self._plat_link_pl = bestpl;
+				self._plat_link_wp = wp;
+			}
+			bestpl = self._plat_link_pl;
+			pc = (bestpl.absmin + bestpl.absmax) * 0.5;
+			pc_z = wp_z;
+			bestpd = vlen(pc - wp);
+			if (bestpl != world && bestpd < 128
+				&& bestpl.absmax_z > wp_z + 32
+				&& self.origin_z < bestpl.absmax_z)
+			{
+				pc = wp - self.origin;
+				pc_z = 0;
+				if (vlen(pc) < 80)
+					self.b_wishdir = '0 0 0';
+			}
+			// A plat actively moving through this link's shaft: stepping
+			// toward it just grinds the bot against its side/underside.
+			// Hold until it parks, then board. Moving is transient, so
+			// this can't become a standing freeze.
+			else if (bestpl != world && bestpd < 96
+				&& bestpl.velocity != '0 0 0')
+			{
+				pc = wp - self.origin;
+				pc_z = 0;
+				if (vlen(pc) < 96)
+					self.b_wishdir = '0 0 0';
+			}
+		}
+	}
+
+	// progress check: not getting closer to corner? abandon.
+	// Off-mesh links get 3x timeout (bot may be doing controlled approach).
+	{
+		local vector flat, rt;
+		local float xy_dist, fr, fl;
+		flat = wp - self.origin;
+		// swimming: progress is 3D, feet-referenced (descending to an
+		// underwater corner makes no XY progress at all)
+		if (self.waterlevel < 2)
+			flat_z = 0;
+		else
+			flat_z = flat_z + 24;
+		xy_dist = vlen(flat);
+
+		// new goal or new corner: reset the baseline, otherwise the
+		// previous corner's (small) best distance forces a false stall
+		if (self.target1 != self._progress_tgt || vlen(wp - self._progress_wp) > 32)
+		{
+			self._progress_tgt = self.target1;
+			self._progress_wp = wp;
+			self._progress_best = 99999;
+			self._progress_stall = 0;
+		}
+
+		if (xy_dist < self._progress_best - 1)
+		{
+			self._progress_best = xy_dist;
+			self._progress_stall = 0;
+		}
+		else
+			self._progress_stall = self._progress_stall + 1;
+
+		// A shootable door in the lane is an invitation, not a wall:
+		// make it the enemy — combat aim already knows how to shoot
+		// BSP movers, and opening doors clear takedamage, releasing
+		// the lock. (Touch doors open themselves, key doors open on
+		// touch if we hold the key; the goal picker never routes us
+		// through a door nobody here can open.)
+		if (self._progress_stall > 4 && !self.enemy
+			&& self.b_wishdir != '0 0 0')
+		{
+			traceline(self.origin, self.origin + self.b_wishdir * 64, TRUE, self);
+			bot_shoot_lane_mover();
+		}
+
+		// Shoulder probes: the steering corner can hug an obstacle the
+		// center traceline slips past (open door panels, plat edges) —
+		// the bot's 32u-wide box grinds on its corner with zero slide.
+		// When progress stops, trace both shoulders and veer toward the
+		// clear side; wall-slide physics takes over from there.
+		// Probes must see entity boxes (nomonsters FALSE): two bots
+		// meeting head-on pin each other box-to-box, and a probe that
+		// skips SOLID_SLIDEBOX reports "all clear" through the blocker.
+		// Jump links recover too: while still walking the approach, a
+		// blocked jumper needs the same veer/side-step as flat ground
+		// (the jump itself is gated on a clear lane above). Plat/train
+		// approaches too: the boarding point can sit past a wall corner
+		// the straight-line steer grinds on forever.
+		// Drop approaches too: several bots beelining for the same ledge
+		// corner box each other in the open room behind it, and with no
+		// veer they grind full-speed into each other forever. The
+		// ledge-departure itself is untouched: this only fires on-ground,
+		// before the bot has committed to running off.
+		// Airborne wedges too: a bot can end up pressed flat against a
+		// wall while falling (not resting on anything, so FL_ONGROUND
+		// never sets) and just grind straight into it under gravity,
+		// sliding down the face until it happens to clear the wall's
+		// bottom edge. A real jump/drop arc never takes anywhere near 2s,
+		// so once _nav_pin_strikes has actually latched (a full realized
+		// 2s window of <24u net movement) it's safe to veer even mid-air
+		// -- this can't misfire on a legitimate airborne link.
+		if (self._progress_stall > 4
+			&& (link_type == 0 || link_type == AI_JUMP || link_type == AI_DROP
+				|| link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
+			&& self.b_wishdir != '0 0 0'
+			&& ((self.flags & FL_ONGROUND) || self._nav_pin_strikes > 0))
+		{
+			rt_x = self.b_wishdir_y;
+			rt_y = 0 - self.b_wishdir_x;
+			rt_z = 0;
+			traceline(self.origin + rt * 16,
+				self.origin + rt * 16 + self.b_wishdir * 48, FALSE, self);
+			fr = trace_fraction;
+			traceline(self.origin - rt * 16,
+				self.origin - rt * 16 + self.b_wishdir * 48, FALSE, self);
+			fl = trace_fraction;
+			if (fr < fl - 0.1)
+				self.b_wishdir = normalize(self.b_wishdir - rt * 0.8);
+			else if (fl < fr - 0.1)
+				self.b_wishdir = normalize(self.b_wishdir + rt * 0.8);
+			else if (fr < 0.5)
+			{
+				// Both shoulders blocked at the same depth: a body (or
+				// flat wall) dead ahead — asymmetry veer can't fire, so
+				// side-step square and let the stall reset once the lane
+				// clears. Split the side-step by player slot (colormap
+				// is the engine's per-client edict number) so a pile of
+				// bots stuck the same way doesn't all step in lockstep
+				// and just rotate in place forever, re-forming the same
+				// circular jam every time they all turn the identical
+				// direction.
+				if (self.colormap & 1)
+					self.b_wishdir = normalize(rt);
+				else
+					self.b_wishdir = normalize(rt * -1);
+			}
+		}
+
+		// Net-displacement pin check: the stall counter above resets
+		// whenever the steering corner moves >32u, and at a ledge edge
+		// navigate() can flip between two corners forever, each flip
+		// resetting the stall before it reaches the limit. Corners lie;
+		// the bot's own position doesn't — measure 2s windows like the
+		// combat pin does.
+		if (time > self._nav_pin)
+		{
+			local vector nav_moved;
+			nav_moved = self.origin - self._nav_pin_org;
+			nav_moved_z = 0;
+			if (self._nav_pin > 0 && vlen(nav_moved) < 24
+				&& self.b_wishdir != '0 0 0')
+				self._nav_pin_strikes = self._nav_pin_strikes + 1;
+			else
+				self._nav_pin_strikes = 0;
+			self._nav_pin_org = self.origin;
+			self._nav_pin = time + 2;
+			// Pinned with a shootable mover toward the corner? Shoot it
+			// open instead of abandoning. The stall>4 trigger above never
+			// fires here: bouncing off the door keeps inching xy_dist
+			// closer, resetting the counter.
+			if (self._nav_pin_strikes > 0 && !self.enemy)
+			{
+				local vector pdir;
+				pdir = wp - self.origin;
+				pdir_z = 0;
+				pdir = normalize(pdir);
+				traceline(self.origin, self.origin + pdir * 64, TRUE, self);
+				if (bot_shoot_lane_mover())
+				{
+					self._nav_pin_strikes = 0;
+					return;
+				}
+			}
+			if (self._nav_pin_strikes > 1)
+			{
+				self._nav_pin_strikes = 0;
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				if (self.target1 != world && self.target1 != self)
+				{
+					self._failed_goal = self.target1;
+					self._failed_goal_time = time + 10;
+				}
+				self.target1 = world;
+				return;
+			}
+		}
+
+		local float stall_limit;
+		stall_limit = 1 / sv_ticrate;
+		// lift links: zero XY progress is normal while waiting for and
+		// riding the plat — budget a full return + ride cycle (~8s)
+		// before declaring the goal dead
+		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
+			stall_limit = stall_limit * 8;
+		if (self._progress_stall > stall_limit)
+		{
+			// Probe the lane: a monster-aware trace tells us what's ahead.
+			local vector bdir;
+			bdir = wp - self.origin;
+			bdir_z = 0;
+			bdir = normalize(bdir);
+			traceline(self.origin, self.origin + bdir * 48, FALSE, self);
+			// If it's a shootable mover, gun it open instead of
+			// abandoning. The stall>4 hook above misses this case:
+			// bouncing off the door keeps inching xy_dist closer,
+			// resetting the counter before it reaches 5.
+			if (bot_shoot_lane_mover())
+			{
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				return;
+			}
+			// A door that's MOVING is a door we're standing on: secret
+			// doors slide through the queue spot, grinding against the
+			// crowd forever if takedamage got cleared mid-open and the
+			// slide never finished. Step back, give it room, keep the
+			// goal.
+			if (trace_ent != world && trace_ent.classname == "door"
+				&& trace_ent.velocity != '0 0 0')
+			{
+				self._nav_backoff = time + 0.8;
+				self._backoff_dir = normalize(self.origin
+					- (trace_ent.absmin + trace_ent.absmax) * 0.5);
+				self._backoff_dir_z = 0;
+				self._progress_stall = 0;
+				self._progress_best = 99999;
+				return;
+			}
+			self._progress_stall = 0;
+			self._progress_best = 99999;
+			// Cool the goal down: the scorer is deterministic, so an
+			// immediate re-pick chooses the same goal and re-creates the
+			// same jam. Cool ANY real goal, not just items — a func_button
+			// opener the bot can't reach is re-picked every frame otherwise.
+			if (self.target1 != world && self.target1 != self)
+			{
+				self._failed_goal = self.target1;
+				self._failed_goal_time = time + 10;
+			}
 			self.target1 = world;
 			return;
 		}

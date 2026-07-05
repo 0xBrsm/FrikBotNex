@@ -28,6 +28,8 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define AI_DOORFLAG       6   /* door: wait or trigger */
 #define AI_SUPER_JUMP     7   /* rocket jump: RL aim down fire+jump */
 #define AI_SURFACE        8   /* water: swim up to surface */
+#define AI_WALK           9   /* walk across: continuous floor the mesh failed
+                                 to link; bot just walks to the link end */
 
 /* Detour area types for cost weighting */
 #define NAV_AREA_WALK      0   /* walking + teleporters (cost 1.0) */
@@ -37,6 +39,12 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define NAV_AREA_DOOR      4   /* door (cost 2.0 — brief wait) */
 #define NAV_AREA_RJ        5   /* rocket jump (cost 10.0 — expensive, risky) */
 #define NAV_AREA_NEAR_WALL 6   /* within walkable_radius of wall (cost 3.0) */
+
+/* Poly flags (dtPoly.flags) for per-bot filtering.  WALK is on every
+   traversable poly; RJ additionally marks rocket-jump off-mesh links so a
+   bot that can't rocket-jump (no launcher/rockets/health) excludes them. */
+#define NAV_POLYFLAG_WALK  1
+#define NAV_POLYFLAG_RJ    2
 
 typedef struct
 {
@@ -80,7 +88,7 @@ struct nav_mesh_runtime_s
 	dtNavMesh *navmesh;
 	dtNavMeshQuery *query;
 	float query_half_extents[3];       /* wide: for items/goals */
-	float query_half_extents_tight[3]; /* tight: for agent position */
+	float query_half_extents_actor_origin[3]; /* tight: actor origin -> surface snap */
 	nav_off_mesh_link_t *links;
 	int link_count;
 
@@ -90,13 +98,19 @@ struct nav_mesh_runtime_s
 		query_half_extents[0] = 64.0f;
 		query_half_extents[1] = 96.0f;
 		query_half_extents[2] = 64.0f;
-		query_half_extents_tight[0] = 32.0f;
-		query_half_extents_tight[1] = 56.0f;
-		query_half_extents_tight[2] = 32.0f;
+		query_half_extents_actor_origin[0] = 32.0f;
+		query_half_extents_actor_origin[1] = 56.0f;
+		query_half_extents_actor_origin[2] = 32.0f;
 	}
 };
 
 void nav_mesh_setup_filter(dtQueryFilter *filter);
+
+/* Floor-capped actor snap: nearest poly whose surface point is no more
+   than 8u above the actor origin (Recast coords).  Returns 1 if found. */
+int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
+	const dtQueryFilter *filter, const float *rc_point,
+	dtPolyRef *out_ref, float *out_pt, bool *out_over);
 
 /* Blocked poly table: paths through these polys are rejected post-findPath.
    No virtual dispatch — just a flat array checked after pathfinding. */
@@ -156,9 +170,9 @@ typedef struct
 	int	found;
 	int	is_over_poly;
 	unsigned long long poly_ref;
-	float query_point[3];
-	float nearest_point[3];
-	float poly_center[3];
+	float query_point[3];   /* caller-supplied sample point in Quake coords */
+	float nearest_point[3]; /* nearest point on the navmesh surface in Quake coords */
+	float poly_center[3];   /* polygon center on the navmesh surface in Quake coords */
 	float wall_distance;
 	int	neighbor_count;
 	unsigned long long neighbor_refs[NAV_MESH_MAX_NEIGHBORS];
@@ -167,7 +181,7 @@ typedef struct
 typedef struct
 {
 	unsigned long long poly_ref;
-	float	center[3];
+	float	center[3]; /* polygon center on the navmesh surface in Quake coords */
 	float	bounds_min[3];
 	float	bounds_max[3];
 	int	neighbor_count;
@@ -203,6 +217,14 @@ typedef struct nav_heightfield_s nav_heightfield_t;
 int nav_heightfield_is_blocked(const nav_heightfield_t *hf, const float *point, float floor_z);
 /* Find the nearest walkable floor Z at a point.  Returns 1 if found, 0 if no walkable floor. */
 int nav_heightfield_floor_z(const nav_heightfield_t *hf, const float *point, float search_z, float *out_z);
+/* Find all walkable floors between min_z and max_z at an XY position.
+   Returns count of floors found.  out_floors[] sorted top to bottom (nearest landing first). */
+int nav_heightfield_floors_below(const nav_heightfield_t *hf, const float *point,
+	float max_z, float min_z, float *out_floors, int max_floors);
+/* Find the lowest walkable floor above min_z (and below max_z) at an XY position.
+   Returns 1 if found, 0 if no floor in range. */
+int nav_heightfield_floor_above(const nav_heightfield_t *hf, const float *point,
+	float min_z, float max_z, float *out_z);
 void nav_heightfield_free(nav_heightfield_t *hf);
 
 /* Boundary edge: an edge of the navmesh with no neighbor polygon. */
@@ -231,11 +253,107 @@ nav_mesh_runtime_t *nav_mesh_build(
 	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
 
+/* Physics check for an orphan-connecting jump: can a player jump from foot
+   point 'from' (lower, main mesh) up to 'to' (higher, stranded area)?
+   Returns nonzero if makeable (height/reach in range, standable ends, clear
+   arc).  Implemented in nav_bot.cpp via SV_Move. */
+typedef int (*nav_jump_validate_fn)(const float *from, const float *to, void *user);
+
+/* Post-build pass: find ground components stranded from the main mesh and, for
+   each, emit ONE hull-validated jump-up link reconnecting it (a ledge into an
+   otherwise-unreachable area, e.g. dm4 quad).  Targeted, so it can't spray the
+   false jumps a broad edge scan does.  Fills *out_jumps (malloc'd, caller
+   frees); returns the count. */
+int nav_mesh_compute_orphan_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_jumps);
+
+/* Post-build pass: complete DIRECTED connectivity -- add the missing
+   direction for areas reachable only one way (drop-in rooms with a teleport
+   exit, etc.).  Adds only the absent direction, never bidirectional, so it
+   can't strand a bot.  Fills *out_links (malloc'd, caller frees); returns
+   the count. */
+int nav_mesh_compute_directed_links(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
+/* Post-build pass: bridge local connectivity gaps -- two walkable patches
+   each reachable from main but not from each other -- with bidirectional
+   run-jumps.  Adds a jump ONLY where no direct mesh path exists, so every
+   link is new reachability, never a redundant shortcut.  Fills *out_links
+   (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_gap_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
+/* Post-build pass: add one-way rocket-jump-up links to high ledges that
+   are out of run-jump reach -- but ONLY where the high end can already get
+   back down some other way, so a launcher-less bot is never trapped (it
+   abandons the goal instead).  Fills *out_links (malloc'd, caller frees);
+   returns the count. */
+int nav_mesh_compute_rocket_jumps(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
+/* Register level-exit points (trigger_changelevel centers) before the
+   post-build passes: a component containing one is escapable by
+   definition, so the deep-drop no-trap gate lets links in.  pts is
+   count x/y/z triplets (Quake coords); copied, caller keeps ownership. */
+void nav_mesh_set_exit_points(const float *pts, int count);
+
+/* Post-build pass: one-way walk-off DROP links (48-700u, horizontal reach
+   physics-limited by fall time) into lower regions that have no other way
+   in -- but ONLY
+   where the landing can already path back OUT (to the drop's start or to
+   the main mesh), so a pit with no exit never gets a link and can't trap
+   a bot (the dm3 pit regression when the flat cap was raised to 320).
+   Fills *out_links (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_deep_drops(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
+/* Post-build pass: bidirectional swim links between components whose
+   closest rims connect through an entirely-underwater straight segment
+   (the validator proves full submersion + hull clearance).  Water is the
+   one medium where traversal is symmetric and fall-free, so unlike every
+   other repair pass these links are safely two-way.  Fills *out_links
+   (malloc'd, caller frees); returns the count. */
+int nav_mesh_compute_swim_links(
+	nav_mesh_runtime_t *navmesh,
+	nav_jump_validate_fn validate, void *user,
+	nav_off_mesh_link_t **out_links);
+
+/* Diagnostic: for an unreachable goal, BFS the poly graph from the given
+   start positions (directed, off-mesh links included) and from the goal
+   (undirected island), then report the closest ground-poly pair across
+   the two sets -- i.e. WHERE a bridging link is missing.  Quake coords.
+   Returns 1 and fills out_from (reachable side) / out_to (island side). */
+int nav_mesh_gap_probe(
+	const nav_mesh_runtime_t *navmesh,
+	const float *starts, int start_count,
+	const float *goal,
+	float *out_from, float *out_to,
+	char *error, size_t error_size);
+
 int nav_mesh_find_nearest(
 	const nav_mesh_runtime_t *navmesh,
 	const float *point,
 	nav_mesh_nearest_result_t *result,
 	char *error, size_t error_size);
+
+/* Every enabled poly overlapping point+-half_extents (Quake coords), as
+   closest-points to the query point, nearest first.  No snap cap. */
+int nav_mesh_query_poly_points(
+	const nav_mesh_runtime_t *navmesh,
+	const float *point,
+	const float *half_extents,
+	float (*out_points)[3],
+	int max_points);
 
 int nav_mesh_collect_polys(
 	const nav_mesh_runtime_t *navmesh,
@@ -249,7 +367,22 @@ int nav_mesh_find_path(
 	char *error, size_t error_size);
 
 void nav_mesh_free_poly_records(nav_mesh_poly_record_t *records);
+
+/* Quake<->Recast axis swap (Recast is Y-up, Quake is Z-up). */
+void nav_quake_to_recast(const float *quake, float *recast);
+void nav_recast_to_quake(const float *recast, float *quake);
+
+/* Quake-coords center of the poly behind a path ref.
+   0 = bad ref, 1 = ground poly, 2 = off-mesh connection. */
+int nav_mesh_poly_center_by_ref(const nav_mesh_runtime_t *navmesh,
+	unsigned long long ref, float *quake_center);
 void nav_mesh_destroy(nav_mesh_runtime_t *navmesh);
+
+/* Down-biased search box for snapping an actor origin to its floor poly
+   (floors are below the origin, never more than a step above).
+   rc_point/center/half_extents are Recast coords. */
+void nav_mesh_actor_snap_box(const nav_mesh_runtime_t *navmesh,
+	const float *rc_point, float *center, float *half_extents);
 
 /* ---- Path corridor (dtPathCorridor wrapper) ---- */
 
@@ -257,6 +390,10 @@ typedef struct nav_corridor_s nav_corridor_t;
 
 nav_corridor_t *nav_corridor_create(int max_path);
 void nav_corridor_destroy(nav_corridor_t *c);
+
+/* Per-bot rocket-jump gate: allowed=0 excludes RJ off-mesh links from this
+   corridor's pathing filter; allowed=1 restores them. */
+void nav_corridor_set_rj(nav_corridor_t *c, int allowed);
 
 /* Load a computed path into the corridor. */
 int nav_corridor_set(nav_corridor_t *c,
@@ -284,6 +421,9 @@ int nav_corridor_offmesh(nav_corridor_t *c,
 
 /* Get corridor length (number of polys remaining). */
 int nav_corridor_length(const nav_corridor_t *c);
+
+/* Waypoint-vs-navmesh validation (nav_val.cpp) */
+void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname);
 
 #ifdef __cplusplus
 }
