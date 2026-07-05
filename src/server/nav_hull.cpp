@@ -341,18 +341,25 @@ static Polytope box_polytope(const float *mins, const float *maxs)
 		{
 			V3 n = v3(0, 0, 0);
 			double d;
-			if (side == 0) { (&n.x)[axis] = 1.0; d = hi[axis]; }
-			else { (&n.x)[axis] = -1.0; d = -lo[axis]; }
+			double nsign = (side == 0) ? 1.0 : -1.0;
+			if (axis == 0) n.x = nsign;
+			else if (axis == 1) n.y = nsign;
+			else n.z = nsign;
+			d = (side == 0) ? hi[axis] : -lo[axis];
 
 			Face f = {n, d, base_winding(n, d), false};
 			for (int a2 = 0; a2 < 3 && f.w.size() >= 3; a2++)
 			{
 				if (a2 == axis) continue;
 				V3 cn = v3(0, 0, 0);
-				(&cn.x)[a2] = 1.0;
+				if (a2 == 0) cn.x = 1.0;
+				else if (a2 == 1) cn.y = 1.0;
+				else cn.z = 1.0;
 				f.w = clip_winding(f.w, cn, hi[a2]);
 				if (f.w.size() < 3) break;
-				(&cn.x)[a2] = -1.0;
+				if (a2 == 0) cn.x = -1.0;
+				else if (a2 == 1) cn.y = -1.0;
+				else cn.z = -1.0;
 				f.w = clip_winding(f.w, cn, -lo[a2]);
 			}
 			if (f.w.size() >= 3)

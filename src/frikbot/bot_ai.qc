@@ -490,20 +490,26 @@ void() BotAI =
 
 		// a pressed button is a finished errand — drop it and re-pick;
 		// the door it opened clears the block map on the next goal pass
-		if (self.target1.classname == "func_button"
-			&& self.target1.state != STATE_BOTTOM)
-			self.target1 = world;
+		if (self.target1)
+		{
+			if (self.target1.classname == "func_button"
+				&& self.target1.state != STATE_BOTTOM)
+				self.target1 = world;
+		}
 
 		// walk-through trigger goal: standing inside means it fired —
 		// done, re-pick (trigger_multiple stays alive after firing)
-		if (self.target1.solid == SOLID_TRIGGER
-			&& self.origin_x > self.target1.absmin_x - 16
-			&& self.origin_x < self.target1.absmax_x + 16
-			&& self.origin_y > self.target1.absmin_y - 16
-			&& self.origin_y < self.target1.absmax_y + 16
-			&& self.origin_z > self.target1.absmin_z - 24
-			&& self.origin_z < self.target1.absmax_z + 24)
-			self.target1 = world;
+		if (self.target1)
+		{
+			if (self.target1.solid == SOLID_TRIGGER
+				&& self.origin_x > self.target1.absmin_x - 16
+				&& self.origin_x < self.target1.absmax_x + 16
+				&& self.origin_y > self.target1.absmin_y - 16
+				&& self.origin_y < self.target1.absmax_y + 16
+				&& self.origin_z > self.target1.absmin_z - 24
+				&& self.origin_z < self.target1.absmax_z + 24)
+				self.target1 = world;
+		}
 
 		if (self.target1)
 			bot_get();

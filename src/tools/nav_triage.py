@@ -128,9 +128,9 @@ def classify(mapname, pos):
 
 BSP_CACHE = {}
 LINE_RE = re.compile(
-    r"Nav: CONNECTIVITY unreachable (\S+) at \((-?\d+) (-?\d+) (-?\d+)\)(?::)? (.*)")
+    r"Nav: CONNECTIVITY unreachable (\S+) at \((-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)\)(?::)? (.*)")
 
-STOP_RE = re.compile(r"stopped at (-?\d+) (-?\d+) (-?\d+)")
+STOP_RE = re.compile(r"stopped at (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)")
 CLUSTER_DIST = 256.0
 
 
