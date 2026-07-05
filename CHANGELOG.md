@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0 — Full Map Connectivity
+
+Closed out the navmesh connectivity work: every spawn can reach every item on
+every stock map, and bots fight again now that the mesh is trusted.
+
+- **Connectivity oracle + harness** — `src/tools/nav_harness.sh` and
+  `nav_triage.py` prove every item and spawn is reachable; 37/37 id1 maps and
+  31/31 mission-pack maps pass with zero unreachable items
+- **Off-mesh link coverage rounded out** — jump-grab and spawn walk-off
+  fallbacks for items sitting on mesh-less micro-geometry, drop-to-floor
+  oracle now matches in-game droptofloor, low-passage WALK fallback for
+  short doorways, plat/door link radius and bake fixes (spawn-bearing doors,
+  bottom-parked lifts, collapse-floor doors riding down like plats)
+- **Per-map fixes across the whole roster** — hip2m3/hip2m6/hipend spawn and
+  door bakes, e2m6 clearance-gate train, e3m5 wind-tunnel rim-exit, dm1/dm5
+  airborne veer fix, and more picked off one at a time via the connectivity
+  harness
+- **Bot combat back on by default** — `bot_nocombat` was `1` for the whole
+  mesh-testing stretch so fights wouldn't muddy connectivity runs; flipped
+  back to `0` now that the mesh is solid, verified with frags on all 6 DM
+  maps
+- **Review cleanup** — guarded a `target1` dereference after the goal is
+  cleared to `world`, replaced UB pointer-arithmetic struct indexing in
+  `nav_hull.cpp` with explicit component assignments, `nav_triage.py` regexes
+  now accept float coordinates
+
 ## 0.3.0 — Detour Best Practice
 
 Rewrote navmesh integration to follow Detour best practices.

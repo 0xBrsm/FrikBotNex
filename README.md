@@ -15,6 +15,7 @@ FrikBotNex builds on the original FrikBot with:
 - **Team coordination** -- bots read ally entity state to focus fire, rush enemies chasing retreating teammates, and bias retreat toward allies for crossfire
 - **Personality system** -- balanced, aggressive, defensive, and camper archetypes that influence weapon preference, strafe speed, retreat threshold, and utility scoring
 - **Skill scaling** -- skill 0 bots panic and fumble; skill 3 bots counter-strafe, combo weapons, and seek health while retreating. Each skill level unlocks features rather than just tightening aim.
+- **Navmesh navigation** -- a Recast/Detour navmesh is built at map load from the BSP's hull-1 collision geometry, so bots navigate any map with no pre-authored waypoints. Off-mesh links cover everything the raw mesh can't express: jumps, drops, rocket jumps, teleporters, platforms, trains, and doors. A connectivity harness validates every item and spawn is reachable on every stock map.
 
 ## Building
 
@@ -25,9 +26,13 @@ cd src/qc
 fteqcc
 ```
 
-Or use `gmqcc progs.src` or `qcc`. Output is `src/progs.dat`. A pre-compiled `progs.dat` is checked into the repo root for convenience.
+Or use `gmqcc progs.src` or `qcc`. Output goes to the repo root: `progs.dat` (game bytecode). A pre-compiled `progs.dat` is checked in for convenience.
 
-There are no automated tests -- testing requires running in a Quake engine (Quakespasm, vkQuake, FTE, etc.).
+Bot navigation runs in a custom engine build (`src/server/`, NetQuake + Recast/Detour as git
+submodules) rather than a generic Quake client/server -- see `src/build/build-server.sh`.
+Rebuild it whenever `src/server/*.cpp`/`*.h`/`net_bot.c` change; QC-only changes don't need it.
+
+There are no automated tests -- testing requires running bots in this engine build.
 
 ## Source Layout
 
@@ -40,19 +45,19 @@ src/
 
   frikbot/      Bot AI system (public domain, Ryan "FrikaC" Smith + contributors)
     bot.qc        Entity lifecycle, declarations, main loop hooks
-    bot_way.qc    Waypoint navigation and pathfinding
-    bot_think.qc  Opponent model, team coordination, utility scoring, threat assessment
-    bot_shoot.qc  Weapon scoring, switching, fire control
-    bot_fight.qc  Combat movement states and state machine
-    bot_ai.qc     Target selection, aim pipeline, main per-frame think
+    bot_ai.qc     Target/enemy selection, goal management, aim pipeline, per-frame think
+    bot_fight.qc  Combat movement state machine, opponent modeling
+    bot_goal.qc   Item goal scoring: utility-weighted pickups, resource pools, personality
+    bot_move.qc   Movement command generation, bunny hopping, off-mesh link traversal
     bot_misc.qc   Utility functions
-    bot_phys.qc   Physics prediction and movement validation
-    bot_move.qc   Movement command generation, bunny hopping
-    bot_sense.qc  Unified spatial awareness pass (per-tick sensing)
-    bot_ed.qc     In-game console/editor interface
 
-  waypoints/    Per-map navigation graphs
-    map_dm1.qc through map_dm6.qc
+  server/       Navmesh navigation (C++, built with the engine, not the QC progs)
+    nav_hull.cpp  Extracts hull-1 BSP collision geometry
+    nav_mesh.cpp  Recast/Detour navmesh build
+    nav_bot.cpp   Off-mesh link detection + QC-facing path/link builtins
+    net_bot.c     Fake network driver -- bots run through real engine physics
+
+  tools/        nav_harness.sh + nav_triage.py -- full-map connectivity test gate
 ```
 
 ## Installation

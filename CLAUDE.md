@@ -27,19 +27,25 @@ There are no automated tests — testing requires running in a Quake engine.
 
 2. **Bot AI system** (`src/frikbot/`) — The core of this project:
    - `bot.qc` — Bot entity lifecycle, main loop, initialization
-   - `bot_ai.qc` — Target selection, threat assessment, goal management, aim pipeline
-   - `bot_think.qc` — Opponent modeling, team coordination, utility scoring
-   - `bot_shoot.qc` — Weapon scoring, switching, fire control
-   - `bot_fight.qc` — Combat movement state machine (fight/retreat/pressure/flank)
-   - `bot_move.qc` — Movement command generation, bunny hopping
-   - `bot_phys.qc` — Physics prediction and movement validation
-   - `bot_way.qc` — Waypoint navigation and pathfinding
-   - `bot_sense.qc` — Unified spatial awareness pass (compute once, read everywhere)
+   - `bot_ai.qc` — Target/enemy selection, goal management, aim pipeline, per-frame think
+   - `bot_fight.qc` — Combat movement state machine (fight/retreat/pressure/flank), opponent modeling
+   - `bot_goal.qc` — Item goal scoring: utility-weighted pickup selection, resource pools, personality preferences
+   - `bot_move.qc` — Movement command generation, bunny hopping, off-mesh link traversal (jump/drop/plat/train/door/teleport)
    - `bot_misc.qc` — Utility functions
-   - `bot_ed.qc` — In-game console/editor interface
-   - `bot_qw.qc` — QuakeWorld protocol variant (not compiled by default)
 
-3. **Waypoint data** (`src/waypoints/`) — Per-map navigation graphs (`map_dm1.qc` through `map_dm6.qc`) with AI behavior flags.
+   There is no more hand-placed waypoint system — `bot_way.qc`, `bot_ed.qc`, `bot_sense.qc`,
+   `bot_think.qc`, `bot_shoot.qc`, `bot_phys.qc`, `bot_qw.qc`, and `src/waypoints/` were all
+   removed when navigation moved to a runtime navmesh (see below).
+
+3. **Navmesh navigation** (`src/server/`) — C++ engine code, built alongside the game server:
+   - `nav_hull.cpp`/`nav_mesh.cpp` — Extracts hull-1 collision geometry from the loaded BSP
+     (worldmodel + func_wall/func_plat/func_train/func_door) and builds a Recast/Detour navmesh
+   - `nav_bot.cpp` — Off-mesh link detection (jump, drop, rocket jump, teleporter, platform,
+     train, door) and QC-facing builtins for path queries and link traversal
+   - `net_bot.c` — Fake network driver so bots run through real engine physics, not QC emulation
+   - `nav_val.cpp` — Waypoint/connectivity validation oracle used by the test harness
+   - `src/tools/nav_harness.sh` + `nav_triage.py` — Full-map connectivity gate: every spawn must
+     reach every item on every stock map (currently 37/37 id1, 31/31 mission-pack, 0 unreachable)
 
 ### Bot integration into game loop
 
@@ -52,13 +58,17 @@ The bot system hooks into the base game at four points in `src/qc/world.qc` and 
 ### Key entity fields (bot-specific)
 
 - `b_skill` (0–3) — Bot difficulty level, affects aim, dodge timing, decision-making
-- `b_aiflags` — Bitfield of `AI_*` constants controlling waypoint behavior (telelinks, doors, jumps, platforms, sniper spots, ambush points — 18 flags total)
+- `b_aiflags` — Bitfield of `AI_*` constants controlling off-mesh link and behavior types (telelinks, doors, jumps, platforms, sniper spots, ambush points — 18 flags total)
 - `target1`–`target4` — Tracked entities (enemies, items, goals)
 - `phys_obj` — Linked physics prediction entity (separate from game physics)
 
 ### Compilation order matters
 
-`progs.src` defines strict compile order. Waypoints and bot modules come before base game files (except `defs.qc`). New files must be added to `progs.src` in the correct position.
+`progs.src` defines strict compile order. Bot modules come before base game files (except `defs.qc`). New files must be added to `progs.src` in the correct position.
+
+The engine (`src/server/`) is a separate build — see `src/build/build-server.sh` — and must
+be rebuilt whenever `nav_bot.cpp`, `nav_mesh.cpp`/`.h`, `nav_hull.cpp`, or `net_bot.c`/`.h`
+change. QC-only changes don't need an engine rebuild.
 
 ## Licensing
 
