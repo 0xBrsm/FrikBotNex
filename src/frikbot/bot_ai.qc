@@ -456,7 +456,7 @@ void() BotAI =
 		// get a goal if we don't have one
 		if (!self.target1)
 		{
-			if (!item_head)
+			if (!item_head || time > item_reg_time + 10)
 				map_stuff();
 			self.target1 = nav_find_goal();
 			if (self.target1)

@@ -730,6 +730,7 @@ static struct {
 	float nav_pos[3]; /* position snapped to navmesh (Recast coords) */
 } nav_item_cache[NAV_MAX_ITEMS];
 static int nav_item_count = 0;
+static double nav_item_cache_time = 0;
 static func_t nav_bot_want_func = 0;
 
 static void nav_ent_pos(edict_t *ent, float *pos);
@@ -3603,9 +3604,14 @@ static void PF_nav_find_goal(void)
 	Nav_EnsureBuilt();
 	if (nav_mesh == NULL) return;
 
-	/* Lazy item cache — wait until QC has classified items (item_res set) */
-	if (nav_item_count == 0)
+	/* Lazy item cache — wait until QC has classified items (item_res set).
+	   Re-cache every 10s so backpacks spawned mid-match (from bot deaths)
+	   get poly refs too, matching QC's own map_stuff() re-scan cadence. */
+	if (nav_item_count == 0 || sv.time > nav_item_cache_time + 10.0)
+	{
 		nav_cache_item_polys();
+		nav_item_cache_time = sv.time;
+	}
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;

@@ -49,11 +49,11 @@ this notice in its entirety.
 
 Map Stuff — item registry
 
-Classifies every item ONCE at map load.
-Caches objective facts on each entity:
+Classifies every item at map load, then re-scans every
+10s (see BotAI in bot_ai.qc) to catch backpacks that
+spawn mid-match. Caches objective facts on each entity:
 what resource, which pool, how much it gives.
 All string comparisons happen here, nowhere else.
-Rebuilt every 10s to catch backpacks.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -86,6 +86,7 @@ float CAP_ROCKETS	= 100;
 float CAP_CELLS		= 100;
 
 // ---- pickup amounts (engine constants) ----
+float GIVE_HEALTH_ROTTEN = 15;
 float GIVE_HEALTH_NORMAL = 25;
 float GIVE_HEALTH_MEGA	= 100;
 float GIVE_WEP_SHELLS	= 5;
@@ -143,6 +144,8 @@ void(entity it) map_classify =
 		it.item_res = RES_HEALTH; it.item_pool = POOL_HEALTH;
 		if (it.spawnflags & 2)
 		{ it.item_mag = GIVE_HEALTH_MEGA / CAP_HEALTH; it.item_respawn_dur = RESPAWN_MEGA; }
+		else if (it.spawnflags & 1)
+		{ it.item_mag = GIVE_HEALTH_ROTTEN / CAP_HEALTH; it.item_respawn_dur = RESPAWN_ITEM; }
 		else
 		{ it.item_mag = GIVE_HEALTH_NORMAL / CAP_HEALTH; it.item_respawn_dur = RESPAWN_ITEM; }
 		return;
