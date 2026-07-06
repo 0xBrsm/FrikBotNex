@@ -359,6 +359,57 @@ float(vector from, vector to) nav_hazard_between =
 	return FALSE;
 };
 
+// Opportunistic pickup radius/threshold: nav_find_goal only ever commits
+// to ONE item at a time, so a bot beelining across the map for the RL
+// walked straight past a shotgun or a health box sitting a few steps off
+// its own corridor -- picking it up costs nothing (Quake pickup is a bare
+// touch), so it's worth a small steering nudge without touching the
+// actual goal/path in the C engine.
+float NAV_SIDEGRAB_RADIUS = 150;
+float NAV_SIDEGRAB_WANT = 0.3;
+
+// Look for a high-value item near the bot that's roughly on the way to
+// this frame's steering corner `wp`. Skips the active goal itself (already
+// being pursued), anything behind us (dot product with travel direction),
+// and anything a straight line would cross lava/slime to reach.
+entity(vector wp) bot_sidegrab_scan =
+{
+	local entity e, best;
+	local float w, bestw, d;
+	local vector todir, itemdir;
+
+	todir = wp - self.origin;
+	if (vlen(todir) < 1)
+		return world;
+	todir = normalize(todir);
+
+	best = world;
+	bestw = NAV_SIDEGRAB_WANT;
+	e = findradius(self.origin, NAV_SIDEGRAB_RADIUS);
+	while (e)
+	{
+		if ((e.flags & FL_ITEM) && e.model != string_null && e != self.target1)
+		{
+			d = vlen(e.origin - self.origin);
+			if (d > 1)
+			{
+				itemdir = normalize(e.origin - self.origin);
+				if ((itemdir * todir) > 0.3 && !nav_hazard_between(self.origin, e.origin))
+				{
+					w = bot_want(e);
+					if (w > bestw)
+					{
+						bestw = w;
+						best = e;
+					}
+				}
+			}
+		}
+		e = e.chain;
+	}
+	return best;
+};
+
 // bot_get: follow cached path corridor to target item.
 // Single-authority steering: navigate() returns corner, bot walks toward it.
 // Single recovery: if no progress for 1 second, abandon goal.
@@ -410,6 +461,17 @@ void() bot_get =
 	{
 		link_type = rint(wp_z / 10000) - 1;
 		wp_z = wp_z - (link_type + 1) * 10000;
+	}
+
+	// incidental pickup: only while on plain ground corridor steering --
+	// mid-jump/drop/rj/plat/train/door the corner IS the errand, swerving
+	// off it risks missing the link entirely.
+	if (link_type == 0)
+	{
+		local entity grab;
+		grab = bot_sidegrab_scan(wp);
+		if (grab != world)
+			wp = grab.origin;
 	}
 
 	// single-authority steering: walk toward the nav corner.
