@@ -1588,6 +1588,7 @@ int nav_mesh_compute_gap_jumps(
 int nav_mesh_compute_rocket_jumps(
 	nav_mesh_runtime_t *navmesh,
 	nav_jump_validate_fn validate, void *user,
+	nav_jump_value_fn has_value, void *value_user,
 	nav_off_mesh_link_t **out_links)
 {
 	*out_links = nullptr;
@@ -1658,7 +1659,7 @@ int nav_mesh_compute_rocket_jumps(
 		nav_quake_to_recast(ql, rl);
 		nav_quake_to_recast(qh, rh);
 
-		/* New up-access: skip if the bot can already reach the high ledge
+		/* Up-access gate: skip if the bot can already reach the high ledge
 		   (an RJ shortcut over an existing climb just invites grinding). */
 		dtStatus up = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)bestHi,
 			rl, rh, &filter, path, &pc, 256);
@@ -1671,6 +1672,76 @@ int nav_mesh_compute_rocket_jumps(
 			rh, rl, &filter, path, &pc, 256);
 		if (dtStatusFailed(down) || dtStatusDetail(down, DT_PARTIAL_RESULT) || pc < 1)
 			continue;
+
+		/* Worth-it gate: skip ledges with nothing to reach.  Both prior
+		   gates already established the ledge is otherwise unreachable --
+		   but that alone isn't sufficient reason to spawn a link, since
+		   plenty of scenery nubs (monster perches, window sills) fail the
+		   same reachability probes and were never meant to be player-
+		   reachable.  Without this, those get a "rocket jump to nowhere"
+		   that a bot will actually use once it meets the health/quad gate.
+
+		   Hands over every ground centroid reachable from bestHi by walking
+		   the CURRENT graph forward (a BFS over tile->links, not the
+		   ground-only union-find used to seed candidates above), crossing
+		   already-baked door/orphan-jump/directed/gap links -- so a landing
+		   that leads into a room via one more ordinary jump still counts,
+		   not just a landing that happens to sit in the same bare-floor
+		   patch as the item.  Deliberately does NOT cross teleporters
+		   (off-mesh polys carrying NAV_AREA_WALK) or plat/train rides
+		   (NAV_AREA_PLAT): either can bridge to a totally unrelated part of
+		   the map, which would make nearly any landing "reach" nearly any
+		   item and defeat the gate (seen on e1m2: every candidate near a
+		   door found the same item three rooms away through a teleporter). */
+		if (has_value != nullptr)
+		{
+			const int npolys = tile->header->polyCount;
+			std::vector<char> seenPoly(npolys, 0);
+			std::vector<int> frontier;
+			seenPoly[bestHi] = 1;
+			frontier.push_back(bestHi);
+			for (size_t fi = 0; fi < frontier.size(); fi++)
+			{
+				int u = frontier[fi];
+				const dtPoly *pu = &tile->polys[u];
+				for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+				{
+					if (tile->links[k].ref == 0) continue;
+					unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+					if ((int)np >= npolys || seenPoly[np]) continue;
+
+					/* Off-mesh connection polys (np >= ground) need an area
+					   check before crossing: teleporters are area NAV_AREA_WALK
+					   (indistinguishable from plain ground EXCEPT that only an
+					   off-mesh conn poly can carry that area at this index range)
+					   and plat/train rides are NAV_AREA_PLAT -- both can bridge to
+					   a totally unrelated part of the map, which would make almost
+					   any RJ landing "reach" almost any item and defeat this gate
+					   entirely (seen on e1m2: every candidate near the door found
+					   the same item through a teleporter three rooms away). Only
+					   ordinary jump/drop/door links stay local enough to count as
+					   "this same neighborhood, one more hop." */
+					if ((int)np >= ground)
+					{
+						unsigned char area = tile->polys[np].getArea();
+						if (area != NAV_AREA_JUMP && area != NAV_AREA_DROP && area != NAV_AREA_DOOR)
+							continue;
+					}
+					seenPoly[np] = 1;
+					frontier.push_back((int)np);
+				}
+			}
+			std::vector<float> reachPts;
+			for (int ii = 0; ii < ground; ii++)
+			{
+				if (!seenPoly[ii]) continue;
+				reachPts.push_back(q[ii * 3 + 0]);
+				reachPts.push_back(q[ii * 3 + 1]);
+				reachPts.push_back(q[ii * 3 + 2]);
+			}
+			if (!has_value(reachPts.data(), (int)(reachPts.size() / 3), value_user))
+				continue;
+		}
 
 		links.push_back(nav_make_link(ql, qh, AI_SUPER_JUMP, 0, 32.0f));
 		seenLo.push_back(gacomp[lo] < gacomp[bestHi] ? gacomp[lo] : gacomp[bestHi]);

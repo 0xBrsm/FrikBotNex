@@ -259,6 +259,22 @@ nav_mesh_runtime_t *nav_mesh_build(
    arc).  Implemented in nav_bot.cpp via SV_Move. */
 typedef int (*nav_jump_validate_fn)(const float *from, const float *to, void *user);
 
+/* Rocket-jump-only worth-it check: does the high ledge -- or anywhere else
+   a bot can already walk to from it for free -- hold something (an item)
+   that justifies spending the risk to reach it?  'pts' is every ground-poly
+   centroid reachable from the landing by walking the CURRENT mesh graph
+   forward, including already-baked ordinary jump/drop/door links (so a
+   landing that leads into a room via one more hop still counts), but NOT
+   through teleporters or plat/train rides (those can bridge to a totally
+   unrelated part of the map, which would make nearly any landing "reach"
+   nearly any item and defeat the gate).  NULL means "always worth it" (used
+   by the cheap jump/gap/directed passes, which never gate on value).
+   Implemented in nav_bot.cpp via sv.edicts; also cross-checks candidate
+   items below the landing against the deep-drop pass's own physics
+   validator, so a coincidentally-nearby item on the far side of a wall
+   doesn't count. Returns nonzero if the ledge is worth linking to. */
+typedef int (*nav_jump_value_fn)(const float *pts, int count, void *user);
+
 /* Post-build pass: find ground components stranded from the main mesh and, for
    each, emit ONE hull-validated jump-up link reconnecting it (a ledge into an
    otherwise-unreachable area, e.g. dm4 quad).  Targeted, so it can't spray the
@@ -292,11 +308,17 @@ int nav_mesh_compute_gap_jumps(
 /* Post-build pass: add one-way rocket-jump-up links to high ledges that
    are out of run-jump reach -- but ONLY where the high end can already get
    back down some other way, so a launcher-less bot is never trapped (it
-   abandons the goal instead).  Fills *out_links (malloc'd, caller frees);
-   returns the count. */
+   abandons the goal instead), AND only where has_value confirms there's
+   actually a goal to abandon (NULL skips this check).  Without it, every
+   candidate that merely fails the up-access reachability probe gets a
+   link regardless of whether the ledge holds anything -- and reachability
+   probes fail constantly on ordinary scenery nubs (monster perches, window
+   ledges) that were never meant to be player-reachable at all.  Fills
+   *out_links (malloc'd, caller frees); returns the count. */
 int nav_mesh_compute_rocket_jumps(
 	nav_mesh_runtime_t *navmesh,
 	nav_jump_validate_fn validate, void *user,
+	nav_jump_value_fn has_value, void *value_user,
 	nav_off_mesh_link_t **out_links);
 
 /* Register level-exit points (trigger_changelevel centers) before the

@@ -840,6 +840,61 @@ static int nav_cn_is_item(const char *cn)
 	return !strncmp(cn, "item_", 5) || !strncmp(cn, "weapon_", 7);
 }
 
+/* Rocket-jump worth-it check (nav_jump_value_fn): is there an item resting
+   near ANY poly reachable from this candidate ledge by walking the current
+   mesh (nav_mesh_compute_rocket_jumps hands over that whole reachable set,
+   not just the one poly it picked as cheapest)?  Horizontal radius is
+   generous (RJ landings are approximate, and item origins float above
+   their pad).  An item at roughly the same height as the reachable point
+   counts outright; an item below it only counts if nav_deep_drop_validate
+   confirms a real walk-off fall lands there -- straight-line distance alone
+   can't tell a genuine "RJ up, then fall to the goal" chain (e2m2's rocket
+   ammo) from a scenery nub that merely happens to sit near an item on the
+   far side of a wall (e1m2's bad door link). */
+static int nav_rj_has_value(const float *pts, int count, void *user)
+{
+	int i, p;
+	(void)user;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *o = EDICT_NUM(i);
+		const char *cn;
+		if (o->free) continue;
+		cn = pr_strings + (int)o->v.classname;
+		if (!nav_cn_is_item(cn)) continue;
+		for (p = 0; p < count; p++)
+		{
+			const float *to = &pts[p * 3];
+			float dx = o->v.origin[0] - to[0];
+			float dy = o->v.origin[1] - to[1];
+			float dz = o->v.origin[2] - to[2];
+			if (dx < -150.0f || dx > 150.0f) continue;
+			if (dy < -150.0f || dy > 150.0f) continue;
+			/* Same-ledge case: item sits right on this reachable point. */
+			if (dz >= -40.0f && dz <= 96.0f)
+				return 1;
+			/* Below the ledge: don't just trust straight-line distance --
+			   a static height band can credit a scenery nub with a health
+			   kit that's actually on the far side of a wall, coincidentally
+			   almost straight down.  Run the deep-drop pass's own physics
+			   validator (walk-off + fall-column + lava check) to confirm
+			   the ledge really can fall onto this item, matching the "RJ up
+			   to a vantage, then fall to the goal" chain the deep-drop pass
+			   builds afterward (e2m2's rocket ammo under a tall scaffold). */
+			if (dz < -40.0f)
+			{
+				vec3_t item_floor;
+				item_floor[0] = o->v.origin[0];
+				item_floor[1] = o->v.origin[1];
+				item_floor[2] = nav_player_floor_z(o->v.origin[2]);
+				if (nav_deep_drop_validate(to, item_floor, NULL) == AI_DROP)
+					return 1;
+			}
+		}
+	}
+	return 0;
+}
+
 /* A spawn point or item resting on a door's top face is map-author
    evidence the door is meant to be stood on -- bake doors like that
    even when they're too narrow for the room-sized footprint test
@@ -2387,7 +2442,7 @@ void Nav_BuildForMap(void)
 	if (nav_mesh != NULL && nav_rocket_jumps_cvar.value)
 	{
 		nav_off_mesh_link_t *rlinks = NULL;
-		int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, &rlinks);
+		int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, nav_rj_has_value, NULL, &rlinks);
 		if (nr > 0)
 		{
 			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
