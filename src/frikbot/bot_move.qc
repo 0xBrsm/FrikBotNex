@@ -559,8 +559,13 @@ void() bot_get =
 		// re-validates that in between. Re-check here too, or a bot that
 		// was fine when it picked the goal can still splash itself dead
 		// executing a jump it can no longer survive.
+		//
+		// Judge survivability on effective HP (health + armor's damage-save
+		// share), same "armor counts as HP" idiom bot_fight.qc's player
+		// sizing and bot_goal.qc's CAP_ARMOR_EHP already use -- raw health
+		// alone unfairly bails a well-armored bot that's actually safe.
 		if (!(self.items & IT_ROCKET_LAUNCHER)
-			|| self.health <= 75
+			|| (self.health + self.armorvalue * self.armortype) <= 75
 			|| (self.items & IT_QUAD))
 		{
 			if (self.target1.flags & FL_ITEM)
