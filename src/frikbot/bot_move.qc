@@ -487,9 +487,22 @@ void() bot_get =
 		// on full submersion left the bot with no vertical propulsion
 		// at all for most of the climb -- it just stalled treading in
 		// place until the goal got abandoned.
+		//
+		// Pure '0 0 1' thrust only works when the exit is plumb overhead:
+		// a crossing whose opening sits off to one side just noses the
+		// ceiling forever with no horizontal correction. Keep swimming
+		// toward the corner's XY (same corridor authority as everywhere
+		// else) and add the upward bias on top, instead of discarding it.
 		if (self.waterlevel > 0)
 		{
-			self.b_wishdir = '0 0 1';
+			local vector surf_dir;
+
+			surf_dir = wp - self.origin;
+			surf_dir_z = surf_dir_z + 64;
+			if (vlen(surf_dir) > 0.1)
+				self.b_wishdir = normalize(surf_dir);
+			else
+				self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
 		}
 	}

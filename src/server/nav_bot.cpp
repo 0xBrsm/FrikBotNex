@@ -1892,9 +1892,35 @@ static int nav_link_callback(
 				/* Deep water plunge: pair it with an AI_SURFACE swim-out so the
 				   pool isn't a one-way grave.  Only when the ledge sits nearly
 				   straight above the landing (the bot swims up and steps off);
-				   a far ledge would just nose the lip underwater. */
+				   a far ledge would just nose the lip underwater.
+				   The landing being wet only proves the BOTTOM of the shaft is
+				   water -- it says nothing about the top.  A shallow pool under
+				   a tall ledge (dm5's invuln shaft: ~90u of water under a 240u
+				   drop) still passes the single-point check below, but promises
+				   a swim the water can't carry: once the bot rises above the
+				   real waterline it's back to waterlevel 1, where the engine
+				   applies full gravity and denies swim-thrust (SV_ClientThink
+				   only calls SV_WaterMove at waterlevel>=2) -- it sinks, refills
+				   to waterlevel 2, rises, and repeats forever at the same XY.
+				   Require the whole column to read water before trusting the
+				   climb. */
 				if (deep_water_drop && land_dist <= 48.0f)
-					nav_link_push(&links, &n, &cap, end, mid, AI_SURFACE, 0.0f, drop_height);
+				{
+					int column_wet = 1;
+					float cz;
+					for (cz = floors[fi] + 24.0f; cz < mid[2]; cz += 16.0f)
+					{
+						vec3_t cc;
+						cc[0] = end[0]; cc[1] = end[1]; cc[2] = cz;
+						if (SV_PointContents(cc) != CONTENTS_WATER)
+						{
+							column_wet = 0;
+							break;
+						}
+					}
+					if (column_wet)
+						nav_link_push(&links, &n, &cap, end, mid, AI_SURFACE, 0.0f, drop_height);
+				}
 
 				/* Reverse: if drop height is within jump reach, also create
 				   a jump link from the landing floor back up to the edge.
