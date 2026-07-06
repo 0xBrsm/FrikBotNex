@@ -132,6 +132,7 @@ void nav_mesh_setup_filter(dtQueryFilter *filter)
 	filter->setAreaCost(NAV_AREA_DOOR, 2.0f);
 	filter->setAreaCost(NAV_AREA_RJ, 10.0f);
 	filter->setAreaCost(NAV_AREA_NEAR_WALL, 3.0f);
+	filter->setAreaCost(NAV_AREA_HAZARD, 40.0f);
 }
 
 /* Level-exit points (trigger_changelevel volumes): a component holding
@@ -2742,6 +2743,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	int vertex_count,
 	const int *tris,
 	int triangle_count,
+	const unsigned char *tri_hazard,
 	const nav_mesh_build_config_t *config,
 	const nav_off_mesh_link_t *off_mesh_links,
 	int off_mesh_link_count,
@@ -2811,6 +2813,22 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	areas.assign(static_cast<size_t>(triangle_count), 0);
 	rcMarkWalkableTriangles(&ctx, rc_config.walkableSlopeAngle, recast_verts.data(), vertex_count, tris, triangle_count, areas.data());
+
+	/* Lava/slime ground reads walkable off the clip hull (Quake's liquid
+	   hazards are walk-through-with-damage, not solid) but should still
+	   be the pathfinder's last resort: tag it a distinct area instead of
+	   RC_WALKABLE_AREA so nav_mesh_setup_filter's steep NAV_AREA_HAZARD
+	   cost steers a bot around it whenever a dry route exists, while
+	   leaving it in the mesh (and reachable) when it's the only route
+	   in.  Only downgrades triangles rcMarkWalkableTriangles already
+	   called walkable -- never turns a too-steep face into hazard. */
+	if (tri_hazard != nullptr)
+	{
+		for (i = 0; i < triangle_count; ++i)
+			if (tri_hazard[i] && areas[i] == RC_WALKABLE_AREA)
+				areas[i] = NAV_AREA_HAZARD;
+	}
+
 	if (!rcRasterizeTriangles(&ctx, recast_verts.data(), vertex_count, tris, areas.data(), triangle_count, *guard.solid, rc_config.walkableClimb))
 	{
 		nav_set_error(error, error_size, "Failed to rasterize triangles into heightfield");

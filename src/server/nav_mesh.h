@@ -39,6 +39,8 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define NAV_AREA_DOOR      4   /* door (cost 2.0 — brief wait) */
 #define NAV_AREA_RJ        5   /* rocket jump (cost 10.0 — expensive, risky) */
 #define NAV_AREA_NEAR_WALL 6   /* within walkable_radius of wall (cost 3.0) */
+#define NAV_AREA_HAZARD    7   /* lava/slime ground (cost 40 — passable, avoided
+                                   unless it's the only route to a goal) */
 
 /* Poly flags (dtPoly.flags) for per-bot filtering.  WALK is on every
    traversable poly; RJ additionally marks rocket-jump off-mesh links so a
@@ -247,6 +249,7 @@ typedef int (*nav_mesh_link_callback_t)(
 nav_mesh_runtime_t *nav_mesh_build(
 	const float *verts, int vertex_count,
 	const int *tris, int triangle_count,
+	const unsigned char *tri_hazard, /* one byte per triangle, may be NULL */
 	const nav_mesh_build_config_t *config,
 	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
 	nav_mesh_summary_t *summary,

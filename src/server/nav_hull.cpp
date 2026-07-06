@@ -174,21 +174,54 @@ struct Builder
 	double org[3];
 	std::vector<float> verts;
 	std::vector<int> tris;
+	std::vector<unsigned char> hazard; /* one entry per triangle in tris */
 	int emitted;
 };
 
 static Builder nav_builder;
 static bool nav_builder_active = false;
 
-/* Adaptive point sample for the liquid-hazard check below: a floor face
-   coming out of the clipnode tree is only split where hull 1 sees a
-   solid/empty boundary, and lava/slime never creates one (see carve_leaf),
-   so a floor that's part dry and part lava/slime can arrive here as one
-   large, unsplit winding. A single centroid probe missed exactly that case
-   (a dry walkway sharing a face with an adjoining slime pool in dm4) --
-   recursively quarter the triangle until it's small enough that no sample
-   point can hide a hazard patch, checking hull 0 at each leaf's centroid. */
-static bool tri_touches_hazard(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int depth)
+/* Append one triangle, applying the lift-off correction, entity origin,
+   and the 24u origin->feet drop -- same per-vertex transform emit_winding
+   uses for a whole face, just for 3 verts instead of a fan. is_hazard
+   tags the triangle for nav_mesh.cpp to route into a high-cost (not
+   excluded) Detour area -- see emit_tri_dry_parts below for why hazard
+   ground is tagged rather than dropped. */
+static void emit_tri_verts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, bool is_hazard)
+{
+	V3 tri[3] = {a, c2, c3};
+	int base = (int)(b->verts.size() / 3);
+	for (int i = 0; i < 3; i++)
+	{
+		V3 p = vadd(tri[i], unlift);
+		b->verts.push_back((float)(p.x + b->org[0]));
+		b->verts.push_back((float)(p.y + b->org[1]));
+		b->verts.push_back((float)(p.z + b->org[2]) - NAV_HULL_FLOOR_DROP);
+	}
+	b->tris.push_back(base);
+	b->tris.push_back(base + 1);
+	b->tris.push_back(base + 2);
+	b->hazard.push_back(is_hazard ? 1 : 0);
+	b->emitted++;
+}
+
+/* Adaptive point sample for the liquid-hazard check: a floor face coming
+   out of the clipnode tree is only split where hull 1 sees a solid/empty
+   boundary, and lava/slime never creates one (see carve_leaf), so a floor
+   that's part dry and part lava/slime can arrive here as one large,
+   unsplit winding (dm4: a dry walkway sharing a face with an adjoining
+   slime pool). Recursively quarter the triangle until each leaf is small
+   enough that no sample point can hide a hazard OR a dry patch, checking
+   hull 0 at each leaf's centroid, and tag each leaf hazard/dry instead of
+   discarding hazard leaves outright: a real map can have an item resting
+   directly on ground that reads as lava/slime in hull 0 (slime is a
+   walk-through-with-damage hazard in Quake, not a solid wall), so
+   excluding it entirely can strand legitimate ground and anything on it.
+   nav_mesh.cpp gives hazard-tagged ground a steep pathfinding cost
+   instead, so a bot still avoids a hazard pit when a dry route exists
+   (the original dm4 complaint) but a route across it remains available
+   when it's the only way to a goal. */
+static void emit_tri_dry_parts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int depth)
 {
 	V3 e1 = vsub(c2, a), e2 = vsub(c3, a);
 	V3 cr = vcross(e1, e2);
@@ -199,11 +232,15 @@ static bool tri_touches_hazard(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int de
 		V3 m12 = vscale(vadd(a, c2), 0.5);
 		V3 m23 = vscale(vadd(c2, c3), 0.5);
 		V3 m31 = vscale(vadd(c3, a), 0.5);
-		return tri_touches_hazard(b, a, m12, m31, unlift, depth + 1)
-			|| tri_touches_hazard(b, m12, c2, m23, unlift, depth + 1)
-			|| tri_touches_hazard(b, m31, m23, c3, unlift, depth + 1)
-			|| tri_touches_hazard(b, m12, m23, m31, unlift, depth + 1);
+		emit_tri_dry_parts(b, a, m12, m31, unlift, depth + 1);
+		emit_tri_dry_parts(b, m12, c2, m23, unlift, depth + 1);
+		emit_tri_dry_parts(b, m31, m23, c3, unlift, depth + 1);
+		emit_tri_dry_parts(b, m12, m23, m31, unlift, depth + 1);
+		return;
 	}
+
+	if (area < NAV_HULL_MIN_AREA)
+		return;
 
 	V3 c = vadd(vscale(vadd(vadd(a, c2), c3), 1.0 / 3.0), unlift);
 	vec3_t p;
@@ -211,37 +248,29 @@ static bool tri_touches_hazard(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int de
 	p[1] = (float)(c.y + b->org[1]);
 	p[2] = (float)(c.z + b->org[2]);
 	int contents = SV_PointContents(p);
-	return contents == CONTENTS_LAVA || contents == CONTENTS_SLIME;
-}
+	bool is_hazard = (contents == CONTENTS_LAVA || contents == CONTENTS_SLIME);
 
-static bool winding_touches_hazard(Builder *b, const Winding &w, V3 unlift)
-{
-	for (size_t i = 1; i + 1 < w.size(); i++)
-		if (tri_touches_hazard(b, w[0], w[i], w[i + 1], unlift, 0))
-			return true;
-	return false;
+	emit_tri_verts(b, a, c2, c3, unlift, is_hazard);
 }
 
 /* Fan-triangulate and append, applying entity origin, the lift-off
-   correction, and the 24u origin->feet drop. is_floor selects the
-   liquid-hazard probe below: only faces whose normal points mostly
-   down (i.e. floors, which have solid below and open space above) are
-   candidates, so walls/ceilings skip the (expensive, and meaningless
-   for a vertical or upward-facing face) contents check. */
+   correction, and the 24u origin->feet drop. is_floor routes each fan
+   triangle through the liquid-hazard split above instead of a single
+   whole-face emission: only faces whose normal points mostly down (i.e.
+   floors, which have solid below and open space above) are candidates,
+   so walls/ceilings skip the (expensive, and meaningless for a vertical
+   or upward-facing face) contents check. */
 static void emit_winding(Builder *b, const Winding &w, V3 unlift, bool is_floor)
 {
 	if (w.size() < 3 || winding_area(w) < NAV_HULL_MIN_AREA)
 		return;
 
-	/* Hull 1's clipnodes only ever resolve to CONTENTS_SOLID/EMPTY --
-	   qbsp collapses water/slime/lava into plain EMPTY in the clip
-	   hulls (only hull 0, the render hull, keeps the distinction), so
-	   the carve_leaf skip below never actually fires and lava/slime
-	   pit floors carve out as ordinary walkable floor.  Ask hull 0
-	   (SV_PointContents) directly: it's the only tree that still knows
-	   the difference. */
-	if (is_floor && winding_touches_hazard(b, w, unlift))
+	if (is_floor)
+	{
+		for (size_t i = 1; i + 1 < w.size(); i++)
+			emit_tri_dry_parts(b, w[0], w[i], w[i + 1], unlift, 0);
 		return;
+	}
 
 	int base = (int)(b->verts.size() / 3);
 	for (size_t i = 0; i < w.size(); i++)
@@ -256,6 +285,7 @@ static void emit_winding(Builder *b, const Winding &w, V3 unlift, bool is_floor)
 		b->tris.push_back(base);
 		b->tris.push_back(base + (int)i);
 		b->tris.push_back(base + (int)i + 1);
+		b->hazard.push_back(0);
 		b->emitted++;
 	}
 }
@@ -443,6 +473,7 @@ extern "C" void nav_hull_begin(void)
 {
 	nav_builder.verts.clear();
 	nav_builder.tris.clear();
+	nav_builder.hazard.clear();
 	nav_builder.emitted = 0;
 	nav_builder_active = true;
 }
@@ -468,10 +499,12 @@ extern "C" int nav_hull_add_model(struct model_s *mod, const float *origin)
 }
 
 extern "C" int nav_hull_end(float **out_verts, int *out_vert_count,
-	int **out_tris, int *out_tri_count)
+	int **out_tris, int *out_tri_count,
+	unsigned char **out_hazard)
 {
 	*out_verts = NULL; *out_vert_count = 0;
 	*out_tris = NULL;  *out_tri_count = 0;
+	*out_hazard = NULL;
 
 	if (!nav_builder_active)
 		return 0;
@@ -479,24 +512,30 @@ extern "C" int nav_hull_end(float **out_verts, int *out_vert_count,
 
 	size_t vn = nav_builder.verts.size();
 	size_t tn = nav_builder.tris.size();
+	size_t hn = nav_builder.hazard.size();
 	if (vn == 0 || tn == 0)
 		return 0;
 
 	float *verts = (float *)malloc(vn * sizeof(float));
 	int *tris = (int *)malloc(tn * sizeof(int));
-	if (!verts || !tris)
+	unsigned char *hazard = (unsigned char *)malloc(hn * sizeof(unsigned char));
+	if (!verts || !tris || !hazard)
 	{
 		free(verts);
 		free(tris);
+		free(hazard);
 		return 0;
 	}
 	memcpy(verts, nav_builder.verts.data(), vn * sizeof(float));
 	memcpy(tris, nav_builder.tris.data(), tn * sizeof(int));
+	memcpy(hazard, nav_builder.hazard.data(), hn * sizeof(unsigned char));
 
 	*out_verts = verts;  *out_vert_count = (int)(vn / 3);
 	*out_tris = tris;    *out_tri_count = (int)(tn / 3);
+	*out_hazard = hazard;
 
 	nav_builder.verts.clear();
 	nav_builder.tris.clear();
+	nav_builder.hazard.clear();
 	return 1;
 }

@@ -13,9 +13,13 @@ struct model_s;
 void nav_hull_begin(void);
 /* origin may be NULL (worldmodel). Returns triangles emitted. */
 int nav_hull_add_model(struct model_s *mod, const float *origin);
-/* Hands back malloc'd vertex/triangle soup; resets internal state. */
+/* Hands back malloc'd vertex/triangle soup, plus a malloc'd per-triangle
+   hazard flag (1 if the triangle's centroid reads CONTENTS_LAVA/SLIME in
+   hull 0, 0 otherwise -- see nav_hull.cpp for why the mesh still carries
+   these instead of excluding them). Resets internal state. */
 int nav_hull_end(float **out_verts, int *out_vert_count,
-	int **out_tris, int *out_tri_count);
+	int **out_tris, int *out_tri_count,
+	unsigned char **out_hazard);
 
 #ifdef __cplusplus
 }
