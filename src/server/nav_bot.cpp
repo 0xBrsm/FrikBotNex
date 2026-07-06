@@ -2898,8 +2898,6 @@ void Nav_BuildForMap(void)
 	}
 
 	/* Inline diagnostics removed — see Nav_Validate() in nav_val.cpp */
-
-	/* ---- DM4 stairway connectivity probe — REMOVED ---- */
 #if 0 /* inline diagnostics moved to nav_val.cpp */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
@@ -3374,13 +3372,20 @@ static void PF_nav_stub(void)
 /* A bot may be routed onto a rocket-jump link only if it can actually pay
    for the launch: owns the launcher, has a rocket loaded, and enough health
    to survive the self-damage (>75).  Otherwise RJ links are excluded from
-   its pathing and it takes the normal route the safety gate guarantees. */
+   its pathing and it takes the normal route the safety gate guarantees.
+   Quad damage (IT_QUAD) is excluded outright regardless of health: quad
+   quadruples self-splash too (combat.qc T_Damage), turning the ~60-point
+   worst-case point-blank splash the health check budgets for into ~240 --
+   no health/armor a bot can carry survives that, so RJ is simply off the
+   table while quad is running rather than trying to raise the bar. */
 #define NAV_IT_ROCKET_LAUNCHER 32
+#define NAV_IT_QUAD 4194304
 static int nav_bot_can_rj(edict_t *bot)
 {
 	if (bot == NULL)
 		return 0;
 	return ((int)bot->v.items & NAV_IT_ROCKET_LAUNCHER)
+		&& !((int)bot->v.items & NAV_IT_QUAD)
 		&& bot->v.ammo_rockets > 0.0f
 		&& bot->v.health > 75.0f;
 }
@@ -4128,8 +4133,9 @@ static void PF_nav_report_stats(void)
 		"le_nav=%.0f le_beeline=%.0f le_combat=%.0f le_roam=%.0f tgt=%s dist=%.0f\n",
 		pr_strings + (int)bot->v.netname,
 		core[0], core[1], core[2],
-		env[0], env[1], env[2],
+		env[0], env[1],
 		lava_entries[0], lava_entries[1], lava_entries[2],
+		env[2],
 		tgt, tgt_dist);
 }
 
