@@ -20,6 +20,18 @@ this notice in its entirety.
 
 .entity avoid;
 
+// Combat strafe/retreat pick a direction purely relative to the enemy,
+// with no ground awareness (unlike bot_get(), which follows the navmesh
+// corridor and never routes over hazard floors) -- so a fight that drifts
+// near a lava/slime pit can strafe or flee a bot straight into it, with
+// nothing to pull it back out while the enemy keeps it pinned in combat.
+float(vector dir) bot_combat_hazard_ahead =
+{
+	local float c;
+	c = pointcontents(self.origin + normalize(dir) * 32);
+	return (c == CONTENT_LAVA || c == CONTENT_SLIME);
+};
+
 // -=-=- "Know thy enemy" — Opponent Modeling -=-=-
 
 void() bot_opp_model_reset =
@@ -482,7 +494,7 @@ void() bot_combat_strafe =
 	else if (foedist - 32 > ideal)
 		movedir = movedir + normalize(org - self.origin) * 0.5;
 
-	if (!frik_walkmove(movedir))
+	if (bot_combat_hazard_ahead(movedir) || !frik_walkmove(movedir))
 	{
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 		self.b_strafe_time = time + 0.1;
@@ -502,7 +514,7 @@ void() bot_retreat =
 
 
 	if (self.b_skill == 0)
-	{ if (random() < 0.3) frik_walkmove(away); return; }
+	{ if (random() < 0.3 && !bot_combat_hazard_ahead(away)) frik_walkmove(away); return; }
 
 	// team: bias toward nearest buddy
 	if (teamplay)
@@ -512,7 +524,7 @@ void() bot_retreat =
 			away = normalize(away + normalize(mate.origin - self.origin) * 0.3);
 	}
 	if (self.b_skill == 1)
-	{ frik_walkmove(away); return; }
+	{ if (!bot_combat_hazard_ahead(away)) frik_walkmove(away); return; }
 
 	// skill 2-3: angular retreat
 	makevectors(self.v_angle);
@@ -527,10 +539,11 @@ void() bot_retreat =
 	}
 
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
-	if (!frik_walkmove(movedir))
+	if (bot_combat_hazard_ahead(movedir) || !frik_walkmove(movedir))
 	{
 		movedir = normalize(away + right * self.b_strafe_dir * -0.7);
-		frik_walkmove(movedir);
+		if (!bot_combat_hazard_ahead(movedir))
+			frik_walkmove(movedir);
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 	}
 
@@ -617,9 +630,15 @@ void() bot_fight_style =
 		v1_x = v_y * -1; v1_y = v_x;
 		v2_x = v_y; v2_y = v_x * -1;
 		if (vlen(self.avoid.origin - (self.origin + v1)) < vlen(self.avoid.origin - (self.origin + v2)))
-			frik_walkmove(v2);
+		{
+			if (!bot_combat_hazard_ahead(v2)) frik_walkmove(v2);
+			else if (!bot_combat_hazard_ahead(v1)) frik_walkmove(v1);
+		}
 		else
-			frik_walkmove(v1);
+		{
+			if (!bot_combat_hazard_ahead(v1)) frik_walkmove(v1);
+			else if (!bot_combat_hazard_ahead(v2)) frik_walkmove(v2);
+		}
 		return;
 	}
 
