@@ -3575,6 +3575,13 @@ static edict_t *nav_door_opener(edict_t *ent, int depth)
 
 /* ---- nav_find_goal: pick best item, pathfind, cache path ---- */
 
+/* cost = (1-want)*dist lets want=1 zero the distance term entirely, so a
+   marginally-more-wanted item across the map beats an adequate one at the
+   bot's feet (a bot on low health would cross the whole map for red armor
+   past a nearby health pack). Flooring the want factor keeps distance a
+   real tiebreaker even when want saturates near 1. */
+#define NAV_GOAL_WANT_FLOOR 0.15f
+
 extern "C" dfunction_t *ED_FindFunction(char *name);
 extern "C" void PR_ExecuteProgram(func_t fnum);
 
@@ -3778,7 +3785,7 @@ static void PF_nav_find_goal(void)
 						if (ook)
 						{
 							dist = (float)ocount * 48.0f;
-							cost = (1.0f - want) * dist + 400.0f;
+							cost = fmaxf(1.0f - want, NAV_GOAL_WANT_FLOOR) * dist + 400.0f;
 							if (cost < bestcost)
 							{
 								bestcost = cost;
@@ -3801,7 +3808,7 @@ static void PF_nav_find_goal(void)
 				continue;
 			}
 			dist = (float)path_count * 48.0f;
-			cost = (1.0f - want) * dist;
+			cost = fmaxf(1.0f - want, NAV_GOAL_WANT_FLOOR) * dist;
 			if (bc == 2)
 				cost += 200.0f; /* opening the door costs a moment */
 		}
