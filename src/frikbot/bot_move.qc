@@ -552,7 +552,16 @@ void() bot_get =
 		// own) and grinds the link forever. Bail on the goal — the area's
 		// rocket-only items go unwanted instead of fatal, and pathing
 		// falls back to a route the bot can actually walk.
-		if (!(self.items & IT_ROCKET_LAUNCHER))
+		// Goal pick only checked health/quad once, at commit time (C side,
+		// nav_bot_can_rj). target1 sticks until the errand's done -- a fight
+		// picked up along the way can chip health well below the safe
+		// margin before the bot ever reaches the launch point, and nothing
+		// re-validates that in between. Re-check here too, or a bot that
+		// was fine when it picked the goal can still splash itself dead
+		// executing a jump it can no longer survive.
+		if (!(self.items & IT_ROCKET_LAUNCHER)
+			|| self.health <= 75
+			|| (self.items & IT_QUAD))
 		{
 			if (self.target1.flags & FL_ITEM)
 				bot_mark_failed_goal(self.target1, 30);
