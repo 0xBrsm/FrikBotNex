@@ -481,7 +481,13 @@ void() bot_get =
 	}
 	else if (link_type == AI_SURFACE)
 	{
-		if (self.waterlevel > 2)
+		// Any water contact counts: a long climb to a distant surface
+		// exit can read waterlevel 1-2 for most of the ascent (ledges,
+		// shafts that aren't uniformly full-depth), not just 3. Gating
+		// on full submersion left the bot with no vertical propulsion
+		// at all for most of the climb -- it just stalled treading in
+		// place until the goal got abandoned.
+		if (self.waterlevel > 0)
 		{
 			self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
@@ -729,8 +735,12 @@ void() bot_get =
 		stall_limit = 1 / sv_ticrate;
 		// lift links: zero XY progress is normal while waiting for and
 		// riding the plat — budget a full return + ride cycle (~8s)
-		// before declaring the goal dead
-		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
+		// before declaring the goal dead. Surface links get the same
+		// budget: a long vertical swim can cover corridor-corner
+		// distance slower than dry running, and shouldn't be judged
+		// against the same 1s window.
+		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN
+			|| link_type == AI_SURFACE)
 			stall_limit = stall_limit * 8;
 		if (self._progress_stall > stall_limit)
 		{
