@@ -296,12 +296,12 @@ void() armor_touch =
 	if (other.armortype*other.armorvalue >= type*value)
 		return;
 
-	if (!other.ishuman)
-		nav_log_pickup(self, other);
-
 	other.armortype = type;
 	other.armorvalue = value;
 	other.items = other.items - (other.items & (IT_ARMOR1 | IT_ARMOR2 | IT_ARMOR3)) + bit;
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	self.solid = SOLID_NOT;
 	self.model = string_null;
@@ -493,9 +493,6 @@ void() weapon_touch =
 	else
 		objerror ("weapon_touch: unknown classname");
 
-	if (!other.ishuman)
-		nav_log_pickup(self, other);
-
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
 	sprint (other, "\n");
@@ -520,6 +517,9 @@ void() weapon_touch =
 	W_SetCurrentAmmo();
 
 	self = stemp;
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	if (leave)
 		return;
@@ -1109,9 +1109,6 @@ void() powerup_touch =
 	if (other.health <= 0)
 		return;
 
-	if (!other.ishuman)
-		nav_log_pickup(self, other);
-
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
 	sprint (other,"\n");
@@ -1159,6 +1156,9 @@ void() powerup_touch =
 		other.super_time = 1;
 		other.super_damage_finished = time + 30;
 	}
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	activator = other;
 	// fire all targets / killtargets
@@ -1266,9 +1266,6 @@ void() BackpackTouch =
 	if (other.health <= 0)
 		return;
 
-	if (!other.ishuman)
-		nav_log_pickup(self, other);
-
 	acount = 0;
 	sprint (other, "You get ");
 
@@ -1299,6 +1296,9 @@ void() BackpackTouch =
 	other.items = other.items | new;
 
 	bound_other_ammo ();
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	if (self.ammo_shells)
 	{

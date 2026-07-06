@@ -3726,15 +3726,6 @@ static void PF_nav_find_goal(void)
 		dbg_pathed++;
 
 		{
-			eval_t *mag = GetEdictFieldValue(it, "item_mag");
-			if (mag && mag->_float > top_mag_val)
-			{
-				top_mag_val = mag->_float;
-				top_mag_it = it;
-			}
-		}
-
-		{
 			edict_t *blocker = NULL;
 			int bc = nav_path_block_class(path, path_count, bot, &blocker);
 			if (bc == 1)
@@ -3817,6 +3808,19 @@ static void PF_nav_find_goal(void)
 			cost = fmaxf(1.0f - want, NAV_GOAL_WANT_FLOOR) * dist;
 			if (bc == 2)
 				cost += 200.0f; /* opening the door costs a moment */
+		}
+
+		/* Highest-magnitude item actually walkable right now (not stuck
+		   behind a closed door) -- tracked after the block check so the
+		   SKIPPED telemetry never blames the scorer for passing up a
+		   prize that wasn't reachable without a detour in the first place. */
+		{
+			eval_t *mag = GetEdictFieldValue(it, "item_mag");
+			if (mag && mag->_float > top_mag_val)
+			{
+				top_mag_val = mag->_float;
+				top_mag_it = it;
+			}
 		}
 
 		/* Log each reachable item's cost breakdown */
