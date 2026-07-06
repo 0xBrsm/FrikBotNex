@@ -43,6 +43,8 @@ const double NAV_HULL_BOX_PAD    = 64.0;     /* carve box beyond model bounds */
 const double NAV_HULL_FACE_LIFT  = 0.5;      /* lift off plane for neighbor test */
 const double NAV_HULL_MIN_AREA   = 0.5;
 const float  NAV_HULL_FLOOR_DROP = 24.0f;    /* hull-1 floor -> feet level */
+const double NAV_HULL_HAZARD_SAMPLE_AREA = 1024.0; /* subdivide until a tri is ~32x32 or smaller */
+const int    NAV_HULL_HAZARD_MAX_DEPTH   = 8;      /* recursion cap for degenerate slivers */
 
 struct V3
 {
@@ -178,11 +180,67 @@ struct Builder
 static Builder nav_builder;
 static bool nav_builder_active = false;
 
+/* Adaptive point sample for the liquid-hazard check below: a floor face
+   coming out of the clipnode tree is only split where hull 1 sees a
+   solid/empty boundary, and lava/slime never creates one (see carve_leaf),
+   so a floor that's part dry and part lava/slime can arrive here as one
+   large, unsplit winding. A single centroid probe missed exactly that case
+   (a dry walkway sharing a face with an adjoining slime pool in dm4) --
+   recursively quarter the triangle until it's small enough that no sample
+   point can hide a hazard patch, checking hull 0 at each leaf's centroid. */
+static bool tri_touches_hazard(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int depth)
+{
+	V3 e1 = vsub(c2, a), e2 = vsub(c3, a);
+	V3 cr = vcross(e1, e2);
+	double area = 0.5 * sqrt(vdot(cr, cr));
+
+	if (area > NAV_HULL_HAZARD_SAMPLE_AREA && depth < NAV_HULL_HAZARD_MAX_DEPTH)
+	{
+		V3 m12 = vscale(vadd(a, c2), 0.5);
+		V3 m23 = vscale(vadd(c2, c3), 0.5);
+		V3 m31 = vscale(vadd(c3, a), 0.5);
+		return tri_touches_hazard(b, a, m12, m31, unlift, depth + 1)
+			|| tri_touches_hazard(b, m12, c2, m23, unlift, depth + 1)
+			|| tri_touches_hazard(b, m31, m23, c3, unlift, depth + 1)
+			|| tri_touches_hazard(b, m12, m23, m31, unlift, depth + 1);
+	}
+
+	V3 c = vadd(vscale(vadd(vadd(a, c2), c3), 1.0 / 3.0), unlift);
+	vec3_t p;
+	p[0] = (float)(c.x + b->org[0]);
+	p[1] = (float)(c.y + b->org[1]);
+	p[2] = (float)(c.z + b->org[2]);
+	int contents = SV_PointContents(p);
+	return contents == CONTENTS_LAVA || contents == CONTENTS_SLIME;
+}
+
+static bool winding_touches_hazard(Builder *b, const Winding &w, V3 unlift)
+{
+	for (size_t i = 1; i + 1 < w.size(); i++)
+		if (tri_touches_hazard(b, w[0], w[i], w[i + 1], unlift, 0))
+			return true;
+	return false;
+}
+
 /* Fan-triangulate and append, applying entity origin, the lift-off
-   correction, and the 24u origin->feet drop. */
-static void emit_winding(Builder *b, const Winding &w, V3 unlift)
+   correction, and the 24u origin->feet drop. is_floor selects the
+   liquid-hazard probe below: only faces whose normal points mostly
+   down (i.e. floors, which have solid below and open space above) are
+   candidates, so walls/ceilings skip the (expensive, and meaningless
+   for a vertical or upward-facing face) contents check. */
+static void emit_winding(Builder *b, const Winding &w, V3 unlift, bool is_floor)
 {
 	if (w.size() < 3 || winding_area(w) < NAV_HULL_MIN_AREA)
+		return;
+
+	/* Hull 1's clipnodes only ever resolve to CONTENTS_SOLID/EMPTY --
+	   qbsp collapses water/slime/lava into plain EMPTY in the clip
+	   hulls (only hull 0, the render hull, keeps the distinction), so
+	   the carve_leaf skip below never actually fires and lava/slime
+	   pit floors carve out as ordinary walkable floor.  Ask hull 0
+	   (SV_PointContents) directly: it's the only tree that still knows
+	   the difference. */
+	if (is_floor && winding_touches_hazard(b, w, unlift))
 		return;
 
 	int base = (int)(b->verts.size() / 3);
@@ -204,7 +262,7 @@ static void emit_winding(Builder *b, const Winding &w, V3 unlift)
 
 /* Push a (lifted) face winding through the clipnode tree and emit only
    the pieces that land in solid leaves — the true hull boundary. */
-static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unlift)
+static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unlift, bool is_floor)
 {
 	Winding cur = w;
 	while (cur.size() >= 3)
@@ -212,7 +270,7 @@ static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unli
 		if (node_num < 0)
 		{
 			if (node_num == CONTENTS_SOLID || node_num == CONTENTS_SKY)
-				emit_winding(b, cur, unlift);
+				emit_winding(b, cur, unlift, is_floor);
 			return;
 		}
 
@@ -226,7 +284,7 @@ static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unli
 		Winding back = clip_winding(cur, n, d);
 
 		if (front.size() >= 3)
-			emit_solid_parts(b, node->children[0], front, unlift);
+			emit_solid_parts(b, node->children[0], front, unlift, is_floor);
 		node_num = node->children[1];
 		cur.swap(back);
 	}
@@ -236,8 +294,13 @@ static void carve_leaf(Builder *b, int contents, const Polytope &poly)
 {
 	if (contents == CONTENTS_SOLID || contents == CONTENTS_SKY)
 		return;
-	/* Lava/slime polytopes: skipping them leaves pit floors out of the
-	   mesh entirely, matching the old render-face extraction. */
+	/* This never actually fires: qbsp collapses water/slime/lava into
+	   plain CONTENTS_EMPTY in the clip hulls (hull 1/2), so hull 1's
+	   clipnode tree can't tell a dry floor from a lava-pit floor.  The
+	   real hazard filter is the SV_PointContents probe in emit_winding,
+	   which asks hull 0 (the only tree that keeps the distinction).
+	   Kept as a cheap no-op guard in case some qbsp variant ever does
+	   preserve liquid leaves in the clip hulls. */
 	if (contents == CONTENTS_LAVA || contents == CONTENTS_SLIME)
 		return;
 
@@ -251,13 +314,18 @@ static void carve_leaf(Builder *b, int contents, const Polytope &poly)
 
 		/* Lift slightly toward the neighbor so tree classification is
 		   unambiguous; emit_winding shifts back. */
-		V3 lift = vscale(f.n, NAV_HULL_FACE_LIFT / sqrt(vdot(f.n, f.n)));
+		double f_n_len = sqrt(vdot(f.n, f.n));
+		V3 lift = vscale(f.n, NAV_HULL_FACE_LIFT / f_n_len);
 		Winding lifted;
 		lifted.reserve(f.w.size());
 		for (size_t k = 0; k < f.w.size(); k++)
 			lifted.push_back(vadd(f.w[k], lift));
 
-		emit_solid_parts(b, b->hull->firstclipnode, lifted, vscale(lift, -1.0));
+		/* Face normal points out of the empty polytope, into the solid
+		   (module doc above) -- a floor has solid BELOW it, so its
+		   normal points down, not up. */
+		bool is_floor = (f.n.z / f_n_len) < -0.7;
+		emit_solid_parts(b, b->hull->firstclipnode, lifted, vscale(lift, -1.0), is_floor);
 	}
 }
 

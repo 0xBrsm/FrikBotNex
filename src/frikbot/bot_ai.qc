@@ -288,7 +288,6 @@ void() bot_debug_metrics =
 		else if (self._m_move_mode == MM_BEELINE) self._m_le_beeline = self._m_le_beeline + 1;
 		else if (self._m_move_mode == MM_COMBAT) self._m_le_combat = self._m_le_combat + 1;
 		else self._m_le_roam = self._m_le_roam + 1;
-
 	}
 	self._m_was_lava = on_lava;
 

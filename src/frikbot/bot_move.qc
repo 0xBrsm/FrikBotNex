@@ -333,6 +333,32 @@ void(entity g, float dur) bot_mark_failed_goal =
 	self._failed_goal_time = time + dur;
 };
 
+// Sample a straight line in 32u steps for lava/slime. The navmesh never
+// carves walkable polys over hazard floors, so a corridor never routes
+// through one on purpose — but the last-stretch beeline in bot_get()
+// below bypasses the mesh entirely, and a goal sitting across a lava
+// pool (an item on a mid-pool island with no path in) is close enough
+// as the crow flies to trigger it.
+float(vector from, vector to) nav_hazard_between =
+{
+	local vector dir;
+	local float dist, step, c;
+
+	dist = vlen(to - from);
+	if (dist < 1)
+		return FALSE;
+	dir = (to - from) * (1 / dist);
+	step = 0;
+	while (step <= dist)
+	{
+		c = pointcontents(from + dir * step);
+		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
+			return TRUE;
+		step = step + 32;
+	}
+	return FALSE;
+};
+
 // bot_get: follow cached path corridor to target item.
 // Single-authority steering: navigate() returns corner, bot walks toward it.
 // Single recovery: if no progress for 1 second, abandon goal.
@@ -366,7 +392,8 @@ void() bot_get =
 		// pick/drop loop pins the bot in place at 20Hz.
 		local vector gc;
 		gc = (self.target1.absmin + self.target1.absmax) * 0.5;
-		if (self.target1 != self && vlen(gc - self.origin) < 128)
+		if (self.target1 != self && vlen(gc - self.origin) < 128
+			&& !nav_hazard_between(self.origin, gc))
 			wp = gc;
 		else
 		{
