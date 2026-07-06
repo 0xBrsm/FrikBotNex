@@ -564,8 +564,14 @@ void() bot_get =
 		// share), same "armor counts as HP" idiom bot_fight.qc's player
 		// sizing and bot_goal.qc's CAP_ARMOR_EHP already use -- raw health
 		// alone unfairly bails a well-armored bot that's actually safe.
+		//
+		// Worst case self-splash: T_RadiusDamage's rocket blast is 120,
+		// points = 120 - 0.5*dist, halved again for self-hits (combat.qc) --
+		// at point-blank (dist=0) that's a flat 60, before armor. Require
+		// double that (120) so a bot that survives worst-case still has a
+		// real buffer left over, not just barely positive HP.
 		if (!(self.items & IT_ROCKET_LAUNCHER)
-			|| (self.health + self.armorvalue * self.armortype) <= 75
+			|| (self.health + self.armorvalue * self.armortype) <= 120
 			|| (self.items & IT_QUAD))
 		{
 			if (self.target1.flags & FL_ITEM)
