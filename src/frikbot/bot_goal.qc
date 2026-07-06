@@ -294,7 +294,7 @@ float(entity it) bot_want =
 {
 	local float has, need, w;
 	local float hp, ap, survival;
-	local float best_tier, best_ammo, combat;
+	local float best_tier, combat;
 
 	// bot state: two axes
 	hp = self.health / CAP_HEALTH;
@@ -303,21 +303,52 @@ float(entity it) bot_want =
 	if (ap > 1) ap = 1;
 	survival = hp * (0.5 + ap * 0.5);
 
+	// best_tier: highest-tier weapon owned (armament quality, ammo aside).
+	// combat: best tier×ammo product across ALL owned weapons, not just
+	// the top-tier one — a bot holding an empty RL and a full-ammo SNG is
+	// combat-ready via the SNG, not helpless. An else-if chain here only
+	// ever looked at the single highest-tier gun's ammo, so an empty top
+	// weapon zeroed combat outright and made every ammo/weapon want spike
+	// as if the bot had nothing, even carrying a fully-loaded backup.
+	local float t;
 	best_tier = 0;
-	best_ammo = 0;
+	combat = 0;
 	if (self.items & IT_ROCKET_LAUNCHER)
-	{	best_tier = 1.0; best_ammo = self.ammo_rockets / CAP_ROCKETS; }
-	else if (self.items & IT_LIGHTNING)
-	{	best_tier = 1.0; best_ammo = self.ammo_cells / CAP_CELLS; }
-	else if (self.items & IT_GRENADE_LAUNCHER)
-	{	best_tier = 0.5; best_ammo = self.ammo_rockets / CAP_ROCKETS; }
-	else if (self.items & IT_SUPER_NAILGUN)
-	{	best_tier = 0.5; best_ammo = self.ammo_nails / CAP_NAILS; }
-	else if (self.items & IT_NAILGUN)
-	{	best_tier = 0.15; best_ammo = self.ammo_nails / CAP_NAILS; }
-	else if (self.items & IT_SUPER_SHOTGUN)
-	{	best_tier = 0.15; best_ammo = self.ammo_shells / CAP_SHELLS; }
-	combat = best_tier * best_ammo;
+	{
+		if (1.0 > best_tier) best_tier = 1.0;
+		t = 1.0 * (self.ammo_rockets / CAP_ROCKETS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_LIGHTNING)
+	{
+		if (1.0 > best_tier) best_tier = 1.0;
+		t = 1.0 * (self.ammo_cells / CAP_CELLS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_GRENADE_LAUNCHER)
+	{
+		if (0.5 > best_tier) best_tier = 0.5;
+		t = 0.5 * (self.ammo_rockets / CAP_ROCKETS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_SUPER_NAILGUN)
+	{
+		if (0.5 > best_tier) best_tier = 0.5;
+		t = 0.5 * (self.ammo_nails / CAP_NAILS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_NAILGUN)
+	{
+		if (0.15 > best_tier) best_tier = 0.15;
+		t = 0.15 * (self.ammo_nails / CAP_NAILS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_SUPER_SHOTGUN)
+	{
+		if (0.15 > best_tier) best_tier = 0.15;
+		t = 0.15 * (self.ammo_shells / CAP_SHELLS);
+		if (t > combat) combat = t;
+	}
 
 	// how much of this resource does the bot already have?
 	has = bot_has(it);

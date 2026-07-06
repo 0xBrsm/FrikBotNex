@@ -51,6 +51,8 @@ this notice in its entirety.
 .float _nav_pin_strikes;  // consecutive dead 2s windows
 .entity _failed_goal;     // goal abandoned after a stall (engine skips it)
 .float _failed_goal_time; // cooldown expiry for _failed_goal
+.entity _failed_goal2;     // second-most-recent abandoned goal (engine skips it too)
+.float _failed_goal_time2; // cooldown expiry for _failed_goal2
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
 .entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
@@ -310,6 +312,27 @@ void() bot_build_movevect =
 
 // ---- Navigation ----
 
+// bot_mark_failed_goal: cool a goal down so the deterministic scorer can't
+// immediately re-pick it. Two slots, not one: a single slot only ever
+// remembers the LAST failure, so when the top two candidates both fail to
+// path/arrive, cooling one just promotes the other into best-pick, which
+// then fails and re-cools, evicting the first the moment its own timer
+// still has 0-10s left — the two ping-pong forever. Rotating the old
+// slot-1 entry into slot-2 (only if it's still live) means both recent
+// failures stay skipped at once, so the scorer has to fall through to a
+// goal it can actually make progress on.
+void(entity g, float dur) bot_mark_failed_goal =
+{
+	if (self._failed_goal != world && self._failed_goal != g
+		&& self._failed_goal_time > time)
+	{
+		self._failed_goal2 = self._failed_goal;
+		self._failed_goal_time2 = self._failed_goal_time;
+	}
+	self._failed_goal = g;
+	self._failed_goal_time = time + dur;
+};
+
 // bot_get: follow cached path corridor to target item.
 // Single-authority steering: navigate() returns corner, bot walks toward it.
 // Single recovery: if no progress for 1 second, abandon goal.
@@ -334,8 +357,24 @@ void() bot_get =
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
 	{
-		self.target1 = world;
-		return;
+		// Corridor says "arrived" (within 32u of the nav target) or died.
+		// Arriving is NOT the errand: items need a touch, buttons a press.
+		// If the goal entity is right here, walk the last stretch at its
+		// center — the progress stall below cools it if we never connect.
+		// Anything else is a dead corridor: cool the goal before dropping,
+		// or the deterministic scorer re-picks it next frame and the
+		// pick/drop loop pins the bot in place at 20Hz.
+		local vector gc;
+		gc = (self.target1.absmin + self.target1.absmax) * 0.5;
+		if (self.target1 != self && vlen(gc - self.origin) < 128)
+			wp = gc;
+		else
+		{
+			if (self.target1 != world && self.target1 != self)
+				bot_mark_failed_goal(self.target1, 10);
+			self.target1 = world;
+			return;
+		}
 	}
 
 	// decode off-mesh link type from Z encoding: z' = z + 10000*(1+type)
@@ -427,10 +466,7 @@ void() bot_get =
 		if (!(self.items & IT_ROCKET_LAUNCHER))
 		{
 			if (self.target1.flags & FL_ITEM)
-			{
-				self._failed_goal = self.target1;
-				self._failed_goal_time = time + 30;
-			}
+				bot_mark_failed_goal(self.target1, 30);
 			self.target1 = world;
 			return;
 		}
@@ -683,10 +719,7 @@ void() bot_get =
 				self._progress_stall = 0;
 				self._progress_best = 99999;
 				if (self.target1 != world && self.target1 != self)
-				{
-					self._failed_goal = self.target1;
-					self._failed_goal_time = time + 10;
-				}
+					bot_mark_failed_goal(self.target1, 10);
 				self.target1 = world;
 				return;
 			}
@@ -740,10 +773,7 @@ void() bot_get =
 			// same jam. Cool ANY real goal, not just items — a func_button
 			// opener the bot can't reach is re-picked every frame otherwise.
 			if (self.target1 != world && self.target1 != self)
-			{
-				self._failed_goal = self.target1;
-				self._failed_goal_time = time + 10;
-			}
+				bot_mark_failed_goal(self.target1, 10);
 			self.target1 = world;
 			return;
 		}

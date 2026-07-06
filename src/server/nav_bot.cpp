@@ -3629,16 +3629,32 @@ static void PF_nav_find_goal(void)
 
 	bestcost = 999999.0f;
 	best = sv.edicts;
+	float best_want = 0.0f;
 
-	/* Failed-goal cooldown: QC marks the goal it stalled on; skip it so
-	   the deterministic scorer can't immediately re-pick it and recreate
-	   the same jam. */
+	/* Highest-magnitude reachable candidate, tracked purely for the
+	   GOAL_PICK telemetry line (src/tools/ffa_triage.py) -- did the
+	   scorer pass up a bigger prize for something cheaper? */
+	edict_t *top_mag_it = NULL;
+	float top_mag_val = 0.0f;
+
+	/* Failed-goal cooldown: QC marks the goal(s) it stalled on; skip them
+	   so the deterministic scorer can't immediately re-pick and recreate
+	   the same jam. Two slots (see bot_mark_failed_goal in bot_move.qc):
+	   with only one, cooling the top candidate just promotes the runner-up,
+	   which fails the same way and evicts the first the moment its own
+	   cooldown still has time left -- the two ping-pong forever. */
 	edict_t *failed_goal = NULL;
+	edict_t *failed_goal2 = NULL;
 	{
 		eval_t *fg = GetEdictFieldValue(bot, "_failed_goal");
 		eval_t *fgt = GetEdictFieldValue(bot, "_failed_goal_time");
 		if (fg && fgt && fgt->_float > sv.time && fg->edict)
 			failed_goal = PROG_TO_EDICT(fg->edict);
+
+		eval_t *fg2 = GetEdictFieldValue(bot, "_failed_goal2");
+		eval_t *fgt2 = GetEdictFieldValue(bot, "_failed_goal_time2");
+		if (fg2 && fgt2 && fgt2->_float > sv.time && fg2->edict)
+			failed_goal2 = PROG_TO_EDICT(fg2->edict);
 	}
 
 	int dbg_avail = 0, dbg_wanted = 0, dbg_pathed = 0, dbg_blocked = 0;
@@ -3647,7 +3663,7 @@ static void PF_nav_find_goal(void)
 	{
 		it = nav_item_cache[i].ent;
 		if (it->free) continue;
-		if (it == failed_goal) continue;
+		if (it == failed_goal || it == failed_goal2) continue;
 
 		if ((int)it->v.flags & FL_ITEM)
 			if (!it->v.model) continue;
@@ -3697,6 +3713,15 @@ static void PF_nav_find_goal(void)
 		dbg_pathed++;
 
 		{
+			eval_t *mag = GetEdictFieldValue(it, "item_mag");
+			if (mag && mag->_float > top_mag_val)
+			{
+				top_mag_val = mag->_float;
+				top_mag_it = it;
+			}
+		}
+
+		{
 			edict_t *blocker = NULL;
 			int bc = nav_path_block_class(path, path_count, bot, &blocker);
 			if (bc == 1)
@@ -3708,7 +3733,7 @@ static void PF_nav_find_goal(void)
 				   goal pass routes straight through. */
 				edict_t *opener = blocker ? nav_door_opener(blocker, 0) : NULL;
 				int routed = 0;
-				if (opener && opener != failed_goal)
+				if (opener && opener != failed_goal && opener != failed_goal2)
 				{
 					float oq[3], orc[3], onear[3];
 					float oext[3] = {64.0f, 128.0f, 64.0f};
@@ -3758,6 +3783,7 @@ static void PF_nav_find_goal(void)
 							{
 								bestcost = cost;
 								best = opener;
+								best_want = want;
 								best_path_count = ocount;
 								memcpy(best_path, opath, (size_t)ocount * sizeof(dtPolyRef));
 								memcpy(best_goal_rc, onear, sizeof(float) * 3);
@@ -3796,6 +3822,7 @@ static void PF_nav_find_goal(void)
 		{
 			bestcost = cost;
 			best = it;
+			best_want = want;
 			best_path_count = path_count;
 			memcpy(best_path, path, (size_t)path_count * sizeof(dtPolyRef));
 			memcpy(best_goal_rc, nav_item_cache[i].nav_pos, sizeof(float) * 3);
@@ -3873,6 +3900,29 @@ static void PF_nav_find_goal(void)
 				best = bot; /* sentinel: have a corridor, no item */
 			}
 		}
+	}
+
+	/* GOAL_PICK telemetry for the FFA decision-quality timeline tool
+	   (src/tools/ffa_triage.py) -- always-on like NAVSTAT, one line per
+	   real decision (nav_find_goal only runs when the bot has no goal).
+	   Skipped for the no-goal and roam-sentinel cases; those aren't item
+	   decisions. skip_item/skip_val are blank/0 when the highest-mag
+	   reachable candidate is the one actually picked. */
+	if (best != sv.edicts && best != bot)
+	{
+		eval_t *best_mag_ev = GetEdictFieldValue(best, "item_mag");
+		float best_mag = best_mag_ev ? best_mag_ev->_float : 0.0f;
+		const char *skip_item = "";
+		float skip_val = 0.0f;
+		if (top_mag_it && top_mag_it != best && top_mag_val > best_mag)
+		{
+			skip_item = pr_strings + (int)top_mag_it->v.classname;
+			skip_val = top_mag_val;
+		}
+		Con_Printf("GOAL_PICK time=%.1f bot=%s item=%s want=%.2f cost=%.0f skip_item=%s skip_mag=%.2f\n",
+			sv.time, pr_strings + (int)bot->v.netname,
+			pr_strings + (int)best->v.classname, best_want, bestcost,
+			skip_item, skip_val);
 	}
 
 	/* Load winning path into corridor */
@@ -4107,10 +4157,48 @@ static void PF_nav_debug_event(void)
 		fwd_tr.fraction, fwd_tr.plane.normal[0], fwd_tr.plane.normal[1], fwd_tr.plane.normal[2], fwd_cn);
 }
 
+/* void nav_log_damage(entity targ, entity attacker, float amount) = #94
+   Structured telemetry for the FFA decision-quality timeline tool
+   (src/tools/ffa_triage.py) -- combat events, always-on like NAVSTAT. */
+static void PF_nav_log_damage(void)
+{
+	edict_t *targ = G_EDICT(OFS_PARM0);
+	edict_t *attacker = G_EDICT(OFS_PARM1);
+	float amount = G_FLOAT(OFS_PARM2);
+
+	Con_Printf("DAMAGE time=%.1f target=%s attacker=%s amount=%.0f health=%.0f armor=%.0f\n",
+		sv.time,
+		pr_strings + (int)targ->v.netname,
+		pr_strings + (int)attacker->v.netname,
+		amount, targ->v.health, targ->v.armorvalue);
+}
+
+/* void nav_log_pickup(entity item, entity bot) = #95
+   Structured telemetry for the FFA decision-quality timeline tool.
+   item_res/item_mag come from bot_goal.qc's map_classify; a freshly
+   spawned backpack not yet classified will log res=0 mag=0.00.
+   self is the item (touch-function convention), so the toucher must
+   be passed explicitly rather than read off pr_global_struct->self. */
+static void PF_nav_log_pickup(void)
+{
+	edict_t *item = G_EDICT(OFS_PARM0);
+	edict_t *bot = G_EDICT(OFS_PARM1);
+
+	eval_t *res = GetEdictFieldValue(item, "item_res");
+	eval_t *mag = GetEdictFieldValue(item, "item_mag");
+
+	Con_Printf("PICKUP time=%.1f bot=%s item=%s res=%.0f mag=%.2f health=%.0f armor=%.0f\n",
+		sv.time,
+		pr_strings + (int)bot->v.netname,
+		pr_strings + (int)item->v.classname,
+		res ? res->_float : 0.0f, mag ? mag->_float : 0.0f,
+		bot->v.health, bot->v.armorvalue);
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 14
+#define NAV_BUILTIN_COUNT 16
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -4139,6 +4227,8 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_stub;     /* was nav_link_info */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 14] = PF_nav_log_damage;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 15] = PF_nav_log_pickup;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

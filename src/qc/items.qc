@@ -190,6 +190,9 @@ void() health_touch =
 			return;
 	}
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	sprint(other, "You receive ");
 	s = ftos(self.healamount);
 	sprint(other, s);
@@ -292,6 +295,9 @@ void() armor_touch =
 	}
 	if (other.armortype*other.armorvalue >= type*value)
 		return;
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	other.armortype = type;
 	other.armorvalue = value;
@@ -487,6 +493,9 @@ void() weapon_touch =
 	else
 		objerror ("weapon_touch: unknown classname");
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
 	sprint (other, "\n");
@@ -664,6 +673,9 @@ void() ammo_touch =
 	}
 
 	bound_other_ammo ();
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
@@ -1097,6 +1109,9 @@ void() powerup_touch =
 	if (other.health <= 0)
 		return;
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
 	sprint (other,"\n");
@@ -1250,6 +1265,9 @@ void() BackpackTouch =
 		return;
 	if (other.health <= 0)
 		return;
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	acount = 0;
 	sprint (other, "You get ");
