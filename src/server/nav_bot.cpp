@@ -2376,170 +2376,196 @@ void Nav_BuildForMap(void)
 		}
 	}
 
-	/* Third pass: complete one-way connectivity.  Runs on the mesh that
-	   already has teleport/plat/orphan links, so it can see which areas can
-	   only be entered or only exited, and add the missing direction. */
-	if (nav_mesh != NULL && nav_directed_links_cvar.value)
+	/* Passes 3-7 add connectivity in a fixed order, but a later pass can
+	   newly unblock an earlier one: gap-jumps stitching together a broken
+	   staircase's tiny, mutually-unlinked ground fragments can hand
+	   directed-links a forward-reachable neighbor it didn't have on the
+	   first try, and a rocket-jump/swim/deep-drop link can do the same for
+	   some other pocket.  Each pass already iterates its OWN rounds to a
+	   fixpoint; loop the whole block too so a chain across pass TYPES gets
+	   fully resolved as well (e4m6's RL ledge needs exactly this: gap-jumps
+	   must bridge a stair fragment before directed-links can find its IN
+	   link).  Bounded rounds -- a mesh with nothing left to fix converges
+	   in one extra no-op round. */
+	int conn_round = 0;
+	bool conn_progress = true;
+	while (nav_mesh != NULL && conn_progress && conn_round++ < 2)
 	{
-		nav_off_mesh_link_t *dlinks = NULL;
-		int nd = nav_mesh_compute_directed_links(nav_mesh, nav_link_validate, NULL, &dlinks);
-		if (nd > 0)
-		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nd) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, dlinks, (size_t)nd * sizeof(*entity_links));
-			entity_count += nd;
-			free(dlinks);
+		conn_progress = false;
 
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+		/* Third pass: complete one-way connectivity.  Runs on the mesh that
+		   already has teleport/plat/orphan links, so it can see which areas
+		   can only be entered or only exited, and add the missing
+		   direction. */
+		if (nav_mesh != NULL && nav_directed_links_cvar.value)
+		{
+			nav_off_mesh_link_t *dlinks = NULL;
+			int nd = nav_mesh_compute_directed_links(nav_mesh, nav_link_validate, NULL, &dlinks);
+			if (nd > 0)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(tri_hazard); free(entity_links);
-				return;
+				entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+					(size_t)(entity_count + nd) * sizeof(*entity_links));
+				memcpy(entity_links + entity_count, dlinks, (size_t)nd * sizeof(*entity_links));
+				entity_count += nd;
+				free(dlinks);
+				conn_progress = true;
+
+				nav_mesh_destroy(nav_mesh);
+				memset(&summary, 0, sizeof(summary));
+				memset(error, 0, sizeof(error));
+				nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
+					&config, entity_links, entity_count, &summary,
+					nav_link_callback, NULL, error, sizeof(error));
+				if (nav_mesh == NULL)
+				{
+					Con_Printf("Nav: rebuild failed: %s\n", error);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
 			}
 		}
-	}
 
-	/* Fourth pass: bridge local connectivity gaps.  Runs last, on the mesh
-	   with every other link in place, so its findPath gate sees the real
-	   graph and only adds a run-jump where two ledges still have no route
-	   between them (dm3 wp62->wp63). */
-	if (nav_mesh != NULL && nav_gap_jumps_cvar.value)
-	{
-		nav_off_mesh_link_t *glinks = NULL;
-		int ng = nav_mesh_compute_gap_jumps(nav_mesh, nav_link_validate, NULL, &glinks);
-		if (ng > 0)
+		/* Fourth pass: bridge local connectivity gaps.  Runs on the mesh
+		   with every other link in place, so its findPath gate sees the
+		   real graph and only adds a run-jump where two ledges still have
+		   no route between them (dm3 wp62->wp63). */
+		if (nav_mesh != NULL && nav_gap_jumps_cvar.value)
 		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + ng) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, glinks, (size_t)ng * sizeof(*entity_links));
-			entity_count += ng;
-			free(glinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+			nav_off_mesh_link_t *glinks = NULL;
+			int ng = nav_mesh_compute_gap_jumps(nav_mesh, nav_link_validate, NULL, &glinks);
+			if (ng > 0)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(tri_hazard); free(entity_links);
-				return;
+				entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+					(size_t)(entity_count + ng) * sizeof(*entity_links));
+				memcpy(entity_links + entity_count, glinks, (size_t)ng * sizeof(*entity_links));
+				entity_count += ng;
+				free(glinks);
+				conn_progress = true;
+
+				nav_mesh_destroy(nav_mesh);
+				memset(&summary, 0, sizeof(summary));
+				memset(error, 0, sizeof(error));
+				nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
+					&config, entity_links, entity_count, &summary,
+					nav_link_callback, NULL, error, sizeof(error));
+				if (nav_mesh == NULL)
+				{
+					Con_Printf("Nav: rebuild failed: %s\n", error);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
 			}
 		}
-	}
 
-	/* Fifth pass: rocket-jump links to high ledges out of run-jump reach,
-	   gated so the high end can already get back down (no launcher-less
-	   trap).  Runs last so its reachability gate sees every other link. */
-	if (nav_mesh != NULL && nav_rocket_jumps_cvar.value)
-	{
-		nav_off_mesh_link_t *rlinks = NULL;
-		int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, nav_rj_has_value, NULL, &rlinks);
-		if (nr > 0)
+		/* Fifth pass: rocket-jump links to high ledges out of run-jump
+		   reach, gated so the high end can already get back down (no
+		   launcher-less trap).  Sees every link added so far. */
+		if (nav_mesh != NULL && nav_rocket_jumps_cvar.value)
 		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nr) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, rlinks, (size_t)nr * sizeof(*entity_links));
-			entity_count += nr;
-			free(rlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+			nav_off_mesh_link_t *rlinks = NULL;
+			int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, nav_rj_has_value, NULL, &rlinks);
+			if (nr > 0)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(tri_hazard); free(entity_links);
-				return;
+				entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+					(size_t)(entity_count + nr) * sizeof(*entity_links));
+				memcpy(entity_links + entity_count, rlinks, (size_t)nr * sizeof(*entity_links));
+				entity_count += nr;
+				free(rlinks);
+				conn_progress = true;
+
+				nav_mesh_destroy(nav_mesh);
+				memset(&summary, 0, sizeof(summary));
+				memset(error, 0, sizeof(error));
+				nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
+					&config, entity_links, entity_count, &summary,
+					nav_link_callback, NULL, error, sizeof(error));
+				if (nav_mesh == NULL)
+				{
+					Con_Printf("Nav: rebuild failed: %s\n", error);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
 			}
 		}
-	}
 
-	/* Sixth pass: bidirectional swim links across components whose rims
-	   connect through fully-submerged water (e4m8 canal tunnel, end's
-	   underwater ledge).  Runs before the deep drops: a water landing's
-	   only way OUT is often a swim (e3m5's hole floor swims to the wind
-	   tunnel), and the drop pass's no-trap gate must see that route. */
-	if (nav_mesh != NULL && nav_swim_links_cvar.value)
-	{
-		nav_off_mesh_link_t *swlinks = NULL;
-		int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
-		if (nsw > 0)
+		/* Sixth pass: bidirectional swim links across components whose
+		   rims connect through fully-submerged water (e4m8 canal tunnel,
+		   end's underwater ledge).  Runs before the deep drops: a water
+		   landing's only way OUT is often a swim (e3m5's hole floor swims
+		   to the wind tunnel), and the drop pass's no-trap gate must see
+		   that route. */
+		if (nav_mesh != NULL && nav_swim_links_cvar.value)
 		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nsw) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
-			entity_count += nsw;
-			free(swlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+			nav_off_mesh_link_t *swlinks = NULL;
+			int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
+			if (nsw > 0)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(tri_hazard); free(entity_links);
-				return;
+				entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+					(size_t)(entity_count + nsw) * sizeof(*entity_links));
+				memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
+				entity_count += nsw;
+				free(swlinks);
+				conn_progress = true;
+
+				nav_mesh_destroy(nav_mesh);
+				memset(&summary, 0, sizeof(summary));
+				memset(error, 0, sizeof(error));
+				nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
+					&config, entity_links, entity_count, &summary,
+					nav_link_callback, NULL, error, sizeof(error));
+				if (nav_mesh == NULL)
+				{
+					Con_Printf("Nav: rebuild failed: %s\n", error);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
 			}
 		}
-	}
 
-	/* Seventh pass: deep one-way drops (past the boundary detector's 192u
-	   cap) into lower regions with no other way in, gated on the landing
-	   already having a way back OUT.  Runs after every other link pass so
-	   both its no-access and no-trap findPath gates see the real graph. */
-	if (nav_mesh != NULL && nav_deep_drops_cvar.value)
-	{
-		/* Iterate to fixpoint: a pit whose only exit is itself a deep drop
-		   (e3m5's ogre platform over the hole) fails the no-trap gate on the
-		   first round -- its escape link doesn't exist yet.  Once round 1
-		   adds the outbound drop, round 2 can accept the inbound one.  The
-		   no-access gate skips already-linked pairs, so rounds never
-		   duplicate. */
-		int ddround;
-		for (ddround = 0; ddround < 3; ddround++)
+		/* Seventh pass: deep one-way drops (past the boundary detector's
+		   192u cap) into lower regions with no other way in, gated on the
+		   landing already having a way back OUT.  Runs after every other
+		   link pass in the round so both its no-access and no-trap
+		   findPath gates see the real graph. */
+		if (nav_mesh != NULL && nav_deep_drops_cvar.value)
 		{
-			nav_off_mesh_link_t *ddlinks = NULL;
-			int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
-			if (ndd <= 0)
-				break;
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + ndd) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
-			entity_count += ndd;
-			free(ddlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+			/* Iterate to fixpoint: a pit whose only exit is itself a deep
+			   drop (e3m5's ogre platform over the hole) fails the no-trap
+			   gate on the first round -- its escape link doesn't exist
+			   yet.  Once round 1 adds the outbound drop, round 2 can
+			   accept the inbound one.  The no-access gate skips
+			   already-linked pairs, so rounds never duplicate. */
+			int ddround;
+			for (ddround = 0; ddround < 3; ddround++)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(tri_hazard); free(entity_links);
-				return;
+				nav_off_mesh_link_t *ddlinks = NULL;
+				int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
+				if (ndd <= 0)
+					break;
+				entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+					(size_t)(entity_count + ndd) * sizeof(*entity_links));
+				memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
+				entity_count += ndd;
+				free(ddlinks);
+				conn_progress = true;
+
+				nav_mesh_destroy(nav_mesh);
+				memset(&summary, 0, sizeof(summary));
+				memset(error, 0, sizeof(error));
+				nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
+					&config, entity_links, entity_count, &summary,
+					nav_link_callback, NULL, error, sizeof(error));
+				if (nav_mesh == NULL)
+				{
+					Con_Printf("Nav: rebuild failed: %s\n", error);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
 			}
 		}
 	}
