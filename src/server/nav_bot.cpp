@@ -1085,12 +1085,14 @@ static int nav_door_held_open(edict_t *e)
    See nav_hull.cpp for why hull geometry instead of render faces. */
 static int nav_extract_bsp(model_t *worldmodel,
 	float **out_verts, int *out_vert_count,
-	int **out_tris, int *out_tri_count)
+	int **out_tris, int *out_tri_count,
+	unsigned char **out_hazard)
 {
 	int i;
 
 	*out_verts = NULL; *out_vert_count = 0;
 	*out_tris = NULL;  *out_tri_count = 0;
+	*out_hazard = NULL;
 	if (!worldmodel) return 0;
 
 	nav_hull_begin();
@@ -1114,7 +1116,7 @@ static int nav_extract_bsp(model_t *worldmodel,
 	}
 
 	{
-		int ok = nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count);
+		int ok = nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count, out_hazard);
 		const char *box = getenv("NAV_DUMP_TRIS");
 		if (ok && box)
 		{
@@ -2232,6 +2234,7 @@ void Nav_BuildForMap(void)
 	int vert_count = 0;
 	int *tris = NULL;
 	int tri_count = 0;
+	unsigned char *tri_hazard = NULL;
 	char error[256];
 	double t_start, t_done;
 
@@ -2247,7 +2250,7 @@ void Nav_BuildForMap(void)
 	   link validation then match the raster exactly. */
 	nav_doors_open_for_build();
 
-	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count))
+	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count, &tri_hazard))
 	{
 		Con_Printf("Nav: BSP extraction failed\n");
 		nav_doors_restore();
@@ -2328,7 +2331,7 @@ void Nav_BuildForMap(void)
 	   detected mid-build via callback after contours are ready. */
 	memset(&summary, 0, sizeof(summary));
 	memset(error, 0, sizeof(error));
-	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 		&config, entity_links, entity_count, &summary,
 		nav_jump_links_cvar.value ? nav_link_callback : NULL, NULL,
 		error, sizeof(error));
@@ -2337,7 +2340,7 @@ void Nav_BuildForMap(void)
 	{
 		Con_Printf("Nav: build failed: %s\n", error);
 		nav_doors_restore();
-		free(verts); free(tris); free(entity_links);
+		free(verts); free(tris); free(tri_hazard); free(entity_links);
 		return;
 	}
 
@@ -2360,14 +2363,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2391,14 +2394,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2423,14 +2426,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2454,14 +2457,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2487,14 +2490,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2528,14 +2531,14 @@ void Nav_BuildForMap(void)
 			nav_mesh_destroy(nav_mesh);
 			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
+			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
 				&config, entity_links, entity_count, &summary,
 				nav_link_callback, NULL, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
@@ -2545,6 +2548,7 @@ void Nav_BuildForMap(void)
 
 	free(verts);
 	free(tris);
+	free(tri_hazard);
 	free(entity_links);
 
 	nav_build_block_map();
