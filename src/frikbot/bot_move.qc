@@ -452,8 +452,16 @@ float(vector from, vector to) nav_hazard_between =
 // its own corridor -- picking it up costs nothing (Quake pickup is a bare
 // touch), so it's worth a small steering nudge without touching the
 // actual goal/path in the C engine.
+// The scorer's own eligibility floor for a PRIMARY goal is want>0.01
+// (nav_bot.cpp PF_nav_find_goal) -- 0.3 here meant a bot would happily
+// cross the map for an item worth 0.1-0.3 as its main goal, yet walk
+// right past that same item sitting on its current path. Set the grab
+// floor just above the scorer's noise floor instead, so "on the way"
+// items are judged by roughly the same bar as "worth a special trip"
+// items -- only truly negligible wants (nearly-topped-off ammo/armor)
+// get skipped.
 float NAV_SIDEGRAB_RADIUS = 150;
-float NAV_SIDEGRAB_WANT = 0.3;
+float NAV_SIDEGRAB_WANT = 0.05;
 
 // Look for a high-value item near the bot that's roughly on the way to
 // this frame's steering corner `wp`. Skips the active goal itself (already
