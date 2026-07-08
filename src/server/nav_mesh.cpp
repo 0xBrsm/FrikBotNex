@@ -1698,6 +1698,7 @@ int nav_mesh_compute_rocket_jumps(
 		{
 			const int npolys = tile->header->polyCount;
 			std::vector<char> seenPoly(npolys, 0);
+			std::vector<char> hopUsed(npolys, 0);
 			std::vector<int> frontier;
 			seenPoly[bestHi] = 1;
 			frontier.push_back(bestHi);
@@ -1721,14 +1722,33 @@ int nav_mesh_compute_rocket_jumps(
 					   entirely (seen on e1m2: every candidate near the door found
 					   the same item through a teleporter three rooms away). Only
 					   ordinary jump/drop/door links stay local enough to count as
-					   "this same neighborhood, one more hop." */
+					   "this same neighborhood, one more hop."
+
+					   That hop budget has to actually be enforced, not just
+					   type-filtered: walking within a component once crossed is
+					   unrestricted below (ordinary ground-to-ground links aren't
+					   hop-limited), so without a cap the walk can cross a SECOND,
+					   THIRD, etc. door/jump/drop out of that component and cascade
+					   through the whole level one legitimate-looking hop at a
+					   time -- the same "any item counts as reachable" failure the
+					   type filter above was meant to prevent, just via a chain of
+					   ordinary links instead of one teleporter (seen on e1m2: a
+					   landing on top of a hallway door chained through a second
+					   door deep into the map and credited an item rooms away that
+					   was never actually near the landing). Cap crossings to one:
+					   once a poly has been reached via an off-mesh hop, it can
+					   still be walked freely, but can't cross another. */
+					char nextHop = hopUsed[u];
 					if ((int)np >= ground)
 					{
 						unsigned char area = tile->polys[np].getArea();
 						if (area != NAV_AREA_JUMP && area != NAV_AREA_DROP && area != NAV_AREA_DOOR)
 							continue;
+						if (hopUsed[u] >= 1) continue;
+						nextHop = hopUsed[u] + 1;
 					}
 					seenPoly[np] = 1;
+					hopUsed[np] = nextHop;
 					frontier.push_back((int)np);
 				}
 			}

@@ -870,9 +870,29 @@ static int nav_rj_has_value(const float *pts, int count, void *user)
 			float dz = o->v.origin[2] - to[2];
 			if (dx < -150.0f || dx > 150.0f) continue;
 			if (dy < -150.0f || dy > 150.0f) continue;
-			/* Same-ledge case: item sits right on this reachable point. */
+			/* Same-ledge case: item sits roughly at this reachable point's
+			   height. Straight-line XY/Z proximity alone isn't enough --
+			   a thin wall or door can put an item in an adjoining room
+			   within the same box without there being any walkable route
+			   between them (e1m2: a hallway-door ledge credited a key and
+			   rockets sitting one room over, through the wall, spawning a
+			   rocket jump that dead-ends at the door with nothing to
+			   reach). A raw findPath isn't enough either -- the whole map
+			   is connected, so any item is technically "reachable" by
+			   some long way around; that would make this check pass for
+			   virtually everything.  Cap the path to a handful of polys
+			   so only a genuinely-local, direct hop counts, not a trek
+			   across the level. */
 			if (dz >= -40.0f && dz <= 96.0f)
-				return 1;
+			{
+				vec3_t item_pos;
+				nav_ent_pos(o, item_pos);
+				nav_mesh_path_result_t pr;
+				char perr[64];
+				if (nav_mesh_find_path(nav_mesh, to, item_pos, &pr, perr, sizeof(perr))
+					&& pr.path_ref_count <= 5)
+					return 1;
+			}
 			/* Below the ledge: don't just trust straight-line distance --
 			   a static height band can credit a scenery nub with a health
 			   kit that's actually on the far side of a wall, coincidentally
