@@ -4320,6 +4320,23 @@ extern "C" int nav_mesh_get_link_type(
 	return navmesh->links[idx].link_type;
 }
 
+extern "C" int nav_mesh_get_link_index(
+	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref)
+{
+	const dtOffMeshConnection *con;
+	int idx;
+
+	if (navmesh == nullptr || navmesh->navmesh == nullptr || poly_ref == 0)
+		return -1;
+	con = navmesh->navmesh->getOffMeshConnectionByRef(static_cast<dtPolyRef>(poly_ref));
+	if (con == nullptr)
+		return -1;
+	idx = static_cast<int>(con->userId);
+	if (idx < 0 || idx >= navmesh->link_count)
+		return -1;
+	return idx;
+}
+
 extern "C" void nav_mesh_destroy(nav_mesh_runtime_t *navmesh)
 {
 	if (navmesh == nullptr)
@@ -4704,6 +4721,12 @@ extern "C" int nav_corridor_length(const nav_corridor_t *c)
 {
 	if (c == nullptr) return 0;
 	return c->corridor.getPathCount();
+}
+
+extern "C" unsigned long long nav_corridor_pending_link(const nav_corridor_t *c)
+{
+	if (c == nullptr) return 0;
+	return static_cast<unsigned long long>(c->pending_link_ref);
 }
 
 /* ---- Heightfield probing ---- */

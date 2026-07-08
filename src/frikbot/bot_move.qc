@@ -49,6 +49,16 @@ this notice in its entirety.
 .float _nav_pin;          // next net-displacement check (corner-independent)
 .vector _nav_pin_org;     // position at last check
 .float _nav_pin_strikes;  // consecutive dead 2s windows
+// Link-execution timeout: a bot repeatedly failing to CLEAR an off-mesh
+// link (bounces off a ledge trying to make a jump, say) can still show
+// corner-distance improvement and net displacement every cycle -- both
+// the _progress_stall and _nav_pin_strikes recovery signals above reset
+// on that motion and never latch. Track continuous wall-clock time spent
+// mid-link on the SAME corner instead; motion within the attempt doesn't
+// reset it, only actually clearing the link (link_type -> 0) or the
+// corridor advancing to a new corner does.
+.float _link_exec_start;  // time continuous execution of the current link began, 0 if none
+.vector _link_exec_wp;    // corner the current link timer belongs to
 // Failed-goal cooldown ring: 4 slots, each remembering a distinct
 // abandoned goal's cooldown expiry AND a strike count for exponential
 // backoff (engine skips any goal still on cooldown). 4 slots instead of
@@ -794,6 +804,37 @@ void() bot_get =
 			}
 		}
 	}
+
+	// Link-execution timeout: give up on a link the bot can't actually
+	// clear, even while it's visibly moving (an approach/jump/bounce-back
+	// cycle keeps inching the corner-distance closer and displacing real
+	// position every retry, so neither recovery signal below ever
+	// latches). Only the "must be committed and repeatedly attempting"
+	// link types apply -- WALK bridges belong here too (no execution
+	// step at all, see the e1m2 off-mesh ping-pong fix), but plat/train/
+	// surface links are excused: standing still there is the CORRECT
+	// behavior (waiting for a ride, or a long swim), already budgeted by
+	// the 8x stall_limit below, and this timer would misfire on it.
+	if (link_type == AI_JUMP || link_type == AI_DROP
+		|| link_type == AI_SUPER_JUMP || link_type == AI_WALK)
+	{
+		if (self._link_exec_start == 0 || vlen(wp - self._link_exec_wp) > 32)
+		{
+			self._link_exec_start = time;
+			self._link_exec_wp = wp;
+		}
+		else if (time - self._link_exec_start > 8)
+		{
+			nav_fail_current_link();
+			self._link_exec_start = 0;
+			if (self.target1 != world && self.target1 != self)
+				bot_mark_failed_goal(self.target1, 10);
+			self.target1 = world;
+			return;
+		}
+	}
+	else
+		self._link_exec_start = 0;
 
 	// progress check: not getting closer to corner? abandon.
 	// Off-mesh links get 3x timeout (bot may be doing controlled approach).

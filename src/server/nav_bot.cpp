@@ -133,6 +133,29 @@ static struct {
 } nav_block_map[NAV_MAX_BLOCK_ENTITIES];
 static int nav_block_map_count = 0;
 
+/* Per-link temporary failure cooldown: a bot that gives up repeatedly
+   failing to execute a specific off-mesh link (see nav_fail_current_link)
+   marks it here so nobody -- this bot or any other -- routes through it
+   again until the cooldown expires.  Indexed by link index (== build-time
+   userId, see nav_mesh_get_link_index), sized to nav_mesh->link_count. */
+static float *nav_link_fail_until = NULL;
+static int nav_link_fail_count = 0;
+
+#define NAV_LINK_FAIL_COOLDOWN 15.0f
+
+static void nav_link_fail_reset(void)
+{
+	free(nav_link_fail_until);
+	nav_link_fail_until = NULL;
+	nav_link_fail_count = 0;
+	if (nav_mesh != NULL)
+	{
+		nav_link_fail_count = nav_mesh->link_count;
+		if (nav_link_fail_count > 0)
+			nav_link_fail_until = (float *)calloc((size_t)nav_link_fail_count, sizeof(float));
+	}
+}
+
 static int nav_bot_slot(void)
 {
 	edict_t *e = PROG_TO_EDICT(pr_global_struct->self);
@@ -2598,6 +2621,7 @@ void Nav_BuildForMap(void)
 	free(entity_links);
 
 	nav_build_block_map();
+	nav_link_fail_reset();
 
 	t_done = Sys_FloatTime();
 	Con_Printf("Nav: %.3fs, %d polys, %d entity links\n",
@@ -3360,6 +3384,9 @@ void Nav_Shutdown(void)
 	nav_bot_want_func = 0;
 	nav_block_map_count = 0;
 	nav_blocked.count = 0;
+	free(nav_link_fail_until);
+	nav_link_fail_until = NULL;
+	nav_link_fail_count = 0;
 	if (nav_mesh != NULL)
 	{
 		nav_mesh_destroy(nav_mesh);
@@ -3536,6 +3563,22 @@ static void PF_nav_path_steer(void)
 	if (flags & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
 	{
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
+
+		/* A link a bot recently gave up on (see PF_nav_fail_current_link)
+		   is still cooling down -- report a dead corridor (0 0 0) instead
+		   of steering back onto it.  QC's existing dead-corridor handling
+		   in bot_get() then abandons the goal cleanly rather than the bot
+		   walking straight back into the same link it just failed. */
+		int idx = nav_mesh_get_link_index(nav_mesh, ref);
+		if (idx >= 0 && idx < nav_link_fail_count
+			&& sv.time < nav_link_fail_until[idx])
+		{
+			G_FLOAT(OFS_RETURN + 0) = 0.0f;
+			G_FLOAT(OFS_RETURN + 1) = 0.0f;
+			G_FLOAT(OFS_RETURN + 2) = 0.0f;
+			return;
+		}
+
 		if (lt > 0)
 		{
 			/* Multiplicative encoding so QC can recover both type and
@@ -3544,6 +3587,40 @@ static void PF_nav_path_steer(void)
 			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f * (1.0f + (float)lt);
 		}
 	}
+}
+
+
+/* void nav_fail_current_link(entity bot) = #96
+   Mark the off-mesh link the bot is currently mid-traversal on (if any) as
+   temporarily failed: nobody routes through it or steers onto it again for
+   NAV_LINK_FAIL_COOLDOWN seconds.  Called from QC when a bot has spent too
+   long stuck executing the same link (e.g. repeatedly failing a jump) --
+   see the continuous-time-in-link-execution check in bot_get(). Distinct
+   from the existing net-displacement stall check: a bot can be genuinely
+   "moving" (bouncing off a ledge) while still never clearing the link. */
+static void PF_nav_fail_current_link(void)
+{
+	int slot;
+	unsigned long long ref;
+	int idx;
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_bot_corridors[slot] == NULL) return;
+	if (nav_mesh == NULL) return;
+
+	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	if (ref == 0) return;
+
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_link_fail_count) return;
+
+	if (nav_debug_cvar.value)
+		Con_Printf("LINKFAIL bot=%s link=%d cooldown=%.0fs\n",
+			pr_strings + (int)PROG_TO_EDICT(pr_global_struct->self)->v.netname,
+			idx, NAV_LINK_FAIL_COOLDOWN);
+
+	nav_link_fail_until[idx] = sv.time + NAV_LINK_FAIL_COOLDOWN;
 }
 
 
@@ -4355,7 +4432,7 @@ static void PF_nav_log_pickup(void)
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 16
+#define NAV_BUILTIN_COUNT 17
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -4386,6 +4463,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 14] = PF_nav_log_damage;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 15] = PF_nav_log_pickup;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 16] = PF_nav_fail_current_link;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

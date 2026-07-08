@@ -216,6 +216,13 @@ const nav_off_mesh_link_t *nav_mesh_get_link(
 int nav_mesh_get_link_type(
 	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref);
 
+/* Look up the build-time link index (== dtOffMeshConnection::userId) for an
+   off-mesh connection polygon.  This is the index nav_mesh_get_link() and a
+   per-link runtime side-table (e.g. temporary failure cooldowns) key on.
+   Returns -1 if not an off-mesh connection. */
+int nav_mesh_get_link_index(
+	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref);
+
 /* Heightfield probe: check if a point (Quake coords) is blocked by solid
    geometry. Returns 1 if there is a solid span (wall) between floor_z and
    floor_z + walkable_height at this XY. Returns 0 if clear/open. */
@@ -450,6 +457,12 @@ int nav_corridor_offmesh(nav_corridor_t *c,
 
 /* Get corridor length (number of polys remaining). */
 int nav_corridor_length(const nav_corridor_t *c);
+
+/* Poly ref of the off-mesh link the corridor is currently mid-traversal on
+   (see nav_corridor_s::pending_link_ref), or 0 if none.  Lets callers tag
+   "the link I'm on right now" -- e.g. to cool it down after a bot gives up
+   repeatedly failing to execute it. */
+unsigned long long nav_corridor_pending_link(const nav_corridor_t *c);
 
 /* Waypoint-vs-navmesh validation (nav_val.cpp) */
 void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname);

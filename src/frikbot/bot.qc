@@ -92,6 +92,7 @@ void(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) n
 void(float streak, string tgt, float tgt_dist) nav_debug_event = #93;
 void(entity targ, entity attacker, float amount) nav_log_damage = #94;
 void(entity item, entity bot) nav_log_pickup = #95;
+void()					nav_fail_current_link = #96;
 float		nav_booted;
 
 // off-mesh link types — must match the AI_* enum in src/server/nav_mesh.h
