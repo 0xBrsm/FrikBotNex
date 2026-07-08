@@ -49,10 +49,17 @@ this notice in its entirety.
 .float _nav_pin;          // next net-displacement check (corner-independent)
 .vector _nav_pin_org;     // position at last check
 .float _nav_pin_strikes;  // consecutive dead 2s windows
-.entity _failed_goal;     // goal abandoned after a stall (engine skips it)
-.float _failed_goal_time; // cooldown expiry for _failed_goal
-.entity _failed_goal2;     // second-most-recent abandoned goal (engine skips it too)
-.float _failed_goal_time2; // cooldown expiry for _failed_goal2
+// Failed-goal cooldown ring: 4 slots, each remembering a distinct
+// abandoned goal's cooldown expiry AND a strike count for exponential
+// backoff (engine skips any goal still on cooldown). 4 slots instead of
+// 2 so a 3-4 item cycle can't evict an unexpired cooldown early -- a
+// 2-slot "remember the most recent 2 distinct failures" scheme forgets
+// the 1st failure's remaining cooldown the instant a 3rd distinct goal
+// fails, letting the bot immediately re-pick it and repeat the cycle.
+.entity _fg0; .float _fg0_time; .float _fg0_strikes;
+.entity _fg1; .float _fg1_time; .float _fg1_strikes;
+.entity _fg2; .float _fg2_time; .float _fg2_strikes;
+.entity _fg3; .float _fg3_time; .float _fg3_strikes;
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
 .entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
@@ -312,25 +319,105 @@ void() bot_build_movevect =
 
 // ---- Navigation ----
 
+// Exponential backoff, like a rate limiter: a goal that keeps failing
+// gets pushed further out of rotation each time (base, base*2, base*4...)
+// instead of a flat cooldown the deterministic scorer just re-picks the
+// instant it expires. Capped so a truly cursed goal goes quiet for a
+// while but is never written off forever -- a respawn, a jam clearing,
+// or the bot picking up gear that unlocks a new link could all make it
+// reachable again later.
+float BOT_FAILED_GOAL_CAP = 120;
+float(float base, float strikes) bot_backoff_dur =
+{
+	local float d, i;
+	d = base;
+	i = 1;
+	while (i < strikes)
+	{
+		d = d * 2;
+		i = i + 1;
+	}
+	if (d > BOT_FAILED_GOAL_CAP)
+		d = BOT_FAILED_GOAL_CAP;
+	return d;
+};
+
 // bot_mark_failed_goal: cool a goal down so the deterministic scorer can't
-// immediately re-pick it. Two slots, not one: a single slot only ever
-// remembers the LAST failure, so when the top two candidates both fail to
-// path/arrive, cooling one just promotes the other into best-pick, which
-// then fails and re-cools, evicting the first the moment its own timer
-// still has 0-10s left — the two ping-pong forever. Rotating the old
-// slot-1 entry into slot-2 (only if it's still live) means both recent
-// failures stay skipped at once, so the scorer has to fall through to a
-// goal it can actually make progress on.
+// immediately re-pick it. 4-slot ring (see field comments above) so a
+// 3-4 item cycle can't evict an unexpired cooldown early. Re-failing a
+// goal still tracked in a slot escalates its cooldown (exponential
+// backoff); a goal that's gone quiet for a while (>60s past its last
+// cooldown) is treated as a fresh, one-off blip instead of carrying
+// forward old strikes.
+float BOT_FAILED_GOAL_DECAY = 60;
 void(entity g, float dur) bot_mark_failed_goal =
 {
-	if (self._failed_goal != world && self._failed_goal != g
-		&& self._failed_goal_time > time)
+	if (self._fg0 == g)
 	{
-		self._failed_goal2 = self._failed_goal;
-		self._failed_goal_time2 = self._failed_goal_time;
+		if (time > self._fg0_time + BOT_FAILED_GOAL_DECAY)
+			self._fg0_strikes = 0;
+		self._fg0_strikes = self._fg0_strikes + 1;
+		self._fg0_time = time + bot_backoff_dur(dur, self._fg0_strikes);
+		return;
 	}
-	self._failed_goal = g;
-	self._failed_goal_time = time + dur;
+	if (self._fg1 == g)
+	{
+		if (time > self._fg1_time + BOT_FAILED_GOAL_DECAY)
+			self._fg1_strikes = 0;
+		self._fg1_strikes = self._fg1_strikes + 1;
+		self._fg1_time = time + bot_backoff_dur(dur, self._fg1_strikes);
+		return;
+	}
+	if (self._fg2 == g)
+	{
+		if (time > self._fg2_time + BOT_FAILED_GOAL_DECAY)
+			self._fg2_strikes = 0;
+		self._fg2_strikes = self._fg2_strikes + 1;
+		self._fg2_time = time + bot_backoff_dur(dur, self._fg2_strikes);
+		return;
+	}
+	if (self._fg3 == g)
+	{
+		if (time > self._fg3_time + BOT_FAILED_GOAL_DECAY)
+			self._fg3_strikes = 0;
+		self._fg3_strikes = self._fg3_strikes + 1;
+		self._fg3_time = time + bot_backoff_dur(dur, self._fg3_strikes);
+		return;
+	}
+
+	// New distinct failure: evict whichever slot frees up soonest --
+	// that's the one with the least remaining cooldown to lose.
+	local float evict, evict_time;
+	evict = 0;
+	evict_time = self._fg0_time;
+	if (self._fg1_time < evict_time) { evict = 1; evict_time = self._fg1_time; }
+	if (self._fg2_time < evict_time) { evict = 2; evict_time = self._fg2_time; }
+	if (self._fg3_time < evict_time) { evict = 3; evict_time = self._fg3_time; }
+
+	if (evict == 0)
+	{
+		self._fg0 = g;
+		self._fg0_time = time + dur;
+		self._fg0_strikes = 1;
+	}
+	else if (evict == 1)
+	{
+		self._fg1 = g;
+		self._fg1_time = time + dur;
+		self._fg1_strikes = 1;
+	}
+	else if (evict == 2)
+	{
+		self._fg2 = g;
+		self._fg2_time = time + dur;
+		self._fg2_strikes = 1;
+	}
+	else
+	{
+		self._fg3 = g;
+		self._fg3_time = time + dur;
+		self._fg3_strikes = 1;
+	}
 };
 
 // Sample a straight line in 32u steps for lava/slime. The navmesh never
@@ -412,7 +499,9 @@ entity(vector wp) bot_sidegrab_scan =
 
 // bot_get: follow cached path corridor to target item.
 // Single-authority steering: navigate() returns corner, bot walks toward it.
-// Single recovery: if no progress for 1 second, abandon goal.
+// Recovery: corner-distance stalling for ~1s abandons the goal only if the
+// bot also isn't net-displacing; otherwise the net-displacement pin check
+// (real position, corner-independent) is the deciding signal.
 void() bot_get =
 {
 	local vector wp, steer;
@@ -900,6 +989,17 @@ void() bot_get =
 			}
 			self._progress_stall = 0;
 			self._progress_best = 99999;
+			// Corner-distance stalling isn't proof of being stuck: a
+			// corner that flips between two candidates, a wall-slide
+			// around an obstacle, or sidestepping another bot can all
+			// stall THIS metric for a second while the bot is clearly
+			// still going somewhere. Only abandon here if the bot also
+			// isn't actually displacing -- otherwise defer to the
+			// net-displacement pin check above (real position over a 2s
+			// window, corner-independent), which is the more honest
+			// "truly stuck" signal.
+			if (vlen(self.origin - self._nav_pin_org) > 48)
+				return;
 			// Cool the goal down: the scorer is deterministic, so an
 			// immediate re-pick chooses the same goal and re-creates the
 			// same jam. Cool ANY real goal, not just items — a func_button

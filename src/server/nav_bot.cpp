@@ -3768,22 +3768,22 @@ static void PF_nav_find_goal(void)
 
 	/* Failed-goal cooldown: QC marks the goal(s) it stalled on; skip them
 	   so the deterministic scorer can't immediately re-pick and recreate
-	   the same jam. Two slots (see bot_mark_failed_goal in bot_move.qc):
-	   with only one, cooling the top candidate just promotes the runner-up,
-	   which fails the same way and evicts the first the moment its own
-	   cooldown still has time left -- the two ping-pong forever. */
-	edict_t *failed_goal = NULL;
-	edict_t *failed_goal2 = NULL;
+	   the same jam. 4-slot ring (see bot_mark_failed_goal in bot_move.qc)
+	   with exponential per-goal backoff: a 2-slot "remember the most
+	   recent 2 distinct failures" scheme forgets the 1st failure's
+	   remaining cooldown the instant a 3rd distinct goal fails, letting
+	   the scorer immediately re-pick it and repeat a 3+-item cycle. */
+	edict_t *failed_goal[4] = { NULL, NULL, NULL, NULL };
 	{
-		eval_t *fg = GetEdictFieldValue(bot, "_failed_goal");
-		eval_t *fgt = GetEdictFieldValue(bot, "_failed_goal_time");
-		if (fg && fgt && fgt->_float > sv.time && fg->edict)
-			failed_goal = PROG_TO_EDICT(fg->edict);
-
-		eval_t *fg2 = GetEdictFieldValue(bot, "_failed_goal2");
-		eval_t *fgt2 = GetEdictFieldValue(bot, "_failed_goal_time2");
-		if (fg2 && fgt2 && fgt2->_float > sv.time && fg2->edict)
-			failed_goal2 = PROG_TO_EDICT(fg2->edict);
+		static char *fg_fields[4] = { "_fg0", "_fg1", "_fg2", "_fg3" };
+		static char *fgt_fields[4] = { "_fg0_time", "_fg1_time", "_fg2_time", "_fg3_time" };
+		for (int s = 0; s < 4; s++)
+		{
+			eval_t *fg = GetEdictFieldValue(bot, fg_fields[s]);
+			eval_t *fgt = GetEdictFieldValue(bot, fgt_fields[s]);
+			if (fg && fgt && fgt->_float > sv.time && fg->edict)
+				failed_goal[s] = PROG_TO_EDICT(fg->edict);
+		}
 	}
 
 	int dbg_avail = 0, dbg_wanted = 0, dbg_pathed = 0, dbg_blocked = 0;
@@ -3792,7 +3792,9 @@ static void PF_nav_find_goal(void)
 	{
 		it = nav_item_cache[i].ent;
 		if (it->free) continue;
-		if (it == failed_goal || it == failed_goal2) continue;
+		if (it == failed_goal[0] || it == failed_goal[1]
+			|| it == failed_goal[2] || it == failed_goal[3])
+			continue;
 
 		if ((int)it->v.flags & FL_ITEM)
 			if (!it->v.model) continue;
@@ -3853,7 +3855,8 @@ static void PF_nav_find_goal(void)
 				   goal pass routes straight through. */
 				edict_t *opener = blocker ? nav_door_opener(blocker, 0) : NULL;
 				int routed = 0;
-				if (opener && opener != failed_goal && opener != failed_goal2)
+				if (opener && opener != failed_goal[0] && opener != failed_goal[1]
+					&& opener != failed_goal[2] && opener != failed_goal[3])
 				{
 					float oq[3], orc[3], onear[3];
 					float oext[3] = {64.0f, 128.0f, 64.0f};
