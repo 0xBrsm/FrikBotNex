@@ -4511,9 +4511,20 @@ extern "C" int navigate(nav_corridor_t *c,
 		{
 			/* Approach the link start first so jumps get their run-up
 			   geometry; only steer at the end once committed (close to
-			   the start, or already off the start level mid-traversal). */
+			   the start, or already off the start level mid-traversal).
+			   This only makes sense for links that actually need a
+			   run-up (JUMP/SUPER_JUMP) -- for a plain WALK/DROP/PLAT/etc
+			   link the bot is already free to walk straight at the end.
+			   Applying it universally created a limit cycle: crossing
+			   out past the 24u ring flips steer_to back to the start,
+			   which pulls the bot back inside the ring, which flips it
+			   right back out -- an undamped ping-pong with no jump
+			   button or other execution step to break out of it, seen
+			   live as bots "circling" in tight loops at WALK link starts. */
 			const float *steer_to = c->pending_end;
-			if (have_snapped_pos
+			int pending_type = nav_mesh_get_link_type(navmesh, c->pending_link_ref);
+			if ((pending_type == AI_JUMP || pending_type == AI_SUPER_JUMP)
+				&& have_snapped_pos
 				&& dtVdist2D(snapped_pos, c->pending_start) > 24.0f
 				&& fabsf(snapped_pos[1] - c->pending_start[1]) <= NAV_MESH_QUERY_CLIMB)
 				steer_to = c->pending_start;
