@@ -749,7 +749,7 @@ void() bot_get =
 			// triggered) still times out.
 			local entity pl, bestpl;
 			local vector pc;
-			local float pd, bestpd;
+			local float pd, bestpd, clearance;
 
 			// The serving plat is a function of the link corner (wp), which
 			// only changes when the corridor advances -- re-scanning every
@@ -781,25 +781,51 @@ void() bot_get =
 			pc = (bestpl.absmin + bestpl.absmax) * 0.5;
 			pc_z = wp_z;
 			bestpd = vlen(pc - wp);
-			if (bestpl != world && bestpd < 128
+
+			// Hold clear of the plat's OWN footprint, not a flat guess --
+			// a wide plat (e1m2's water lift is 126x86) made the old fixed
+			// 80/96u "close enough, stop" radius land inside the shaft it
+			// needs to return to. A bot that loses the boarding race (plat
+			// departs while it's still stepping on/near the deck) got
+			// frozen exactly there by the old logic instead of being moved
+			// clear, so it sat parked in the vacated shaft -- often
+			// underwater at the bottom -- until the plat came back down on
+			// top of it, hit plat_crush (plats.qc) and reversed. With
+			// enough bots losing that race the plat never stops bouncing.
+			clearance = bestpl.absmax_x - bestpl.absmin_x;
+			if (bestpl.absmax_y - bestpl.absmin_y > clearance)
+				clearance = bestpl.absmax_y - bestpl.absmin_y;
+			clearance = clearance * 0.5 + 32;
+
+			if (bestpl != world && bestpd < clearance + 64
 				&& bestpl.absmax_z > wp_z + 32
 				&& self.origin_z < bestpl.absmax_z)
 			{
 				pc = wp - self.origin;
 				pc_z = 0;
-				if (vlen(pc) < 80)
+				if (vlen(pc) < 1)
+					self.b_wishdir = '0 0 0';
+				else if (vlen(pc) < clearance)
+					// Already inside the footprint -- walk back out to the
+					// lip instead of freezing in place.
+					self.b_wishdir = normalize(self.origin - wp);
+				else
 					self.b_wishdir = '0 0 0';
 			}
 			// A plat actively moving through this link's shaft: stepping
 			// toward it just grinds the bot against its side/underside.
 			// Hold until it parks, then board. Moving is transient, so
 			// this can't become a standing freeze.
-			else if (bestpl != world && bestpd < 96
+			else if (bestpl != world && bestpd < clearance + 32
 				&& bestpl.velocity != '0 0 0')
 			{
 				pc = wp - self.origin;
 				pc_z = 0;
-				if (vlen(pc) < 96)
+				if (vlen(pc) < 1)
+					self.b_wishdir = '0 0 0';
+				else if (vlen(pc) < clearance)
+					self.b_wishdir = normalize(self.origin - wp);
+				else
 					self.b_wishdir = '0 0 0';
 			}
 		}
