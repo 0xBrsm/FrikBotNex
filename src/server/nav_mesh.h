@@ -281,13 +281,20 @@ typedef int (*nav_jump_validate_fn)(const float *from, const float *to, void *us
    landing that leads into a room via one more hop still counts), but NOT
    through teleporters or plat/train rides (those can bridge to a totally
    unrelated part of the map, which would make nearly any landing "reach"
-   nearly any item and defeat the gate).  NULL means "always worth it" (used
-   by the cheap jump/gap/directed passes, which never gate on value).
-   Implemented in nav_bot.cpp via sv.edicts; also cross-checks candidate
-   items below the landing against the deep-drop pass's own physics
-   validator, so a coincidentally-nearby item on the far side of a wall
-   doesn't count. Returns nonzero if the ledge is worth linking to. */
-typedef int (*nav_jump_value_fn)(const float *pts, int count, void *user);
+   nearly any item and defeat the gate).  'already_pts'/'already_count' is
+   every ground-poly centroid in the LAUNCH point's own ordinary-walking
+   component (no jump/drop/door assistance at all) -- an item credited via
+   'pts' that's ALSO reachable from one of these doesn't justify the RJ,
+   since a bot gets it for free by walking the way it already does (e1m2: a
+   landing atop a hallway door credited the green armor sitting right past
+   that same door, reachable on foot with no jump). NULL means "always
+   worth it" (used by the cheap jump/gap/directed passes, which never gate
+   on value). Implemented in nav_bot.cpp via sv.edicts; also cross-checks
+   candidate items below the landing against the deep-drop pass's own
+   physics validator, so a coincidentally-nearby item on the far side of a
+   wall doesn't count. Returns nonzero if the ledge is worth linking to. */
+typedef int (*nav_jump_value_fn)(const float *pts, int count,
+	const float *already_pts, int already_count, void *user);
 
 /* Post-build pass: find ground components stranded from the main mesh and, for
    each, emit ONE hull-validated jump-up link reconnecting it (a ledge into an

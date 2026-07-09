@@ -1616,6 +1616,58 @@ int nav_mesh_compute_rocket_jumps(
 	dtQueryFilter filter;
 	nav_mesh_setup_filter(&filter);
 
+	/* Ground centroids reachable from 'seed' by walking the CURRENT graph
+	   forward: an unbounded BFS over tile->links crossing every link type
+	   findPath itself can cross (doors, jumps, drops, teleporters, plats),
+	   skipping disabled polys exactly like the query filter would.  This
+	   mirrors authoritative findPath reachability, so the worth-it gate
+	   below reduces to "does the landing reach an item the launch cannot".
+	   Both sides MUST use the same unbounded semantics: the no-trap gate
+	   guarantees the landing paths back down to the launch, so its reach
+	   set is a superset of the launch's, and the set difference is exactly
+	   what the link unlocks.  Earlier asymmetric versions (bare floor-patch
+	   launch set, one-hop-capped landing set) both misfired: the narrow
+	   launch set let an e1m2 door RJ credit an item that had a perfectly
+	   good multi-door walking route, and the capped landing set killed the
+	   e3m5 terrace rung whose value sits several ordinary jump links above
+	   the landing ledge. */
+	auto reachableFrom = [&](int seed) {
+		const int npolys = tile->header->polyCount;
+		std::vector<char> seenPoly(npolys, 0);
+		std::vector<int> frontier;
+		seenPoly[seed] = 1;
+		frontier.push_back(seed);
+		for (size_t fi = 0; fi < frontier.size(); fi++)
+		{
+			int u = frontier[fi];
+			const dtPoly *pu = &tile->polys[u];
+			for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+			{
+				if (tile->links[k].ref == 0) continue;
+				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+				if ((int)np >= npolys || seenPoly[np]) continue;
+				if (tile->polys[np].flags == 0) continue;
+				seenPoly[np] = 1;
+				frontier.push_back((int)np);
+			}
+		}
+		return seenPoly;
+	};
+	/* Every poly in a ground patch shares one reach set (patch members are
+	   mutually walkable), so memoize per union-find root -- on big maps the
+	   candidate loop otherwise re-runs thousands of identical BFS passes. */
+	std::vector<std::vector<char>> reachCache(ground);
+	std::vector<char> reachCached(ground, 0);
+	auto reachableCached = [&](int seed) -> const std::vector<char> & {
+		int c = gacomp[seed];
+		if (!reachCached[c])
+		{
+			reachCache[c] = reachableFrom(seed);
+			reachCached[c] = 1;
+		}
+		return reachCache[c];
+	};
+
 	std::vector<int> seenLo, seenHi;
 	auto pair_seen = [&](int x, int y) {
 		int lo = x < y ? x : y, hi = x < y ? y : x;
@@ -1681,86 +1733,30 @@ int nav_mesh_compute_rocket_jumps(
 		   same reachability probes and were never meant to be player-
 		   reachable.  Without this, those get a "rocket jump to nowhere"
 		   that a bot will actually use once it meets the health/quad gate.
-
-		   Hands over every ground centroid reachable from bestHi by walking
-		   the CURRENT graph forward (a BFS over tile->links, not the
-		   ground-only union-find used to seed candidates above), crossing
-		   already-baked door/orphan-jump/directed/gap links -- so a landing
-		   that leads into a room via one more ordinary jump still counts,
-		   not just a landing that happens to sit in the same bare-floor
-		   patch as the item.  Deliberately does NOT cross teleporters
-		   (off-mesh polys carrying NAV_AREA_WALK) or plat/train rides
-		   (NAV_AREA_PLAT): either can bridge to a totally unrelated part of
-		   the map, which would make nearly any landing "reach" nearly any
-		   item and defeat the gate (seen on e1m2: every candidate near a
-		   door found the same item three rooms away through a teleporter). */
+		   Compares what the landing reaches against what the launch point
+		   ALREADY reaches on foot (reachableFrom above), so an item that's
+		   just a normal walk away from lo doesn't count as new value. */
 		if (has_value != nullptr)
 		{
-			const int npolys = tile->header->polyCount;
-			std::vector<char> seenPoly(npolys, 0);
-			std::vector<char> hopUsed(npolys, 0);
-			std::vector<int> frontier;
-			seenPoly[bestHi] = 1;
-			frontier.push_back(bestHi);
-			for (size_t fi = 0; fi < frontier.size(); fi++)
-			{
-				int u = frontier[fi];
-				const dtPoly *pu = &tile->polys[u];
-				for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-				{
-					if (tile->links[k].ref == 0) continue;
-					unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-					if ((int)np >= npolys || seenPoly[np]) continue;
-
-					/* Off-mesh connection polys (np >= ground) need an area
-					   check before crossing: teleporters are area NAV_AREA_WALK
-					   (indistinguishable from plain ground EXCEPT that only an
-					   off-mesh conn poly can carry that area at this index range)
-					   and plat/train rides are NAV_AREA_PLAT -- both can bridge to
-					   a totally unrelated part of the map, which would make almost
-					   any RJ landing "reach" almost any item and defeat this gate
-					   entirely (seen on e1m2: every candidate near the door found
-					   the same item through a teleporter three rooms away). Only
-					   ordinary jump/drop/door links stay local enough to count as
-					   "this same neighborhood, one more hop."
-
-					   That hop budget has to actually be enforced, not just
-					   type-filtered: walking within a component once crossed is
-					   unrestricted below (ordinary ground-to-ground links aren't
-					   hop-limited), so without a cap the walk can cross a SECOND,
-					   THIRD, etc. door/jump/drop out of that component and cascade
-					   through the whole level one legitimate-looking hop at a
-					   time -- the same "any item counts as reachable" failure the
-					   type filter above was meant to prevent, just via a chain of
-					   ordinary links instead of one teleporter (seen on e1m2: a
-					   landing on top of a hallway door chained through a second
-					   door deep into the map and credited an item rooms away that
-					   was never actually near the landing). Cap crossings to one:
-					   once a poly has been reached via an off-mesh hop, it can
-					   still be walked freely, but can't cross another. */
-					char nextHop = hopUsed[u];
-					if ((int)np >= ground)
-					{
-						unsigned char area = tile->polys[np].getArea();
-						if (area != NAV_AREA_JUMP && area != NAV_AREA_DROP && area != NAV_AREA_DOOR)
-							continue;
-						if (hopUsed[u] >= 1) continue;
-						nextHop = hopUsed[u] + 1;
-					}
-					seenPoly[np] = 1;
-					hopUsed[np] = nextHop;
-					frontier.push_back((int)np);
-				}
-			}
-			std::vector<float> reachPts;
+			const std::vector<char> &hiSeen = reachableCached(bestHi);
+			const std::vector<char> &loSeen = reachableCached(lo);
+			/* reach(hi) is a superset of reach(lo) (no-trap gate), so only
+			   the difference can credit anything new -- pass just that as
+			   the landing set, which keeps the per-item crediting loops in
+			   has_value near the unlocked ledge instead of the whole map. */
+			std::vector<float> newPts, alreadyPts;
 			for (int ii = 0; ii < ground; ii++)
 			{
-				if (!seenPoly[ii]) continue;
-				reachPts.push_back(q[ii * 3 + 0]);
-				reachPts.push_back(q[ii * 3 + 1]);
-				reachPts.push_back(q[ii * 3 + 2]);
+				if (!hiSeen[ii] && !loSeen[ii]) continue;
+				std::vector<float> &dst = loSeen[ii] ? alreadyPts : newPts;
+				dst.push_back(q[ii * 3 + 0]);
+				dst.push_back(q[ii * 3 + 1]);
+				dst.push_back(q[ii * 3 + 2]);
 			}
-			if (!has_value(reachPts.data(), (int)(reachPts.size() / 3), value_user))
+			if (newPts.empty())
+				continue;
+			if (!has_value(newPts.data(), (int)(newPts.size() / 3),
+				alreadyPts.data(), (int)(alreadyPts.size() / 3), value_user))
 				continue;
 		}
 

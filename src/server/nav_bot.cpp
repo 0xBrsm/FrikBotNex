@@ -863,20 +863,85 @@ static int nav_cn_is_item(const char *cn)
 	return !strncmp(cn, "item_", 5) || !strncmp(cn, "weapon_", 7);
 }
 
+/* Is item 'o' credited from ANY of 'pts' -- same-ledge (roughly level,
+   path-validated to cap the "whole map is connected" false positive) or
+   deep-drop (a real walk-off fall onto it, per the deep-drop pass's own
+   physics validator)?  Shared by nav_rj_has_value below to test both the
+   post-jump landing's reach and the launch point's own already-reachable-
+   by-foot neighborhood -- see nav_jump_value_fn's doc (nav_mesh.h) for why
+   both sides need the identical test. */
+static int nav_rj_item_credited(edict_t *o, const float *pts, int count)
+{
+	int p;
+	for (p = 0; p < count; p++)
+	{
+		const float *to = &pts[p * 3];
+		float dx = o->v.origin[0] - to[0];
+		float dy = o->v.origin[1] - to[1];
+		float dz = o->v.origin[2] - to[2];
+		if (dx < -150.0f || dx > 150.0f) continue;
+		if (dy < -150.0f || dy > 150.0f) continue;
+		/* Same-ledge case: item sits roughly at this reachable point's
+		   height. Straight-line XY/Z proximity alone isn't enough --
+		   a thin wall or door can put an item in an adjoining room
+		   within the same box without there being any walkable route
+		   between them (e1m2: a hallway-door ledge credited a key and
+		   rockets sitting one room over, through the wall, spawning a
+		   rocket jump that dead-ends at the door with nothing to
+		   reach). A raw findPath isn't enough either -- the whole map
+		   is connected, so any item is technically "reachable" by
+		   some long way around; that would make this check pass for
+		   virtually everything.  Cap the path to a handful of polys
+		   so only a genuinely-local, direct hop counts, not a trek
+		   across the level. */
+		if (dz >= -40.0f && dz <= 96.0f)
+		{
+			vec3_t item_pos;
+			nav_ent_pos(o, item_pos);
+			nav_mesh_path_result_t pr;
+			char perr[64];
+			if (nav_mesh_find_path(nav_mesh, to, item_pos, &pr, perr, sizeof(perr))
+				&& pr.path_ref_count <= 5)
+				return 1;
+		}
+		/* Below the ledge: don't just trust straight-line distance --
+		   a static height band can credit a scenery nub with a health
+		   kit that's actually on the far side of a wall, coincidentally
+		   almost straight down.  Run the deep-drop pass's own physics
+		   validator (walk-off + fall-column + lava check) to confirm
+		   the ledge really can fall onto this item, matching the "RJ up
+		   to a vantage, then fall to the goal" chain the deep-drop pass
+		   builds afterward (e2m2's rocket ammo under a tall scaffold). */
+		if (dz < -40.0f)
+		{
+			vec3_t item_floor;
+			item_floor[0] = o->v.origin[0];
+			item_floor[1] = o->v.origin[1];
+			item_floor[2] = nav_player_floor_z(o->v.origin[2]);
+			if (nav_deep_drop_validate(to, item_floor, NULL) == AI_DROP)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 /* Rocket-jump worth-it check (nav_jump_value_fn): is there an item resting
    near ANY poly reachable from this candidate ledge by walking the current
    mesh (nav_mesh_compute_rocket_jumps hands over that whole reachable set,
-   not just the one poly it picked as cheapest)?  Horizontal radius is
-   generous (RJ landings are approximate, and item origins float above
-   their pad).  An item at roughly the same height as the reachable point
-   counts outright; an item below it only counts if nav_deep_drop_validate
-   confirms a real walk-off fall lands there -- straight-line distance alone
-   can't tell a genuine "RJ up, then fall to the goal" chain (e2m2's rocket
-   ammo) from a scenery nub that merely happens to sit near an item on the
-   far side of a wall (e1m2's bad door link). */
-static int nav_rj_has_value(const float *pts, int count, void *user)
+   not just the one poly it picked as cheapest) that ISN'T also reachable
+   from the launch point's own ordinary-walking neighborhood?  Without the
+   second half, crediting only checked whether SOMETHING sat near the
+   landing -- but a landing right above a doorway credits whatever's in the
+   next room over regardless of whether a bot would've just walked through
+   that same door for free, producing an RJ that "unlocks" an item already
+   on the normal path (e1m2: a ledge atop a hallway door credited the green
+   armor sitting right past that door, no jump required to reach it either
+   way). Skip any item the launch point can already get to on foot; only
+   credit ones that genuinely need the jump. */
+static int nav_rj_has_value(const float *pts, int count,
+	const float *already_pts, int already_count, void *user)
 {
-	int i, p;
+	int i;
 	(void)user;
 	for (i = 1; i < sv.num_edicts; i++)
 	{
@@ -885,55 +950,9 @@ static int nav_rj_has_value(const float *pts, int count, void *user)
 		if (o->free) continue;
 		cn = pr_strings + (int)o->v.classname;
 		if (!nav_cn_is_item(cn)) continue;
-		for (p = 0; p < count; p++)
-		{
-			const float *to = &pts[p * 3];
-			float dx = o->v.origin[0] - to[0];
-			float dy = o->v.origin[1] - to[1];
-			float dz = o->v.origin[2] - to[2];
-			if (dx < -150.0f || dx > 150.0f) continue;
-			if (dy < -150.0f || dy > 150.0f) continue;
-			/* Same-ledge case: item sits roughly at this reachable point's
-			   height. Straight-line XY/Z proximity alone isn't enough --
-			   a thin wall or door can put an item in an adjoining room
-			   within the same box without there being any walkable route
-			   between them (e1m2: a hallway-door ledge credited a key and
-			   rockets sitting one room over, through the wall, spawning a
-			   rocket jump that dead-ends at the door with nothing to
-			   reach). A raw findPath isn't enough either -- the whole map
-			   is connected, so any item is technically "reachable" by
-			   some long way around; that would make this check pass for
-			   virtually everything.  Cap the path to a handful of polys
-			   so only a genuinely-local, direct hop counts, not a trek
-			   across the level. */
-			if (dz >= -40.0f && dz <= 96.0f)
-			{
-				vec3_t item_pos;
-				nav_ent_pos(o, item_pos);
-				nav_mesh_path_result_t pr;
-				char perr[64];
-				if (nav_mesh_find_path(nav_mesh, to, item_pos, &pr, perr, sizeof(perr))
-					&& pr.path_ref_count <= 5)
-					return 1;
-			}
-			/* Below the ledge: don't just trust straight-line distance --
-			   a static height band can credit a scenery nub with a health
-			   kit that's actually on the far side of a wall, coincidentally
-			   almost straight down.  Run the deep-drop pass's own physics
-			   validator (walk-off + fall-column + lava check) to confirm
-			   the ledge really can fall onto this item, matching the "RJ up
-			   to a vantage, then fall to the goal" chain the deep-drop pass
-			   builds afterward (e2m2's rocket ammo under a tall scaffold). */
-			if (dz < -40.0f)
-			{
-				vec3_t item_floor;
-				item_floor[0] = o->v.origin[0];
-				item_floor[1] = o->v.origin[1];
-				item_floor[2] = nav_player_floor_z(o->v.origin[2]);
-				if (nav_deep_drop_validate(to, item_floor, NULL) == AI_DROP)
-					return 1;
-			}
-		}
+		if (!nav_rj_item_credited(o, pts, count)) continue;
+		if (nav_rj_item_credited(o, already_pts, already_count)) continue;
+		return 1;
 	}
 	return 0;
 }
