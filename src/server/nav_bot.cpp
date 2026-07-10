@@ -4503,6 +4503,26 @@ static void PF_nav_log_pickup(void)
 		bot->v.health, bot->v.armorvalue);
 }
 
+/* void nav_log_goalfail(entity goal, float dur) = #81
+   Structured telemetry, always-on like NAVSTAT: a bot abandoning a goal
+   it could not reach (bot_mark_failed_goal in bot_move.qc).  The behav
+   regression tier trends the fire RATE per map; each firing is a
+   navigation defect the backoff ring is compensating for.  self is the
+   bot. */
+static void PF_nav_log_goalfail(void)
+{
+	edict_t *bot = PROG_TO_EDICT(pr_global_struct->self);
+	edict_t *goal = G_EDICT(OFS_PARM0);
+	float dur = G_FLOAT(OFS_PARM1);
+
+	Con_Printf("GOALFAIL time=%.1f bot=%s goal=%s dur=%.0f pos=(%.0f %.0f %.0f)\n",
+		sv.time,
+		pr_strings + (int)bot->v.netname,
+		pr_strings + (int)goal->v.classname,
+		dur,
+		bot->v.origin[0], bot->v.origin[1], bot->v.origin[2]);
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
@@ -4522,7 +4542,7 @@ void Nav_RegisterBuiltins(void)
 		nav_extended_builtins[i] = pr_builtins[0];
 
 	nav_extended_builtins[NAV_BUILTIN_BASE + 0] = PF_nav_ready;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 1] = PF_nav_stub;      /* was nav_move */
+	nav_extended_builtins[NAV_BUILTIN_BASE + 1] = PF_nav_log_goalfail;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 2] = PF_nav_stub;      /* was nav_path_start */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 3] = PF_nav_stub;      /* was nav_route_cost */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 4] = PF_nav_path_steer;

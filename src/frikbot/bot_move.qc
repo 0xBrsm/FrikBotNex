@@ -362,6 +362,7 @@ float(float base, float strikes) bot_backoff_dur =
 float BOT_FAILED_GOAL_DECAY = 60;
 void(entity g, float dur) bot_mark_failed_goal =
 {
+	nav_log_goalfail(g, dur);
 	if (self._fg0 == g)
 	{
 		if (time > self._fg0_time + BOT_FAILED_GOAL_DECAY)
