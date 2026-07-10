@@ -12,7 +12,7 @@
 # Usage: src/tools/nav_harness.sh [map ...]
 #   (defaults to MAPS below if no maps given on the command line)
 #
-# Two tiers:
+# Three tiers:
 #   MODE=full (default) -- connectivity check + ${DURATION}s bot soak with
 #     NAVSTAT stuck/lava thresholds. Slow, and stuck/lava readings get noisy
 #     under memory pressure on constrained devices.
@@ -21,6 +21,12 @@
 #     kills the server the moment the CONNECTIVITY summary prints (~20-30s
 #     per map instead of ${DURATION}s+). Deterministic under load; use this
 #     as the fast full-suite regression gate after navmesh changes.
+#   MODE=bakesum -- conn checks PLUS exact bake-output comparison against
+#     the checked-in baseline (src/tools/baselines/bakesum.txt). The bake
+#     is deterministic, so a structural refactor that claims to preserve
+#     behavior must produce a byte-identical BAKESUM line on every map.
+#     Set UPDATE_BASELINE=1 to (re)capture the baseline after a reviewed,
+#     intentional bake change.
 #
 set -uo pipefail
 
@@ -30,16 +36,19 @@ GAME="${GAME:-ffa}"
 MODE="${MODE:-full}"
 BATCH_SIZE="${BATCH_SIZE:-6}"
 OUTDIR="${OUTDIR:-$GAMEDIR/navruns/harness}"
-if [[ "$MODE" == "conn" ]]; then
+if [[ "$MODE" == "conn" || "$MODE" == "bakesum" ]]; then
 	BOTS=1
 	DURATION="${DURATION:-90}" # worst-case mesh-build wait; early-kill makes the typical map much faster
 elif [[ "$MODE" == "full" ]]; then
 	BOTS="${BOTS:-4}"
 	DURATION="${DURATION:-60}"
 else
-	echo "error: MODE must be 'full' or 'conn', got '$MODE'" >&2
+	echo "error: MODE must be 'full', 'conn', or 'bakesum', got '$MODE'" >&2
 	exit 1
 fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BAKESUM_BASELINE="${BAKESUM_BASELINE:-$SCRIPT_DIR/baselines/bakesum.txt}"
+UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
 ID1_MAPS="start \
 	e1m1 e1m2 e1m3 e1m4 e1m5 e1m6 e1m7 \
 	e2m1 e2m2 e2m3 e2m4 e2m5 e2m6 e2m7 \
@@ -79,7 +88,7 @@ run_map() {
 		+deathmatch 1 +skill 2 +temp1 "$BOTS" +map "$m" \
 		>"$OUTDIR/$m.log" 2>&1 &
 	pid=$!
-	if [[ "$MODE" == "conn" ]]; then
+	if [[ "$MODE" == "conn" || "$MODE" == "bakesum" ]]; then
 		# The connectivity report is a one-shot at mesh-build time; once the
 		# summary line lands there is nothing left to measure, so kill the
 		# server instead of waiting out the clock.
@@ -149,6 +158,29 @@ for m in $MAPS; do
 			fi
 		fi
 
+		# Exact bake-output comparison. The BAKESUM line prints at
+		# mesh-build time, before the CONNECTIVITY summary the
+		# early-kill waits on, so it's always in the log by now.
+		if [[ "$MODE" == "bakesum" ]]; then
+			bake_line="$(grep -m1 "^Nav: BAKESUM map=$m " "$log" | sed 's/^Nav: //' || true)"
+			if [[ -z "$bake_line" ]]; then
+				status="FAIL"
+				reasons+=("no BAKESUM line found")
+			else
+				echo "$bake_line" >>"$OUTDIR/bakesum.txt"
+				if [[ "$UPDATE_BASELINE" != "1" ]]; then
+					base_line="$(grep -m1 "^BAKESUM map=$m " "$BAKESUM_BASELINE" 2>/dev/null || true)"
+					if [[ -z "$base_line" ]]; then
+						status="FAIL"
+						reasons+=("map missing from baseline $BAKESUM_BASELINE (run with UPDATE_BASELINE=1 to capture)")
+					elif [[ "$bake_line" != "$base_line" ]]; then
+						status="FAIL"
+						reasons+=("bake output diverged: got [$bake_line] want [$base_line]")
+					fi
+				fi
+			fi
+		fi
+
 		# Behavioral (NAVSTAT) thresholds only apply to the full-soak tier;
 		# conn mode kills the server before any 10s NAVSTAT window elapses.
 		if [[ "$MODE" == "full" ]]; then
@@ -184,4 +216,11 @@ done
 echo "---"
 total=$(echo "$MAPS" | wc -w)
 echo "$((total - fail_count))/$total maps passed"
+
+if [[ "$MODE" == "bakesum" && "$UPDATE_BASELINE" == "1" && "$fail_count" -eq 0 ]]; then
+	mkdir -p "$(dirname "$BAKESUM_BASELINE")"
+	cp "$OUTDIR/bakesum.txt" "$BAKESUM_BASELINE"
+	echo "baseline updated: $BAKESUM_BASELINE"
+fi
+
 [[ "$fail_count" -eq 0 ]]
