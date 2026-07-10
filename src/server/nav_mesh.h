@@ -169,6 +169,10 @@ typedef struct
 	int	detail_mesh_count;
 	int	detail_vertex_count;
 	int	detail_triangle_count;
+	/* Compensator telemetry: how often the repair/cull passes fired.
+	   Nonzero means an upstream imprecision is being masked (BAKESUM). */
+	int	regions_repaired;
+	int	sliver_polys_disabled;
 } nav_mesh_summary_t;
 
 typedef struct

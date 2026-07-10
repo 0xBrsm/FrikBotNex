@@ -28,6 +28,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
+#include <algorithm>
 
 #include <math.h>
 
@@ -2645,6 +2646,60 @@ void Nav_BuildForMap(void)
 	t_done = Sys_FloatTime();
 	Con_Printf("Nav: %.3fs, %d polys, %d entity links\n",
 		t_done - t_start, summary.polygon_count, entity_count);
+
+	/* BAKESUM: machine-parseable bake fingerprint (nav_harness.sh
+	   MODE=bakesum).  Per-type link counts plus an order-independent
+	   FNV-1a hash over quantized link endpoints, so structural refactors
+	   can be gated on exact bake-output identity instead of noisy soaks.
+	   repair/sliver report compensator firings: nonzero means an
+	   upstream imprecision is being masked. */
+	if (nav_mesh != NULL)
+	{
+		int tcount[10] = {0};
+		struct linkrec { int v[8]; };
+		std::vector<linkrec> recs(nav_mesh->link_count);
+		for (int li = 0; li < nav_mesh->link_count; li++)
+		{
+			const nav_off_mesh_link_t *l = &nav_mesh->links[li];
+			if (l->link_type >= 0 && l->link_type < 10)
+				tcount[l->link_type]++;
+			linkrec *r = &recs[li];
+			/* 0.125u quantization: coarse enough to absorb float
+			   formatting noise, fine enough that no two distinct
+			   links collide. */
+			for (int ci = 0; ci < 3; ci++)
+			{
+				r->v[ci] = (int)lrintf(l->start[ci] * 8.0f);
+				r->v[3 + ci] = (int)lrintf(l->end[ci] * 8.0f);
+			}
+			r->v[6] = l->link_type;
+			r->v[7] = l->bidirectional;
+		}
+		std::sort(recs.begin(), recs.end(),
+			[](const linkrec &a, const linkrec &b) {
+				return memcmp(a.v, b.v, sizeof(a.v)) < 0;
+			});
+		unsigned int hash = 2166136261u;
+		for (size_t ri = 0; ri < recs.size(); ri++)
+		{
+			const unsigned char *p = (const unsigned char *)recs[ri].v;
+			for (size_t bi = 0; bi < sizeof(recs[ri].v); bi++)
+			{
+				hash ^= p[bi];
+				hash *= 16777619u;
+			}
+		}
+		fprintf(stderr, "Nav: BAKESUM map=%s polys=%d verts=%d links=%d"
+			" tele=%d jump=%d drop=%d plat=%d train=%d door=%d rj=%d"
+			" surface=%d walk=%d rounds=%d repair=%d sliver=%d hash=%08x\n",
+			sv.name, summary.polygon_count, summary.navmesh_vertex_count,
+			nav_mesh->link_count,
+			tcount[AI_TELELINK], tcount[AI_JUMP], tcount[AI_DROP],
+			tcount[AI_PLAT_BOTTOM], tcount[AI_RIDE_TRAIN], tcount[AI_DOORFLAG],
+			tcount[AI_SUPER_JUMP], tcount[AI_SURFACE], tcount[AI_WALK],
+			conn_round, summary.regions_repaired, summary.sliver_polys_disabled,
+			hash);
+	}
 
 	/* Validate navmesh against hand-crafted waypoints */
 	if (nav_mesh != NULL)

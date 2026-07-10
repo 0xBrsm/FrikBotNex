@@ -2580,11 +2580,11 @@ int nav_mesh_gap_probe(
    reseed onto and then roam forever inside a 1-poly island.  Traversal
    follows Detour link chains, which include off-mesh connections, so
    ledges reachable only by jump/drop/teleport links stay enabled. */
-static void nav_mesh_disable_islands(dtNavMesh *mesh)
+static int nav_mesh_disable_islands(dtNavMesh *mesh)
 {
 	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
 	if (tile == nullptr || tile->header == nullptr)
-		return;
+		return 0;
 
 	const int npolys = tile->header->polyCount;
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
@@ -2752,6 +2752,8 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 			fprintf(stderr, "Nav: ORPHAN comp size=%d at quake (%.0f %.0f %.0f)\n",
 				comp_size[c], cx / n, cz / n, cy / n);
 	}
+
+	return disabled;
 }
 
 extern "C" nav_mesh_runtime_t *nav_mesh_build(
@@ -3420,11 +3422,9 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build navigation regions");
 		return nullptr;
 	}
-	{
-		int repaired = nav_mesh_repair_broken_regions(guard.compact);
-		if (repaired > 0)
-			fprintf(stderr, "Nav: repaired %d overlapping/split watershed regions\n", repaired);
-	}
+	int regions_repaired = nav_mesh_repair_broken_regions(guard.compact);
+	if (regions_repaired > 0)
+		fprintf(stderr, "Nav: repaired %d overlapping/split watershed regions\n", regions_repaired);
 
 	/* NAV_DUMP_SPANS second stage: compact spans (area/region) post-region
 	   build at the same column, to separate region loss from contour loss. */
@@ -3931,7 +3931,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		}
 	}
 
-	nav_mesh_disable_islands(guard.runtime->navmesh);
+	int sliver_polys_disabled = nav_mesh_disable_islands(guard.runtime->navmesh);
 
 	/* Wide extents for goal/item snapping.
 	   Keep XZ tighter than the original 64u box to avoid snapping
@@ -3975,6 +3975,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		summary->detail_mesh_count = guard.detail_mesh->nmeshes;
 		summary->detail_vertex_count = guard.detail_mesh->nverts;
 		summary->detail_triangle_count = guard.detail_mesh->ntris;
+		summary->regions_repaired = regions_repaired;
+		summary->sliver_polys_disabled = sliver_polys_disabled;
 	}
 
 	/* Success: release runtime from the guard so it is not destroyed */
