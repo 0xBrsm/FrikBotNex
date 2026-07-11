@@ -20,6 +20,7 @@ extern "C" {
 #include "nav_bot.h"
 #include "nav_hull.h"
 #include "nav_mesh.h"
+#include "nav_physics.h"
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 #include "DetourPathCorridor.h"
@@ -70,8 +71,7 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_DETAIL_SAMPLE_MAX_ERROR   1.0f
 
 
-/* Jump/drop link detection */
-#define NAV_JUMP_IMPULSE            270.0f  /* Quake jump velocity (SV_ClientThink) */
+/* Jump/drop link detection (kinematics live in nav_physics.h) */
 #define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
 #define NAV_JUMP_HEIGHT_MAX         48.0f  /* max jump-up height in Quake */
 /* Drops have no walkableClimb floor: a contour boundary edge means the
@@ -109,7 +109,6 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
 #define NAV_JUMP_LAND_SNAP_MAX_DIST 24.0f
-#define NAV_PLAYER_FLOOR_OFFSET     24.0f
 #define NAV_DEBUG_MARKER_LIFT       24.0f
 
 /* ---- Per-bot path corridor ---- */
@@ -174,7 +173,7 @@ static float nav_xy_dist_sq(const float *a, const float *b)
 
 static float nav_player_floor_z(float origin_z)
 {
-	return origin_z - NAV_PLAYER_FLOOR_OFFSET;
+	return origin_z - NAV_PHYS_FLOOR_OFFSET;
 }
 
 static float nav_debug_marker_z(float surface_z)
@@ -223,9 +222,9 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	vec3_t ts, te;
 	trace_t tr;
 	float dz, adz, dx, dy, hd, disc, airtime;
-	const float g = 800.0f;                 /* sv_gravity */
-	const float v0 = NAV_JUMP_IMPULSE;       /* 270, jump up-velocity */
-	const float maxspeed = 320.0f;           /* ground run speed */
+	const float g = NAV_PHYS_GRAVITY;
+	const float v0 = NAV_PHYS_JUMP_IMPULSE;
+	const float maxspeed = NAV_PHYS_RUN_SPEED;
 	(void)user;
 
 	dz = to[2] - from[2];
@@ -240,8 +239,8 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	   missing.  Step height bounds the climb. */
 	if (adz <= NAV_JUMP_HEIGHT_MIN)
 	{
-		ts[0] = from[0]; ts[1] = from[1]; ts[2] = from[2] + 24 + 18;
-		te[0] = to[0]; te[1] = to[1]; te[2] = to[2] + 24 + 18;
+		ts[0] = from[0]; ts[1] = from[1]; ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
+		te[0] = to[0]; te[1] = to[1]; te[2] = to[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
 		tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
 		if (!tr.startsolid && tr.fraction > 0.97f)
 			return AI_WALK;
@@ -274,8 +273,8 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 			{
 				/* +1: the down-trace endpos rests ON the floor plane; a box
 				   whose bottom sits exactly there reports startsolid. */
-				ts[0] = from[0]; ts[1] = from[1]; ts[2] = fz1 + 24 + 1;
-				te[0] = to[0]; te[1] = to[1]; te[2] = fz2 + 24 + 1;
+				ts[0] = from[0]; ts[1] = from[1]; ts[2] = fz1 + NAV_PHYS_FLOOR_OFFSET + 1;
+				te[0] = to[0]; te[1] = to[1]; te[2] = fz2 + NAV_PHYS_FLOOR_OFFSET + 1;
 				tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
 				if (!tr.startsolid && tr.fraction > 0.97f)
 					return AI_WALK;
@@ -298,7 +297,7 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 		   caller pairs this with a drop-out so the ledge isn't a one-way trap. */
 		if (dz > NAV_JUMP_HEIGHT_MAX && dz <= NAV_RJ_HEIGHT_MAX && hd <= NAV_RJ_HORIZ_MAX)
 		{
-			float topz = to[2] + 24.0f + 18.0f;
+			float topz = to[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
 			ts[0] = from[0]; ts[1] = from[1]; ts[2] = topz;
 			te[0] = to[0]; te[1] = to[1]; te[2] = topz;
 			tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
@@ -311,7 +310,7 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	if (hd / airtime > maxspeed)
 		return 0;
 	{
-		float apexz = (to[2] > from[2] ? to[2] : from[2]) + 45.0f + 24.0f;
+		float apexz = (to[2] > from[2] ? to[2] : from[2]) + NAV_PHYS_JUMP_APEX + NAV_PHYS_FLOOR_OFFSET;
 		ts[0] = from[0]; ts[1] = from[1]; ts[2] = apexz;
 		te[0] = to[0]; te[1] = to[1]; te[2] = apexz;
 		tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
@@ -397,7 +396,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 			if (from[2] - surface > NAV_DEEP_DROP_HEIGHT_MAX)
 				{ DDOFF("deepdry"); continue; }
 			/* Horizontal drift during the dry fall is physics-capped. */
-			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / 800.0f);
+			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / NAV_PHYS_GRAVITY);
 			if (kOff[oi] > NAV_DEEP_DROP_MAX_SPEED * ts)
 				{ DDOFF("drift"); break; }
 			if (!nav_trace_clear_at_height(from, entry, from[2] + 24.0f, NULL))
@@ -467,7 +466,7 @@ dry_fall:
 	   speed needed to cover hd during the fall must fit inside a full run.
 	   Dry landings only -- a water landing swims its horizontal remainder,
 	   which the entry-column search caps per offset. */
-	if (hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / 800.0f))
+	if (hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / NAV_PHYS_GRAVITY))
 		DDFAIL("speed");
 
 	/* Fall-column search: the landing rep point is often tucked under the
@@ -484,7 +483,7 @@ dry_fall:
 		miss[0] = 0;
 #define DDOFF(why) do { if (nav_dd_debug_enabled() && li == 0) { size_t l = strlen(miss); \
 	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", kRel[oi], why); } } while (0)
-		ts = sqrtf(2.0f * drop / 800.0f);
+		ts = sqrtf(2.0f * drop / NAV_PHYS_GRAVITY);
 		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
 		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
 		for (oi = 0; oi < (int)(sizeof(kRel)/sizeof(kRel[0])) && !ok; oi++)
@@ -740,7 +739,7 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 	if (!over_poly && nav_xy_dist_sq(qpos, test) > 8.0f * 8.0f)
 		return 0;
-	if (!nav_trace_clear_at_height(qpos, test, test[2] + NAV_PLAYER_FLOOR_OFFSET, bot))
+	if (!nav_trace_clear_at_height(qpos, test, test[2] + NAV_PHYS_FLOOR_OFFSET, bot))
 		return 0;
 
 	return 1;
@@ -1356,7 +1355,7 @@ static int nav_collect_push_links(nav_off_mesh_link_t **out_links)
 			if (inside && vel[2] > 200.0f)
 				rode_up = 1;
 			if (!inside)
-				vel[2] -= 800.0f * dt;
+				vel[2] -= NAV_PHYS_GRAVITY * dt;
 
 			/* Vertical shaft mouth: with neutral input the rider oscillates
 			   at the apex forever (rises out, falls back in, re-grabbed) --
@@ -1741,9 +1740,9 @@ static int nav_link_callback(
 	float gravity = sv_gravity.value;
 	float maxspeed = sv_maxspeed.value;
 
-	if (gravity < 1.0f) gravity = 800.0f;
-	if (maxspeed < 1.0f) maxspeed = 320.0f;
-	float peak = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE / (2.0f * gravity);
+	if (gravity < 1.0f) gravity = NAV_PHYS_GRAVITY;
+	if (maxspeed < 1.0f) maxspeed = NAV_PHYS_RUN_SPEED;
+	float peak = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE / (2.0f * gravity);
 
 	*out_links = NULL;
 	if (edge_count == 0) return 0;
@@ -2057,10 +2056,10 @@ static int nav_link_callback(
 				if (!land_in_liquid &&
 					drop_height >= NAV_JUMP_HEIGHT_MIN && drop_height <= peak)
 				{
-					float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * drop_height;
+					float disc = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE - 2.0f * gravity * drop_height;
 					if (disc >= 0)
 					{
-						float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+						float time_up = (NAV_PHYS_JUMP_IMPULSE - sqrtf(disc)) / gravity;
 						float jspeed = land_dist / time_up;
 						if (jspeed <= maxspeed)
 						{
@@ -2108,7 +2107,7 @@ static int nav_link_callback(
 				probe[2] = mid[2];
 
 				/* Check for wall at jump apex height — the bot jumps OVER the edge */
-				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + NAV_PLAYER_FLOOR_OFFSET, NULL))
+				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + NAV_PHYS_FLOOR_OFFSET, NULL))
 					break; /* wall at jump height — no point probing further */
 
 				/* Find a floor ABOVE the edge at the probe point. */
@@ -2123,9 +2122,9 @@ static int nav_link_callback(
 
 				/* Time to reach jump_height:
 				   h = v0*t - 0.5*g*t^2  →  t = (v0 - sqrt(v0^2 - 2*g*h)) / g */
-				float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * jump_height;
+				float disc = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE - 2.0f * gravity * jump_height;
 				if (disc < 0) continue;
-				float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+				float time_up = (NAV_PHYS_JUMP_IMPULSE - sqrtf(disc)) / gravity;
 				float speed = step / time_up;
 
 				if (speed > maxspeed)

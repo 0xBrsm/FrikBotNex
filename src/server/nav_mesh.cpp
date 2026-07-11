@@ -1,4 +1,5 @@
 #include "nav_mesh.h"
+#include "nav_physics.h"
 
 #include <cfloat>
 #include <cmath>
@@ -1982,7 +1983,7 @@ int nav_mesh_compute_deep_drops(
 			float hd_min = hd - pr[hi] - pr[lo];
 			if (hd_min < 8.0f) hd_min = 8.0f;
 			float dz_cap = dmax < kDeepDropMax ? dmax : kDeepDropMax;
-			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / 800.0f) + kDeepDropSwimSlack) return false;
+			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / NAV_PHYS_GRAVITY) + kDeepDropSwimSlack) return false;
 			out->cost = hd + (qh[2] - ql[2]) * 0.25f;
 			out->lo = lo;
 			return true;
@@ -2040,7 +2041,7 @@ int nav_mesh_compute_deep_drops(
 			if (hd < 8.0f) { hd = 8.0f; }
 			if (!why && (ddz <= kDeepDropMin || ddz > kDeepDropMax))
 				why = "dz";
-			if (!why && hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / 800.0f) + kDeepDropSwimSlack)
+			if (!why && hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / NAV_PHYS_GRAVITY) + kDeepDropSwimSlack)
 				why = "speed";
 			if (!why && validate(qh, ql, user) != AI_DROP)
 				why = "validate";
@@ -2109,7 +2110,7 @@ int nav_mesh_compute_deep_drops(
 
 			nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
 			{
-				float fall_time = sqrtf(2.0f * ddz / 800.0f);
+				float fall_time = sqrtf(2.0f * ddz / NAV_PHYS_GRAVITY);
 				lk.required_speed = hd / fall_time;
 				if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
 			}
