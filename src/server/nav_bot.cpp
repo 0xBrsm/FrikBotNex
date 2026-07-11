@@ -4572,7 +4572,7 @@ static void PF_nav_log_pickup(void)
 		bot->v.health, bot->v.armorvalue);
 }
 
-/* void nav_log_goalfail(entity goal, float dur) = #81
+/* void nav_log_goalfail(entity goal, float dur, float why) = #81
    Structured telemetry, always-on like NAVSTAT: a bot abandoning a goal
    it could not reach (bot_mark_failed_goal in bot_move.qc).  The behav
    regression tier trends the fire RATE per map; each firing is a
@@ -4580,15 +4580,22 @@ static void PF_nav_log_pickup(void)
    bot. */
 static void PF_nav_log_goalfail(void)
 {
+	static const char *why_names[] =
+		{ "?", "corridor", "rj_hp", "linkexec", "pin", "stall" };
 	edict_t *bot = PROG_TO_EDICT(pr_global_struct->self);
 	edict_t *goal = G_EDICT(OFS_PARM0);
 	float dur = G_FLOAT(OFS_PARM1);
+	int why = (int)G_FLOAT(OFS_PARM2);
 
-	Con_Printf("GOALFAIL time=%.1f bot=%s goal=%s dur=%.0f pos=(%.0f %.0f %.0f)\n",
+	if (why < 0 || why > 5)
+		why = 0;
+
+	Con_Printf("GOALFAIL time=%.1f bot=%s goal=%s dur=%.0f why=%s pos=(%.0f %.0f %.0f)\n",
 		sv.time,
 		pr_strings + (int)bot->v.netname,
 		pr_strings + (int)goal->v.classname,
 		dur,
+		why_names[why],
 		bot->v.origin[0], bot->v.origin[1], bot->v.origin[2]);
 }
 

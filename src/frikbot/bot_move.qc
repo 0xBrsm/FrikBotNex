@@ -369,9 +369,9 @@ float(float base, float strikes) bot_backoff_dur =
 // cooldown) is treated as a fresh, one-off blip instead of carrying
 // forward old strikes.
 float BOT_FAILED_GOAL_DECAY = 60;
-void(entity g, float dur) bot_mark_failed_goal =
+void(entity g, float dur, float why) bot_mark_failed_goal =
 {
-	nav_log_goalfail(g, dur);
+	nav_log_goalfail(g, dur, why);
 	if (self._fg0 == g)
 	{
 		if (time > self._fg0_time + BOT_FAILED_GOAL_DECAY)
@@ -566,7 +566,7 @@ void() bot_get =
 		else
 		{
 			if (self.target1 != world && self.target1 != self)
-				bot_mark_failed_goal(self.target1, 10);
+				bot_mark_failed_goal(self.target1, 10, 1); // corridor
 			self.target1 = world;
 			return;
 		}
@@ -692,7 +692,7 @@ void() bot_get =
 			|| (self.items & IT_QUAD))
 		{
 			if (self.target1.flags & FL_ITEM)
-				bot_mark_failed_goal(self.target1, 30);
+				bot_mark_failed_goal(self.target1, 30, 2); // rj_hp
 			self.target1 = world;
 			return;
 		}
@@ -847,7 +847,7 @@ void() bot_get =
 				nav_fail_current_link();
 				self._link_exec_start = 0;
 				if (self.target1 != world && self.target1 != self)
-					bot_mark_failed_goal(self.target1, 10);
+					bot_mark_failed_goal(self.target1, 10, 3); // linkexec
 				self.target1 = world;
 				return;
 			}
@@ -1005,7 +1005,7 @@ void() bot_get =
 				self._progress_stall = 0;
 				self._progress_best = 99999;
 				if (self.target1 != world && self.target1 != self)
-					bot_mark_failed_goal(self.target1, 10);
+					bot_mark_failed_goal(self.target1, 10, 4); // pin
 				self.target1 = world;
 				return;
 			}
@@ -1074,7 +1074,7 @@ void() bot_get =
 			// same jam. Cool ANY real goal, not just items — a func_button
 			// opener the bot can't reach is re-picked every frame otherwise.
 			if (self.target1 != world && self.target1 != self)
-				bot_mark_failed_goal(self.target1, 10);
+				bot_mark_failed_goal(self.target1, 10, 5); // stall
 			self.target1 = world;
 			return;
 		}
