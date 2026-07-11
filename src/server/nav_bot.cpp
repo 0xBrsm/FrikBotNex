@@ -128,6 +128,30 @@ static void nav_link_fail_reset(void)
 	}
 }
 
+/* Does this path cross an off-mesh link that is cooling down?  The steer
+   side already refuses to walk onto a cooling link (PF_nav_path_steer
+   reports a dead corridor) -- the PLANNER must agree, or goal picking
+   churns: nav_find_goal paths an item straight over the cooled link, the
+   first steer call kills the corridor, the goal is abandoned and re-picked
+   at think rate for the whole cooldown (e1m1: one bot's LINKFAIL pinned
+   another into a 15s GOALFAIL storm because every route out of its pocket
+   crossed the cooled link). */
+static int nav_path_has_cooling_link(const dtPolyRef *path, int path_count)
+{
+	int i, idx;
+
+	if (nav_link_fail_until == NULL)
+		return 0;
+	for (i = 0; i < path_count; i++)
+	{
+		idx = nav_mesh_get_link_index(nav_mesh, (unsigned long long)path[i]);
+		if (idx >= 0 && idx < nav_link_fail_count
+			&& sv.time < nav_link_fail_until[idx])
+			return 1;
+	}
+	return 0;
+}
+
 static int nav_bot_slot(void)
 {
 	edict_t *e = PROG_TO_EDICT(pr_global_struct->self);
@@ -4032,6 +4056,13 @@ static void PF_nav_find_goal(void)
 				continue;
 			}
 		}
+		if (nav_path_has_cooling_link(path, path_count))
+		{
+			if (nav_debug_cvar.value)
+				fprintf(stderr, "  COOLING to %s (%d polys)\n",
+					pr_strings + (int)it->v.classname, path_count);
+			continue;
+		}
 
 		dbg_pathed++;
 
@@ -4067,7 +4098,8 @@ static void PF_nav_find_goal(void)
 						int ook = 0;
 						if (!dtStatusFailed(os) && ocount > 0
 							&& !(dtStatusDetail(os, DT_PARTIAL_RESULT)
-								&& opath[ocount - 1] != oref))
+								&& opath[ocount - 1] != oref)
+							&& !nav_path_has_cooling_link(opath, ocount))
 						{
 							int obc = nav_path_block_class(opath, ocount, bot, &oblk);
 							if (obc != 1)
@@ -4213,7 +4245,8 @@ static void PF_nav_find_goal(void)
 				bot_ref, roam_ref, bot_nearest, roam_rc,
 				&plain_filter, path, &path_count, NAV_MESH_MAX_PATH_REFS);
 			if (dtStatusSucceed(ps) && path_count > 0
-				&& nav_path_block_class(path, path_count, bot, NULL) != 1)
+				&& nav_path_block_class(path, path_count, bot, NULL) != 1
+				&& !nav_path_has_cooling_link(path, path_count))
 			{
 				if (nav_debug_cvar.value)
 				{
