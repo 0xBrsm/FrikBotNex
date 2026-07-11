@@ -1516,6 +1516,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		links[n].height_delta = top_z - bot_z;
 		links[n].wait_time = travel;
 		links[n].required_speed = 0;
+		links[n].serve_ent = i;
 		if (nav_debug_cvar.value)
 			Con_Printf("Nav: plat link (%.0f %.0f) z %.0f -> %.0f spd %.0f\n",
 				links[n].start[0], links[n].start[1], bot_z, top_z, speed);
@@ -1555,6 +1556,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 				links[n].height_delta = 0;
 				links[n].wait_time = 0;
 				links[n].required_speed = 0;
+				links[n].serve_ent = i;
 				n++;
 			}
 		}
@@ -1633,6 +1635,7 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 				links[n].height_delta = next_pc->v.origin[2] - pc->v.origin[2];
 				links[n].wait_time = dist / (100.0f);
 				links[n].required_speed = 0;
+				links[n].serve_ent = i;
 				n++;
 				break;
 			}
@@ -3632,7 +3635,9 @@ static void PF_nav_fail_current_link(void)
      field 0: (link_type, required_speed, wait_time)
      field 1: start endpoint (Quake coords)
      field 2: end endpoint (Quake coords)
-     field 3: (height_delta, bidirectional, radius) */
+     field 3: (height_delta, bidirectional, radius)
+     field 4: (serve_ent, 0, 0) -- edict number of the plat/train serving
+              the link, 0 when no entity serves it */
 static void PF_nav_link_info(void)
 {
 	int field = (int)G_FLOAT(OFS_PARM0);
@@ -3676,6 +3681,9 @@ static void PF_nav_link_info(void)
 		G_FLOAT(OFS_RETURN + 0) = l->height_delta;
 		G_FLOAT(OFS_RETURN + 1) = (float)l->bidirectional;
 		G_FLOAT(OFS_RETURN + 2) = l->radius;
+		break;
+	case 4:
+		G_FLOAT(OFS_RETURN + 0) = (float)l->serve_ent;
 		break;
 	}
 }

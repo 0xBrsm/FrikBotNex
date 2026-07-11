@@ -80,6 +80,7 @@ typedef struct
 	float	required_speed;		/* min velocity to clear (jumps) */
 	float	height_delta;		/* vertical change start→end */
 	float	wait_time;		/* seconds to wait (platforms, doors) */
+	int	serve_ent;		/* edict serving the link (plat/train), 0 = none */
 } nav_off_mesh_link_t;
 
 /* C++ only: close extern "C", include Detour, define struct */
