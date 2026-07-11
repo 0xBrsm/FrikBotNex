@@ -2420,18 +2420,32 @@ void Nav_BuildForMap(void)
 			fprintf(stderr, "Nav: %d level-exit points registered as escapable\n", nexits);
 	}
 
-	/* Single-pass build: entity links provided upfront, jump/drop links
-	   detected mid-build via callback after contours are ready. */
-	memset(&summary, 0, sizeof(summary));
+	/* Run the Recast pipeline exactly once: off-mesh links never affect
+	   Recast geometry (the jump/drop link callback fires here, off contour
+	   edges + heightfield), so every link-set change below only needs the
+	   Detour tile re-emitted from this bake -- provably identical output
+	   to a full rebuild. */
 	memset(error, 0, sizeof(error));
-	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-		&config, entity_links, entity_count, &summary,
+	nav_mesh_bake_t *bake = nav_mesh_bake_begin(verts, vert_count, tris, tri_count,
+		tri_hazard, &config,
 		nav_jump_links_cvar.value ? nav_link_callback : NULL, NULL,
 		error, sizeof(error));
+	if (bake == NULL)
+	{
+		Con_Printf("Nav: build failed: %s\n", error);
+		nav_doors_restore();
+		free(verts); free(tris); free(tri_hazard); free(entity_links);
+		return;
+	}
+
+	memset(error, 0, sizeof(error));
+	nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+		&summary, error, sizeof(error));
 
 	if (nav_mesh == NULL)
 	{
 		Con_Printf("Nav: build failed: %s\n", error);
+		nav_mesh_bake_end(bake);
 		nav_doors_restore();
 		free(verts); free(tris); free(tri_hazard); free(entity_links);
 		return;
@@ -2454,14 +2468,13 @@ void Nav_BuildForMap(void)
 			free(ojumps);
 
 			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
+			nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+				&summary, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_mesh_bake_end(bake);
 				nav_doors_restore();
 				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
@@ -2535,11 +2548,9 @@ void Nav_BuildForMap(void)
 		free(links);
 
 		nav_mesh_destroy(nav_mesh);
-		memset(&summary, 0, sizeof(summary));
 		memset(error, 0, sizeof(error));
-		nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count, tri_hazard,
-			&config, entity_links, entity_count, &summary,
-			nav_link_callback, NULL, error, sizeof(error));
+		nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+			&summary, error, sizeof(error));
 		if (nav_mesh == NULL)
 		{
 			Con_Printf("Nav: rebuild failed: %s\n", error);
@@ -2563,6 +2574,7 @@ void Nav_BuildForMap(void)
 				int r = run_conn_pass(conn_passes[pi].compute);
 				if (r < 0)
 				{
+					nav_mesh_bake_end(bake);
 					nav_doors_restore();
 					free(verts); free(tris); free(tri_hazard); free(entity_links);
 					return;
@@ -2574,6 +2586,7 @@ void Nav_BuildForMap(void)
 		}
 	}
 
+	nav_mesh_bake_end(bake);
 	nav_doors_restore();
 
 	free(verts);

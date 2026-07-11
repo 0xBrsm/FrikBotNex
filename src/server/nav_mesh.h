@@ -261,15 +261,33 @@ typedef int (*nav_mesh_link_callback_t)(
 	nav_off_mesh_link_t **out_links,
 	void *user_data);
 
-nav_mesh_runtime_t *nav_mesh_build(
+/* The bake is split so the conn fixpoint loop can rebuild cheaply:
+   off-mesh links never touch Recast geometry (the link callback reads only
+   contour edges + heightfield), so the Recast pipeline -- heightfield,
+   regions, contours, callback link detection, poly/detail meshes -- runs
+   once per map (nav_mesh_bake_begin) and each link-set change only re-emits
+   the Detour tile (nav_mesh_bake_realize).  Provably identical output to
+   rebuilding from scratch, at a fraction of the cost. */
+typedef struct nav_mesh_bake_s nav_mesh_bake_t;
+
+nav_mesh_bake_t *nav_mesh_bake_begin(
 	const float *verts, int vertex_count,
 	const int *tris, int triangle_count,
 	const unsigned char *tri_hazard, /* one byte per triangle, may be NULL */
 	const nav_mesh_build_config_t *config,
-	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
-	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
+
+/* Build a Detour navmesh from the baked Recast products plus the given
+   off-mesh links (callback-detected links are appended automatically).
+   May be called repeatedly with different link sets. */
+nav_mesh_runtime_t *nav_mesh_bake_realize(
+	const nav_mesh_bake_t *bake,
+	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
+	nav_mesh_summary_t *summary,
+	char *error, size_t error_size);
+
+void nav_mesh_bake_end(nav_mesh_bake_t *bake);
 
 /* Physics check for an orphan-connecting jump: can a player jump from foot
    point 'from' (lower, main mesh) up to 'to' (higher, stranded area)?

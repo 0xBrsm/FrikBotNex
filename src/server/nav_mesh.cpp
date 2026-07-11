@@ -2756,16 +2756,29 @@ static int nav_mesh_disable_islands(dtNavMesh *mesh)
 	return disabled;
 }
 
-extern "C" nav_mesh_runtime_t *nav_mesh_build(
+/* Recast products cached by nav_mesh_bake_begin for reuse across Detour
+   realizes.  Everything here depends only on the input geometry + config,
+   never on the off-mesh link set. */
+struct nav_mesh_bake_s
+{
+	rcPolyMesh *poly_mesh;
+	rcPolyMeshDetail *detail_mesh;
+	nav_off_mesh_link_t *callback_links;
+	int callback_link_count;
+	int regions_repaired;
+	int input_vertex_count;
+	int input_triangle_count;
+	nav_mesh_build_config_t config;
+	float cs, ch;
+};
+
+extern "C" nav_mesh_bake_t *nav_mesh_bake_begin(
 	const float *verts,
 	int vertex_count,
 	const int *tris,
 	int triangle_count,
 	const unsigned char *tri_hazard,
 	const nav_mesh_build_config_t *config,
-	const nav_off_mesh_link_t *off_mesh_links,
-	int off_mesh_link_count,
-	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback,
 	void *callback_data,
 	char *error,
@@ -2776,13 +2789,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	RecastBuildGuard guard;
 	std::vector<float> recast_verts;
 	std::vector<unsigned char> areas;
-	int nav_data_size;
-	dtNavMeshCreateParams params;
-	dtStatus status;
 	int i;
 
-	if (summary != nullptr)
-		memset(summary, 0, sizeof(*summary));
 	if (verts == nullptr || tris == nullptr || config == nullptr)
 	{
 		nav_set_error(error, error_size, "Navmesh build requires non-null vertices, triangles, and config");
@@ -2814,8 +2822,6 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	rc_config.maxVertsPerPoly = config->max_verts_per_poly;
 	rc_config.detailSampleDist = config->detail_sample_distance < 0.9f ? 0.0f : rc_config.cs * config->detail_sample_distance;
 	rc_config.detailSampleMaxError = rc_config.ch * config->detail_sample_max_error;
-
-	nav_data_size = 0;
 
 	guard.solid = rcAllocHeightfield();
 	if (guard.solid == nullptr)
@@ -3609,6 +3615,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	if (!rcBuildPolyMesh(&ctx, *guard.contours, rc_config.maxVertsPerPoly, *guard.poly_mesh))
 	{
 		nav_set_error(error, error_size, "Failed to build polygon mesh");
+		free(callback_links);
 		return nullptr;
 	}
 
@@ -3616,16 +3623,19 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	if (guard.detail_mesh == nullptr)
 	{
 		nav_set_error(error, error_size, "Failed to allocate detail mesh");
+		free(callback_links);
 		return nullptr;
 	}
 	if (!rcBuildPolyMeshDetail(&ctx, *guard.poly_mesh, *guard.compact, rc_config.detailSampleDist, rc_config.detailSampleMaxError, *guard.detail_mesh))
 	{
 		nav_set_error(error, error_size, "Failed to build detail mesh");
+		free(callback_links);
 		return nullptr;
 	}
 	if (guard.poly_mesh->npolys <= 0 || guard.poly_mesh->nverts <= 0)
 	{
 		nav_set_error(error, error_size, "Recast produced an empty navmesh");
+		free(callback_links);
 		return nullptr;
 	}
 
@@ -3732,19 +3742,78 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			n_walk, n_nearwall, npoly);
 	}
 
+	nav_mesh_bake_t *bake = new (std::nothrow) nav_mesh_bake_s();
+	if (bake == nullptr)
+	{
+		nav_set_error(error, error_size, "Failed to allocate bake cache");
+		free(callback_links);
+		return nullptr;
+	}
+	bake->poly_mesh = guard.poly_mesh;
+	bake->detail_mesh = guard.detail_mesh;
+	guard.poly_mesh = nullptr;
+	guard.detail_mesh = nullptr;
+	bake->callback_links = callback_links;
+	bake->callback_link_count = callback_link_count;
+	bake->regions_repaired = regions_repaired;
+	bake->input_vertex_count = vertex_count;
+	bake->input_triangle_count = triangle_count;
+	bake->config = *config;
+	bake->cs = rc_config.cs;
+	bake->ch = rc_config.ch;
+	return bake;
+}
+
+extern "C" void nav_mesh_bake_end(nav_mesh_bake_t *bake)
+{
+	if (bake == nullptr)
+		return;
+	rcFreePolyMeshDetail(bake->detail_mesh);
+	rcFreePolyMesh(bake->poly_mesh);
+	free(bake->callback_links);
+	delete bake;
+}
+
+extern "C" nav_mesh_runtime_t *nav_mesh_bake_realize(
+	const nav_mesh_bake_t *bake,
+	const nav_off_mesh_link_t *off_mesh_links,
+	int off_mesh_link_count,
+	nav_mesh_summary_t *summary,
+	char *error,
+	size_t error_size)
+{
+	RecastBuildGuard guard;
+	dtNavMeshCreateParams params;
+	dtStatus status;
+	int nav_data_size = 0;
+
+	if (summary != nullptr)
+		memset(summary, 0, sizeof(*summary));
+	if (bake == nullptr)
+	{
+		nav_set_error(error, error_size, "Detour realize requires a bake cache");
+		return nullptr;
+	}
+
+	const nav_mesh_build_config_t *config = &bake->config;
+	const rcPolyMesh *poly_mesh = bake->poly_mesh;
+	const rcPolyMeshDetail *detail_mesh = bake->detail_mesh;
+	const nav_off_mesh_link_t *callback_links = bake->callback_links;
+	const int callback_link_count = bake->callback_link_count;
+
 	memset(&params, 0, sizeof(params));
-	params.verts = guard.poly_mesh->verts;
-	params.vertCount = guard.poly_mesh->nverts;
-	params.polys = guard.poly_mesh->polys;
-	params.polyAreas = guard.poly_mesh->areas;
-	params.polyFlags = guard.poly_mesh->flags;
-	params.polyCount = guard.poly_mesh->npolys;
-	params.nvp = guard.poly_mesh->nvp;
-	params.detailMeshes = guard.detail_mesh->meshes;
-	params.detailVerts = guard.detail_mesh->verts;
-	params.detailVertsCount = guard.detail_mesh->nverts;
-	params.detailTris = guard.detail_mesh->tris;
-	params.detailTriCount = guard.detail_mesh->ntris;
+	params.verts = poly_mesh->verts;
+	params.vertCount = poly_mesh->nverts;
+	params.polys = poly_mesh->polys;
+	params.polyAreas = poly_mesh->areas;
+	params.polyFlags = poly_mesh->flags;
+	params.polyCount = poly_mesh->npolys;
+	params.nvp = poly_mesh->nvp;
+	params.detailMeshes = detail_mesh->meshes;
+	params.detailVerts = detail_mesh->verts;
+	params.detailVertsCount = detail_mesh->nverts;
+	params.detailTris = detail_mesh->tris;
+	params.detailTriCount = detail_mesh->ntris;
 	params.walkableHeight = config->walkable_height;
 	params.walkableRadius = config->walkable_radius;
 	/* Query-time vertical tolerance, NOT the raster walkable height.
@@ -3753,10 +3822,10 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	   origins, not guaranteed foot-contact points, so the search must cover
 	   origin-to-surface separation even when the navmesh itself is on the floor. */
 	params.walkableClimb = NAV_MESH_QUERY_CLIMB;
-	rcVcopy(params.bmin, guard.poly_mesh->bmin);
-	rcVcopy(params.bmax, guard.poly_mesh->bmax);
-	params.cs = rc_config.cs;
-	params.ch = rc_config.ch;
+	rcVcopy(params.bmin, poly_mesh->bmin);
+	rcVcopy(params.bmax, poly_mesh->bmax);
+	params.cs = bake->cs;
+	params.ch = bake->ch;
 	params.buildBvTree = true;
 
 	/* Off-mesh connections (teleporters, jump pads).
@@ -3964,18 +4033,16 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			guard.runtime->link_count = total_links;
 		}
 	}
-	free(callback_links);
-
 	if (summary != nullptr)
 	{
-		summary->input_vertex_count = vertex_count;
-		summary->input_triangle_count = triangle_count;
-		summary->polygon_count = guard.poly_mesh->npolys;
-		summary->navmesh_vertex_count = guard.poly_mesh->nverts;
-		summary->detail_mesh_count = guard.detail_mesh->nmeshes;
-		summary->detail_vertex_count = guard.detail_mesh->nverts;
-		summary->detail_triangle_count = guard.detail_mesh->ntris;
-		summary->regions_repaired = regions_repaired;
+		summary->input_vertex_count = bake->input_vertex_count;
+		summary->input_triangle_count = bake->input_triangle_count;
+		summary->polygon_count = poly_mesh->npolys;
+		summary->navmesh_vertex_count = poly_mesh->nverts;
+		summary->detail_mesh_count = detail_mesh->nmeshes;
+		summary->detail_vertex_count = detail_mesh->nverts;
+		summary->detail_triangle_count = detail_mesh->ntris;
+		summary->regions_repaired = bake->regions_repaired;
 		summary->sliver_polys_disabled = sliver_polys_disabled;
 	}
 
