@@ -71,9 +71,9 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_DETAIL_SAMPLE_MAX_ERROR   1.0f
 
 
-/* Jump/drop link detection (kinematics live in nav_physics.h) */
+/* Jump/drop link detection (kinematics + shared jump/RJ envelopes live in
+   nav_physics.h) */
 #define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
-#define NAV_JUMP_HEIGHT_MAX         48.0f  /* max jump-up height in Quake */
 /* Drops have no walkableClimb floor: a contour boundary edge means the
    surfaces did NOT connect, so even a small clear fall needs a link (dm4
    GL pocket: 8u drop over an unwalkable hull-bevel ridge).  Keep above
@@ -98,13 +98,6 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_DEEP_DROP_HEIGHT_MIN    48.0f  /* below this, walk/jump passes own it */
 #define NAV_DEEP_DROP_HEIGHT_MAX   700.0f
 #define NAV_DEEP_DROP_MAX_SPEED    300.0f  /* launch speed budget (full run ~320) */
-/* Rocket jump: the bot fires an RL at its feet while jumping for a big
-   upward boost a normal run-jump can't reach.  Only used for orphan ledges
-   above normal jump height; a single RJ clears ~250u up.  Horizontal reach
-   while gaining that height is modest -- keep it tight so RJ stays a
-   near-vertical last resort, never a substitute for a run-jump across. */
-#define NAV_RJ_HEIGHT_MAX          256.0f  /* max single-rocket-jump up height */
-#define NAV_RJ_HORIZ_MAX           128.0f  /* max horizontal while RJ-ing up */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f

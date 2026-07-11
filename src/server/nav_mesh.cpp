@@ -1228,7 +1228,7 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					   ledges above that.  validate still gates the physics, and
 					   cost prefers the cheaper walk/jump, so this only adds
 					   links for components nothing else could connect. */
-					if (adz > 256.0f) continue;
+					if (adz > NAV_RJ_HEIGHT_MAX) continue;
 					if (hd > 280.0f || hd < 8.0f) continue;
 					float cost = hd + adz;
 					if (cost >= bestcost) continue;
@@ -1711,10 +1711,11 @@ int nav_mesh_compute_rocket_jumps(
 	{
 		if (tile->polys[lo].flags == 0) continue;
 
-		/* Cheapest higher cross-patch poly inside the RJ-up envelope:
-		   up past a run-jump's apex (48u) but within one rocket's lift
-		   (256u), horizontal tight (128u) -- validate() does the exact
-		   physics and overhead-clearance. */
+		/* Cheapest higher cross-patch poly inside the RJ-up envelope
+		   (shared with the validator via nav_physics.h): up past a
+		   run-jump's reach but within one rocket's lift, horizontal
+		   tight -- validate() does the exact physics and
+		   overhead-clearance. */
 		float bestcost = 1e9f; int bestHi = -1;
 		for (int hi = 0; hi < ground; hi++)
 		{
@@ -1722,10 +1723,10 @@ int nav_mesh_compute_rocket_jumps(
 			if (gacomp[lo] == gacomp[hi]) continue;
 			const float *ql = &q[lo * 3], *qh = &q[hi * 3];
 			float dz = qh[2] - ql[2];
-			if (dz <= 48.0f || dz > 256.0f) continue;
+			if (dz <= NAV_JUMP_HEIGHT_MAX || dz > NAV_RJ_HEIGHT_MAX) continue;
 			float dx = qh[0]-ql[0], dy = qh[1]-ql[1];
 			float hd = sqrtf(dx*dx + dy*dy);
-			if (hd < 8.0f || hd > 128.0f) continue;
+			if (hd < 8.0f || hd > NAV_RJ_HORIZ_MAX) continue;
 			float cost = hd + dz;
 			if (cost < bestcost) { bestcost = cost; bestHi = hi; }
 		}
