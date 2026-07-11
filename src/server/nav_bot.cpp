@@ -71,33 +71,12 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_DETAIL_SAMPLE_MAX_ERROR   1.0f
 
 
-/* Jump/drop link detection (kinematics + shared jump/RJ envelopes live in
-   nav_physics.h) */
-#define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
-/* Drops have no walkableClimb floor: a contour boundary edge means the
+/* Jump/drop link detection (kinematics + the shared jump/RJ/drop envelopes
+   and caps live in nav_physics.h).
+   Drops have no walkableClimb floor: a contour boundary edge means the
    surfaces did NOT connect, so even a small clear fall needs a link (dm4
-   GL pocket: 8u drop over an unwalkable hull-bevel ridge).  Keep above
-   contour simplification error so an edge can't "drop" onto itself. */
-#define NAV_DROP_HEIGHT_MIN          6.0f
-/* Quake players survive long falls (damage only past ~265u, death past
-   ~800u), and whole lower regions are reached by dropping in.  Capping at
-   128u orphaned them from the mesh.  Reach deep enough to link those drops;
-   the fall-column hull-truth + lane checks still gate each candidate. */
-#define NAV_DROP_HEIGHT_MAX        192.0f  /* max drop-down height (dry land) */
-/* Water negates fall damage, so a deep plunge into a pool is survivable and
-   common (dm3's -370 pool holds items).  Allow a much deeper drop ONLY when
-   the landing is underwater, and always pair it with an AI_SURFACE swim-out
-   so the bot can climb back to the ledge -- a deep drop-in with no exit is
-   the pit-trap that a blanket cap raise caused before. */
-#define NAV_WATER_DROP_HEIGHT_MAX  400.0f  /* max drop-down into water */
-/* Deep dry drops past NAV_DROP_HEIGHT_MAX are handled by a separate
-   post-build pass (nav_mesh_compute_deep_drops) that only links landings
-   which can already path back out -- a flat cap raise to 320 dropped bots
-   into exitless dm3 pits, so depth alone can't be the gate.  Falls kill
-   past ~800u; stay under that. */
-#define NAV_DEEP_DROP_HEIGHT_MIN    48.0f  /* below this, walk/jump passes own it */
-#define NAV_DEEP_DROP_HEIGHT_MAX   700.0f
-#define NAV_DEEP_DROP_MAX_SPEED    300.0f  /* launch speed budget (full run ~320) */
+   GL pocket: 8u drop over an unwalkable hull-bevel ridge). */
+#define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
@@ -336,7 +315,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	   swim to the floor" -- the landing poly needn't be plumb below the
 	   ledge (e3m5's hole floor is 824u under its rim platform behind an
 	   overhanging slope, but water catches the fall after ~210u).  The
-	   lethal-fall cap applies to the DRY portion only. */
+	   deep-drop dry cap applies to the DRY portion only. */
 	{
 		vec3_t wp;
 		wp[0] = to[0]; wp[1] = to[1]; wp[2] = to[2] + 8.0f;
@@ -428,7 +407,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 				}
 				dir[0] = goal[0] - entry[0]; dir[1] = goal[1] - entry[1]; dir[2] = goal[2] - entry[2];
 				len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
-				if (len > 600.0f) /* swim-reach cap, as in the swim pass */
+				if (len > NAV_DEEP_DROP_WET_LEG)
 					{ DDOFF("wetlen"); continue; }
 				for (s = 16.0f; s < len && wet; s += 16.0f)
 				{

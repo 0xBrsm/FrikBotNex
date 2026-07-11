@@ -40,11 +40,52 @@
 #define NAV_RJ_HEIGHT_MAX          256.0f  /* max single-rocket-jump up height */
 #define NAV_RJ_HORIZ_MAX           128.0f  /* max horizontal while RJ-ing up */
 
+/* Fall damage (client.qc PlayerPostThink, verified vanilla in this mod):
+   landing on dry ground faster than 650 u/s costs a FLAT 5HP -- falls are
+   never lethal from any reasonable health, and a water landing negates the
+   damage entirely.  650 u/s is reached after v^2/2g = 264u of free fall.
+   Every drop cap below is therefore WILLINGNESS or SCAN-RANGE policy, not
+   survival physics. */
+#define NAV_PHYS_FALL_DMG_SPEED    650.0f
+#define NAV_PHYS_FALL_DMG_HEIGHT   (NAV_PHYS_FALL_DMG_SPEED \
+	* NAV_PHYS_FALL_DMG_SPEED / (2.0f * NAV_PHYS_GRAVITY))
+
+/* Boundary-drop tier (nav_link_callback edge detector): common, cheap
+   links a bot takes casually -- so keep them damage-free.  The dry cap
+   sits under NAV_PHYS_FALL_DMG_HEIGHT (asserted below); water negates
+   fall damage, so a water landing may be deeper, paired with an
+   AI_SURFACE swim-out so it is never a pit-trap.  The min stays above
+   contour simplification error so an edge can't "drop" onto itself. */
+#define NAV_DROP_HEIGHT_MIN          6.0f
+#define NAV_DROP_HEIGHT_MAX        192.0f  /* dry land, damage-free */
+#define NAV_WATER_DROP_HEIGHT_MAX  400.0f  /* into water (no fall damage) */
+
+/* Deep-drop tier (nav_mesh_compute_deep_drops): last-resort links, added
+   only when the landing can already path back out.  The bot accepts the
+   5HP toll past 264u; the dry cap is willingness, chosen well past every
+   drop-in region on the stock maps (a flat raise to 320 once dropped bots
+   into exitless dm3 pits, so depth alone is never the gate -- the
+   pathback + fall-column validation is).  For a water landing the cap
+   applies to the DRY portion only (ledge to water surface); after
+   splashdown the bot swims, budgeted by the wet-leg cap.  The scan max
+   bounds the candidate search and must cover dry reach + wet reach
+   (asserted below); the validator stays authoritative past it. */
+#define NAV_DEEP_DROP_HEIGHT_MIN    48.0f  /* below this, walk/jump passes own it */
+#define NAV_DEEP_DROP_HEIGHT_MAX   700.0f  /* dry-portion willingness cap */
+#define NAV_DEEP_DROP_MAX_SPEED    300.0f  /* launch speed budget (full run ~320) */
+#define NAV_DEEP_DROP_WET_LEG      600.0f  /* swim-out budget after splashdown */
+#define NAV_DEEP_DROP_SCAN_MAX    1400.0f  /* candidate scan range (total dz) */
+
 #ifdef __cplusplus
 static_assert(NAV_RJ_HEIGHT_MAX < NAV_PHYS_RJ_APEX,
 	"RJ link cap must stay under the physical rocket-jump apex");
 static_assert(NAV_PHYS_JUMP_APEX < NAV_JUMP_HEIGHT_MAX,
 	"run-jump reach cap must cover the jump apex");
+static_assert(NAV_DROP_HEIGHT_MAX < NAV_PHYS_FALL_DMG_HEIGHT,
+	"casual boundary drops must stay damage-free");
+static_assert(NAV_DEEP_DROP_SCAN_MAX >=
+	NAV_DEEP_DROP_HEIGHT_MAX + NAV_DEEP_DROP_WET_LEG,
+	"deep-drop scan range must cover dry reach plus the wet leg");
 #endif
 
 #endif /* NAV_PHYSICS_H */

@@ -1812,21 +1812,19 @@ int nav_mesh_compute_deep_drops(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links)
 {
-	/* Envelope: below 48 the walk/jump passes own the space; capped short
-	   of a lethal fall (~800u kills).  Horizontal reach is physics, not a
-	   fixed radius: during a dz fall a running bot covers up to
-	   run_speed * sqrt(2*dz/800), so a candidate is feasible whenever the
-	   required launch speed stays under a full run (with margin). */
-	const float kDeepDropMin = 48.0f;
-	/* Envelope only: the validator enforces the true lethal-fall cap (~700u)
-	   on the DRY part of the fall, so a landing poly deep under water may sit
-	   far below that.  This just bounds the candidate search. */
-	const float kDeepDropMax = 1400.0f;
-	const float kDeepDropMaxSpeed = 300.0f;
-	/* Envelope slack for water landings: after splashdown the remaining
-	   horizontal distance is swum, not flown -- the validator's entry-column
-	   search enforces the real per-offset drift caps and the wet leg. */
-	const float kDeepDropSwimSlack = 600.0f;
+	/* Candidate envelope, shared with the validator via nav_physics.h.
+	   Horizontal reach is physics, not a fixed radius: during a dz fall a
+	   running bot covers up to run_speed * sqrt(2*dz/g), so a candidate is
+	   feasible whenever the required launch speed stays under a full run
+	   (with margin), plus the wet-leg swim budget for water landings --
+	   after splashdown the remaining distance is swum, not flown.  The
+	   validator enforces the dry cap on the DRY part of the fall only, so
+	   a landing poly deep under water may sit far below it; the scan max
+	   just bounds the candidate search (see nav_physics.h). */
+	const float kDeepDropMin = NAV_DEEP_DROP_HEIGHT_MIN;
+	const float kDeepDropMax = NAV_DEEP_DROP_SCAN_MAX;
+	const float kDeepDropMaxSpeed = NAV_DEEP_DROP_MAX_SPEED;
+	const float kDeepDropSwimSlack = NAV_DEEP_DROP_WET_LEG;
 
 	*out_links = nullptr;
 	if (navmesh == nullptr || navmesh->navmesh == nullptr
