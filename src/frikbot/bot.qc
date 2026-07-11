@@ -84,6 +84,7 @@ void()				bot_build_movevect;
 // navmesh builtins (Detour pathfinding)
 float()					nav_ready = #80;
 void(entity goal, float dur)		nav_log_goalfail = #81;
+entity()				nav_link_serve_ent = #82;
 vector(vector pos)			navigate = #84;
 vector(entity bot, float index)	nav_path_debug = #85;
 entity()				nav_find_goal = #86;

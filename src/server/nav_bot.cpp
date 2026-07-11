@@ -3689,6 +3689,36 @@ static void PF_nav_link_info(void)
 }
 
 
+/* entity nav_link_serve_ent() = #82
+   The plat/train edict serving the calling bot's pending off-mesh link,
+   recorded at bake time -- replaces QC's runtime nearest-plat scan, which
+   guessed and could pick a different plat than the one the link rides.
+   Returns world when there is no pending link or no serving entity. */
+static void PF_nav_link_serve_ent(void)
+{
+	int slot, idx;
+	unsigned long long ref;
+	const nav_off_mesh_link_t *l;
+
+	G_INT(OFS_RETURN) = EDICT_TO_PROG(sv.edicts);	/* world */
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_bot_corridors[slot] == NULL) return;
+	if (nav_mesh == NULL) return;
+
+	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	if (ref == 0) return;
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_mesh->link_count) return;
+	l = &nav_mesh->links[idx];
+
+	if (l->serve_ent <= 0 || l->serve_ent >= sv.num_edicts) return;
+	if (EDICT_NUM(l->serve_ent)->free) return;
+	G_INT(OFS_RETURN) = EDICT_TO_PROG(EDICT_NUM(l->serve_ent));
+}
+
+
 /* vector nav_path_debug(entity bot, float index) = #85
    Return position of waypoint N in bot's cached path.
    Returns '0 0 0' if no valid path or index out of range.
@@ -4534,7 +4564,7 @@ void Nav_RegisterBuiltins(void)
 
 	nav_extended_builtins[NAV_BUILTIN_BASE + 0] = PF_nav_ready;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 1] = PF_nav_log_goalfail;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 2] = PF_nav_stub;      /* was nav_path_start */
+	nav_extended_builtins[NAV_BUILTIN_BASE + 2] = PF_nav_link_serve_ent;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 3] = PF_nav_stub;      /* was nav_route_cost */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 4] = PF_nav_path_steer;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 5] = PF_nav_path_debug;

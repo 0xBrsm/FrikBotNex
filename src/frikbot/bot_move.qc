@@ -72,8 +72,6 @@ this notice in its entirety.
 .entity _fg3; .float _fg3_time; .float _fg3_strikes;
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
-.entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
-.vector _plat_link_wp;    // corner that cache was computed for
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -748,86 +746,54 @@ void() bot_get =
 			// a lowered one, never stand waiting. The 8x abandon window
 			// below covers the wait; a dead plat (targeted, never
 			// triggered) still times out.
-			local entity pl, bestpl;
+			local entity bestpl;
 			local vector pc;
-			local float pd, bestpd, clearance;
+			local float clearance;
 
-			// The serving plat is a function of the link corner (wp), which
-			// only changes when the corridor advances -- re-scanning every
-			// plat in the level every frame while a bot waits at the lip is
-			// wasted work. Cache the lookup per corner instead.
-			if (self._plat_link_pl == world
-				|| self._plat_link_pl.classname != "plat"
-				|| vlen(wp - self._plat_link_wp) > 1)
+			// The bake records which entity serves this link -- no more
+			// nearest-plat scan, which guessed and could latch onto a
+			// different plat than the one the link rides. Collapse-floor
+			// doors serve their exit links too, but the old scan never
+			// matched them (classname "door"), so keep holds plat-only.
+			bestpl = nav_link_serve_ent();
+			if (bestpl.classname == "plat")
 			{
-				bestpl = world;
-				bestpd = 99999;
-				pl = find(world, classname, "plat");
-				while (pl != world)
+				// Hold clear of the plat's OWN footprint, not a flat guess --
+				// a wide plat (e1m2's water lift is 126x86) made the old fixed
+				// 80/96u "close enough, stop" radius land inside the shaft it
+				// needs to return to. A bot that loses the boarding race (plat
+				// departs while it's still stepping on/near the deck) got
+				// frozen exactly there by the old logic instead of being moved
+				// clear, so it sat parked in the vacated shaft -- often
+				// underwater at the bottom -- until the plat came back down on
+				// top of it, hit plat_crush (plats.qc) and reversed. With
+				// enough bots losing that race the plat never stops bouncing.
+				clearance = bestpl.absmax_x - bestpl.absmin_x;
+				if (bestpl.absmax_y - bestpl.absmin_y > clearance)
+					clearance = bestpl.absmax_y - bestpl.absmin_y;
+				clearance = clearance * 0.5 + 32;
+
+				// Hold at the shaft lip while the plat is parked ABOVE the
+				// corner (walking to the exact center means dropping into
+				// the pit under it and blocking its return), and while it's
+				// moving through the shaft (stepping toward it just grinds
+				// against its side/underside; moving is transient, so this
+				// can't become a standing freeze).
+				if ((bestpl.absmax_z > wp_z + 32
+						&& self.origin_z < bestpl.absmax_z)
+					|| bestpl.velocity != '0 0 0')
 				{
-					pc = (pl.absmin + pl.absmax) * 0.5;
-					pc_z = wp_z;
-					pd = vlen(pc - wp);
-					if (pd < bestpd)
-					{
-						bestpd = pd;
-						bestpl = pl;
-					}
-					pl = find(pl, classname, "plat");
+					pc = wp - self.origin;
+					pc_z = 0;
+					if (vlen(pc) < 1)
+						self.b_wishdir = '0 0 0';
+					else if (vlen(pc) < clearance)
+						// Already inside the footprint -- walk back out to
+						// the lip instead of freezing in place.
+						self.b_wishdir = normalize(self.origin - wp);
+					else
+						self.b_wishdir = '0 0 0';
 				}
-				self._plat_link_pl = bestpl;
-				self._plat_link_wp = wp;
-			}
-			bestpl = self._plat_link_pl;
-			pc = (bestpl.absmin + bestpl.absmax) * 0.5;
-			pc_z = wp_z;
-			bestpd = vlen(pc - wp);
-
-			// Hold clear of the plat's OWN footprint, not a flat guess --
-			// a wide plat (e1m2's water lift is 126x86) made the old fixed
-			// 80/96u "close enough, stop" radius land inside the shaft it
-			// needs to return to. A bot that loses the boarding race (plat
-			// departs while it's still stepping on/near the deck) got
-			// frozen exactly there by the old logic instead of being moved
-			// clear, so it sat parked in the vacated shaft -- often
-			// underwater at the bottom -- until the plat came back down on
-			// top of it, hit plat_crush (plats.qc) and reversed. With
-			// enough bots losing that race the plat never stops bouncing.
-			clearance = bestpl.absmax_x - bestpl.absmin_x;
-			if (bestpl.absmax_y - bestpl.absmin_y > clearance)
-				clearance = bestpl.absmax_y - bestpl.absmin_y;
-			clearance = clearance * 0.5 + 32;
-
-			if (bestpl != world && bestpd < clearance + 64
-				&& bestpl.absmax_z > wp_z + 32
-				&& self.origin_z < bestpl.absmax_z)
-			{
-				pc = wp - self.origin;
-				pc_z = 0;
-				if (vlen(pc) < 1)
-					self.b_wishdir = '0 0 0';
-				else if (vlen(pc) < clearance)
-					// Already inside the footprint -- walk back out to the
-					// lip instead of freezing in place.
-					self.b_wishdir = normalize(self.origin - wp);
-				else
-					self.b_wishdir = '0 0 0';
-			}
-			// A plat actively moving through this link's shaft: stepping
-			// toward it just grinds the bot against its side/underside.
-			// Hold until it parks, then board. Moving is transient, so
-			// this can't become a standing freeze.
-			else if (bestpl != world && bestpd < clearance + 32
-				&& bestpl.velocity != '0 0 0')
-			{
-				pc = wp - self.origin;
-				pc_z = 0;
-				if (vlen(pc) < 1)
-					self.b_wishdir = '0 0 0';
-				else if (vlen(pc) < clearance)
-					self.b_wishdir = normalize(self.origin - wp);
-				else
-					self.b_wishdir = '0 0 0';
 			}
 		}
 	}
