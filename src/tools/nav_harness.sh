@@ -27,6 +27,20 @@
 #     behavior must produce a byte-identical BAKESUM line on every map.
 #     Set UPDATE_BASELINE=1 to (re)capture the baseline after a reviewed,
 #     intentional bake change.
+#   MODE=behav -- behavioral differential tier. Soaks each map ${RUNS}
+#     times with nav_debug on, aggregates NAVSTAT/PICKUP/LINKFAIL/GOALFAIL
+#     into per-bot-sim-minute rates (median across runs to shed noise),
+#     and compares against the checked-in baseline
+#     (src/tools/baselines/behav.txt) with tolerance bands: stuck +5 abs,
+#     pickups -20% rel, linkfail +50% rel, goalfail x3 (relative bands
+#     carry a small absolute slack so a zero baseline isn't
+#     unfailable-against). Catches behavior
+#     regressions that connectivity alone shipped twice (e1m2). Set
+#     UPDATE_BASELINE=1 to (re)capture after a reviewed behavior change.
+#     Note: the engine never seeds rand(), so repeat runs decorrelate via
+#     wall-clock frame-timing jitter, not RNG seed. Deliberate tradeoff
+#     (2026-07): explicit srand would force an engine rebuild + baseline
+#     recapture for marginal statistical gain.
 #
 set -uo pipefail
 
@@ -42,12 +56,17 @@ if [[ "$MODE" == "conn" || "$MODE" == "bakesum" ]]; then
 elif [[ "$MODE" == "full" ]]; then
 	BOTS="${BOTS:-4}"
 	DURATION="${DURATION:-60}"
+elif [[ "$MODE" == "behav" ]]; then
+	BOTS="${BOTS:-4}"
+	DURATION="${DURATION:-120}"
+	RUNS="${RUNS:-3}"
 else
-	echo "error: MODE must be 'full', 'conn', or 'bakesum', got '$MODE'" >&2
+	echo "error: MODE must be 'full', 'conn', 'bakesum', or 'behav', got '$MODE'" >&2
 	exit 1
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAKESUM_BASELINE="${BAKESUM_BASELINE:-$SCRIPT_DIR/baselines/bakesum.txt}"
+BEHAV_BASELINE="${BEHAV_BASELINE:-$SCRIPT_DIR/baselines/behav.txt}"
 UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
 ID1_MAPS="start \
 	e1m1 e1m2 e1m3 e1m4 e1m5 e1m6 e1m7 \
@@ -83,18 +102,45 @@ CONN_SUMMARY_RE="^Nav: CONNECTIVITY: ([0-9]+/[0-9]+ spawns unreachable|no spawn)
 cd "$GAMEDIR" || exit 1
 
 run_map() {
-	local m="$1" pid
-	timeout "$((DURATION + 20))" "$NQSERVER" -dedicated "$BOTS" -port 0 -game "$GAME" \
-		+deathmatch 1 +skill 2 +temp1 "$BOTS" +map "$m" \
-		>"$OUTDIR/$m.log" 2>&1 &
+	local m="$1" log="${2:-$OUTDIR/$1.log}" pid
+	local extra=()
+	# LINKFAIL only prints under nav_debug; the behav tier counts it.
+	# Behav's timeout is a hard guard only: the soak clock is event-driven
+	# (starts when the bake-complete marker prints), because bake time is
+	# wildly load-dependent (e3m5 observed <140s cool, >230s thermally
+	# throttled) and a wall-clock budget lets slow bakes eat the soak.
+	# noexit 1: an exit-touching bot dies and respawns instead of firing
+	# changelevel, which drops every fake-client and leaves the rest of
+	# the soak on an empty server (all non-DM maps have reachable exits).
+	local slack=20
+	[[ "$MODE" == "behav" ]] && { extra=(+nav_debug 1 +noexit 1); slack=600; }
+	timeout "$((DURATION + slack))" "$NQSERVER" -dedicated "$BOTS" -port 0 -game "$GAME" \
+		+deathmatch 1 +skill 2 +temp1 "$BOTS" "${extra[@]}" +map "$m" \
+		>"$log" 2>&1 &
 	pid=$!
 	if [[ "$MODE" == "conn" || "$MODE" == "bakesum" ]]; then
 		# The connectivity report is a one-shot at mesh-build time; once the
 		# summary line lands there is nothing left to measure, so kill the
 		# server instead of waiting out the clock.
 		while kill -0 "$pid" 2>/dev/null; do
-			grep -qE "$CONN_SUMMARY_RE" "$OUTDIR/$m.log" && break
+			grep -qE "$CONN_SUMMARY_RE" "$log" && break
 			sleep 1
+		done
+		kill "$pid" 2>/dev/null
+	elif [[ "$MODE" == "behav" ]]; then
+		while kill -0 "$pid" 2>/dev/null; do
+			grep -qE "$CONN_SUMMARY_RE" "$log" && break
+			sleep 2
+		done
+		# The soak is pinned in SIM time (NAVSTAT windows), not wall time:
+		# sim speed floats with host load (0.4x-2.4x wall observed), and
+		# pickup rate is nonstationary (initial item burst, then
+		# respawn-limited), so equal-sim soaks are the only samples
+		# comparable across runs, devices, and load conditions.
+		local tgt=$((BOTS * DURATION / 10))
+		while kill -0 "$pid" 2>/dev/null; do
+			[[ "$(grep -c '^NAVSTAT ' "$log")" -ge "$tgt" ]] && break
+			sleep 2
 		done
 		kill "$pid" 2>/dev/null
 	fi
@@ -102,15 +148,121 @@ run_map() {
 }
 
 n=0
-for m in $MAPS; do
-	run_map "$m" &
-	n=$((n + 1))
-	if [[ "$n" -ge "$BATCH_SIZE" ]]; then
-		wait
-		n=0
-	fi
-done
+if [[ "$MODE" == "behav" ]]; then
+	# Runs are the outer loop so a map's repeats spread across different
+	# load conditions instead of sharing one batch's noise profile.
+	for r in $(seq 1 "$RUNS"); do
+		for m in $MAPS; do
+			run_map "$m" "$OUTDIR/$m.r$r.log" &
+			n=$((n + 1))
+			if [[ "$n" -ge "$BATCH_SIZE" ]]; then
+				wait
+				n=0
+			fi
+		done
+	done
+else
+	for m in $MAPS; do
+		run_map "$m" &
+		n=$((n + 1))
+		if [[ "$n" -ge "$BATCH_SIZE" ]]; then
+			wait
+			n=0
+		fi
+	done
+fi
 wait
+
+median() { printf '%s\n' "$@" | sort -n | sed -n "$((($# + 1) / 2))p"; }
+
+if [[ "$MODE" == "behav" ]]; then
+	fail_count=0
+	for m in $MAPS; do
+		status="PASS"
+		reasons=()
+		stks=(); pkms=(); lfms=(); gfms=()
+		for r in $(seq 1 "$RUNS"); do
+			log="$OUTDIR/$m.r$r.log"
+			if [[ ! -s "$log" ]] || grep -qE "Sys_Error|Segmentation fault|shareware version" "$log"; then
+				status="CRASH"
+				reasons+=("run $r crashed or produced no output")
+				continue
+			fi
+			tgt=$((BOTS * DURATION / 10))
+			ns_have="$(grep -c '^NAVSTAT ' "$log")"
+			if [[ "$ns_have" -lt "$tgt" ]]; then
+				status="FAIL"
+				reasons+=("run $r has $ns_have/$tgt sim windows (bake never finished or hard guard hit)")
+				continue
+			fi
+			# Rates are per bot-minute of SIM time (one NAVSTAT line = 10
+			# sim-seconds of one bot), and the awk exits at exactly the
+			# window target so overshoot past the kill can't skew a
+			# nonstationary rate. Wall time appears nowhere in the metrics.
+			read -r stk pkm lfm gfm <<<"$(awk -v tgt="$tgt" '
+				/^NAVSTAT / { ns++; if (match($0, / stk=[0-9.]+/)) { s += substr($0, RSTART + 5, RLENGTH - 5) }
+					if (ns >= tgt) exit }
+				/^PICKUP / { pk++ }
+				/^LINKFAIL / { lf++ }
+				/^GOALFAIL / { gf++ }
+				END { bm = ns / 6; printf "%.1f %.2f %.2f %.2f", s / ns, pk / bm, lf / bm, gf / bm }' "$log")"
+			stks+=("$stk"); pkms+=("$pkm"); lfms+=("$lfm"); gfms+=("$gfm")
+		done
+
+		if [[ "$status" == "PASS" ]]; then
+			stk="$(median "${stks[@]}")"
+			pkm="$(median "${pkms[@]}")"
+			lfm="$(median "${lfms[@]}")"
+			gfm="$(median "${gfms[@]}")"
+			echo "BEHAV map=$m stk=$stk pkm=$pkm lfm=$lfm gfm=$gfm" >>"$OUTDIR/behav.txt"
+			if [[ "$UPDATE_BASELINE" != "1" ]]; then
+				base_line="$(grep -m1 "^BEHAV map=$m " "$BEHAV_BASELINE" 2>/dev/null || true)"
+				if [[ -z "$base_line" ]]; then
+					status="FAIL"
+					reasons+=("map missing from baseline $BEHAV_BASELINE (run with UPDATE_BASELINE=1 to capture)")
+				else
+					read -r bstk bpkm blfm bgfm <<<"$(echo "$base_line" | \
+						sed -n 's/^BEHAV map=[^ ]* stk=\([0-9.]*\) pkm=\([0-9.]*\) lfm=\([0-9.]*\) gfm=\([0-9.]*\)$/\1 \2 \3 \4/p')"
+					if [[ -z "${bstk:-}" ]]; then
+						status="FAIL"
+						reasons+=("unparseable baseline line [$base_line]")
+					else
+						# Tolerance bands from the plan; each relative band gets a
+						# small absolute slack so a zero baseline stays failable.
+						awk -v a="$stk" -v b="$bstk" 'BEGIN{exit !(a > b + 5)}' && \
+							{ status="FAIL"; reasons+=("stuck $stk% > baseline $bstk% + 5"); }
+						awk -v a="$pkm" -v b="$bpkm" 'BEGIN{exit !(a < b * 0.8 - 0.5)}' && \
+							{ status="FAIL"; reasons+=("pickups/min $pkm < baseline $bpkm - 20%"); }
+						awk -v a="$lfm" -v b="$blfm" 'BEGIN{exit !(a > b * 1.5 + 0.5)}' && \
+							{ status="FAIL"; reasons+=("linkfail/min $lfm > baseline $blfm + 50%"); }
+						# Goal abandons are bursty: a 3.5x swing between runs with
+						# an otherwise identical pickup rate was observed (e3m5),
+						# so the band is deliberately wider than linkfail's.
+						awk -v a="$gfm" -v b="$bgfm" 'BEGIN{exit !(a > b * 3 + 1)}' && \
+							{ status="FAIL"; reasons+=("goalfail/min $gfm > baseline $bgfm x3"); }
+					fi
+				fi
+			fi
+		fi
+
+		if [[ "$status" == "PASS" ]]; then
+			printf "%-6s %-6s stk=%s pkm=%s lfm=%s gfm=%s\n" "$m" "$status" "$stk" "$pkm" "$lfm" "$gfm"
+		else
+			fail_count=$((fail_count + 1))
+			printf "%-6s %-6s %s\n" "$m" "$status" "$(IFS='; '; echo "${reasons[*]}")"
+		fi
+	done
+
+	echo "---"
+	total=$(echo "$MAPS" | wc -w)
+	echo "$((total - fail_count))/$total maps passed"
+	if [[ "$UPDATE_BASELINE" == "1" && "$fail_count" -eq 0 ]]; then
+		mkdir -p "$(dirname "$BEHAV_BASELINE")"
+		cp "$OUTDIR/behav.txt" "$BEHAV_BASELINE"
+		echo "baseline updated: $BEHAV_BASELINE"
+	fi
+	exit "$((fail_count > 0))"
+fi
 
 fail_count=0
 for m in $MAPS; do
