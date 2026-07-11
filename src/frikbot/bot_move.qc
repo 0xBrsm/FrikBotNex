@@ -816,14 +816,30 @@ void() bot_get =
 			self._link_exec_start = time;
 			self._link_exec_wp = wp;
 		}
-		else if (time - self._link_exec_start > 8)
+		else
 		{
-			nav_fail_current_link();
-			self._link_exec_start = 0;
-			if (self.target1 != world && self.target1 != self)
-				bot_mark_failed_goal(self.target1, 10);
-			self.target1 = world;
-			return;
+			// Budget from the link's own metadata, not a flat guess: the
+			// physical traverse at run speed (320) plus any baked wait,
+			// plus one global slack covering the approach and a couple of
+			// retries. The old flat 8s starved the longest deep-drops
+			// (dry + wet leg can run ~1300u) exactly as much as it
+			// overpaid a 60u hop; with no pending link the metadata reads
+			// zero and the budget degrades to the slack alone, which is
+			// the old flat value.
+			local vector li_twt, li_span;
+			local float budget;
+			li_twt = nav_link_info(0);
+			li_span = nav_link_info(2) - nav_link_info(1);
+			budget = li_twt_z + vlen(li_span) / 320 + 8;
+			if (time - self._link_exec_start > budget)
+			{
+				nav_fail_current_link();
+				self._link_exec_start = 0;
+				if (self.target1 != world && self.target1 != self)
+					bot_mark_failed_goal(self.target1, 10);
+				self.target1 = world;
+				return;
+			}
 		}
 	}
 	else
