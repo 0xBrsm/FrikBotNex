@@ -85,9 +85,33 @@ typedef struct
 /* C++ only: close extern "C", include Detour, define struct */
 #ifdef __cplusplus
 } /* close extern "C" for Detour includes */
+#include <vector>
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 class dtQueryFilter;
+
+/* Lazily-built per-mesh caches shared by the conn link passes (directed/
+   gap/RJ/swim/deep-drop): ground union-find components under both
+   disabled-poly policies, Quake-coord poly centroids, and forward
+   reach-sets memoized per walk component.  The mesh is immutable between
+   Detour realizes, so each is computed at most once per realize no matter
+   how many passes ask for it. */
+struct nav_conn_snapshot
+{
+	std::vector<float> centroids;   /* ground*3, Quake coords */
+	std::vector<int> comp_all;      /* UF root per ground poly; disabled polys bridge */
+	std::vector<int> comp_enabled;  /* UF root per ground poly; disabled polys don't */
+	std::vector<std::vector<char>> reach; /* per comp_all root: forward reach set */
+	std::vector<char> reach_built;
+	bool have_centroids;
+	bool have_all;
+	bool have_enabled;
+
+	nav_conn_snapshot()
+		: have_centroids(false), have_all(false), have_enabled(false)
+	{
+	}
+};
 
 struct nav_mesh_runtime_s
 {
@@ -97,6 +121,7 @@ struct nav_mesh_runtime_s
 	float query_half_extents_actor_origin[3]; /* tight: actor origin -> surface snap */
 	nav_off_mesh_link_t *links;
 	int link_count;
+	nav_conn_snapshot snap;
 
 	nav_mesh_runtime_s()
 		: navmesh(nullptr), query(nullptr), links(nullptr), link_count(0)

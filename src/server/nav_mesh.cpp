@@ -1047,6 +1047,92 @@ static std::vector<int> nav_mesh_ground_uf(const dtMeshTile *tile,
 	return ga;
 }
 
+/* Snapshot accessors (see nav_conn_snapshot in nav_mesh.h).  Roots come
+   back fully path-compressed, so snap[i] IS poly i's component root --
+   callers compare/index them directly, no find needed. */
+static const std::vector<int> &nav_snap_comp(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, const dtNavMesh *mesh, int ground, bool skip_disabled)
+{
+	std::vector<int> &c = skip_disabled ? nav->snap.comp_enabled : nav->snap.comp_all;
+	bool &have = skip_disabled ? nav->snap.have_enabled : nav->snap.have_all;
+	if (!have)
+	{
+		c = nav_mesh_ground_uf(tile, mesh, ground, skip_disabled);
+		auto gf = [&](int x) { while (c[x] != x) { c[x] = c[c[x]]; x = c[x]; } return x; };
+		for (int i = 0; i < ground; i++)
+			c[i] = gf(i);
+		have = true;
+	}
+	return c;
+}
+
+static const std::vector<float> &nav_snap_centroids(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, int ground)
+{
+	if (!nav->snap.have_centroids)
+	{
+		nav_collect_ground_centroids(tile, ground, nav->snap.centroids);
+		nav->snap.have_centroids = true;
+	}
+	return nav->snap.centroids;
+}
+
+/* Ground centroids reachable from 'seed' by walking the CURRENT graph
+   forward: an unbounded BFS over tile->links crossing every link type
+   findPath itself can cross (doors, jumps, drops, teleporters, plats),
+   skipping disabled polys exactly like the query filter would.  This
+   mirrors authoritative findPath reachability, so the RJ worth-it gate
+   reduces to "does the landing reach an item the launch cannot".  Both
+   sides MUST use the same unbounded semantics: the no-trap gate
+   guarantees the landing paths back down to the launch, so its reach
+   set is a superset of the launch's, and the set difference is exactly
+   what the link unlocks.  Earlier asymmetric versions (bare floor-patch
+   launch set, one-hop-capped landing set) both misfired: the narrow
+   launch set let an e1m2 door RJ credit an item that had a perfectly
+   good multi-door walking route, and the capped landing set killed the
+   e3m5 terrace rung whose value sits several ordinary jump links above
+   the landing ledge.
+
+   Every poly in a ground patch shares one reach set (patch members are
+   mutually walkable), so memoize per component root -- on big maps the
+   RJ candidate loop otherwise re-runs thousands of identical BFS passes. */
+static const std::vector<char> &nav_snap_reach(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, const dtNavMesh *mesh, int ground, int seed)
+{
+	const std::vector<int> &comp = nav_snap_comp(nav, tile, mesh, ground, false);
+	if (nav->snap.reach.empty())
+	{
+		nav->snap.reach.resize((size_t)ground);
+		nav->snap.reach_built.assign((size_t)ground, 0);
+	}
+	const int c = comp[seed];
+	if (!nav->snap.reach_built[c])
+	{
+		const int npolys = tile->header->polyCount;
+		std::vector<char> seenPoly(npolys, 0);
+		std::vector<int> frontier;
+		seenPoly[seed] = 1;
+		frontier.push_back(seed);
+		for (size_t fi = 0; fi < frontier.size(); fi++)
+		{
+			int u = frontier[fi];
+			const dtPoly *pu = &tile->polys[u];
+			for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+			{
+				if (tile->links[k].ref == 0) continue;
+				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+				if ((int)np >= npolys || seenPoly[np]) continue;
+				if (tile->polys[np].flags == 0) continue;
+				seenPoly[np] = 1;
+				frontier.push_back((int)np);
+			}
+		}
+		nav->snap.reach[c].swap(seenPoly);
+		nav->snap.reach_built[c] = 1;
+	}
+	return nav->snap.reach[c];
+}
+
 extern "C" int nav_mesh_compute_orphan_jumps(
 	nav_mesh_runtime_t *nav,
 	nav_jump_validate_fn validate, void *user,
@@ -1214,15 +1300,15 @@ int nav_mesh_compute_directed_links(
 
 	/* Ground-adjacency components: union only ground<->ground edges (an
 	   off-mesh link goes ground -> offmesh poly -> ground, so it never
-	   unions here -- exactly the contiguous-floor patches we want). */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground, -1), gasize;
+	   unions here -- exactly the contiguous-floor patches we want).
+	   Dense ids assigned in poly order for the size/main bookkeeping. */
+	const std::vector<int> &garoots = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	std::vector<int> dense(ground, -1), gacomp(ground), gasize;
 	for (int i = 0; i < ground; i++)
 	{
-		int r = gf(i);
-		if (gacomp[r] < 0) { gacomp[r] = (int)gasize.size(); gasize.push_back(0); }
-		gacomp[i] = gacomp[r]; gasize[gacomp[i]]++;
+		int r = garoots[i];
+		if (dense[r] < 0) { dense[r] = (int)gasize.size(); gasize.push_back(0); }
+		gacomp[i] = dense[r]; gasize[gacomp[i]]++;
 	}
 	int maingc = 0;
 	for (size_t c = 1; c < gasize.size(); c++)
@@ -1243,8 +1329,7 @@ int nav_mesh_compute_directed_links(
 	}
 
 	/* Quake-coord centroids. */
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	int dbg_comp = -1;
 	if (const char *db = getenv("NAV_DIR_DEBUG"))
@@ -1490,13 +1575,8 @@ int nav_mesh_compute_gap_jumps(
 
 	/* Ground-adjacency components (ground<->ground links only): contiguous
 	   walkable patches.  Same construction as the directed pass. */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
@@ -1604,68 +1684,17 @@ int nav_mesh_compute_rocket_jumps(
 	if (ground <= 0)
 		return 0;
 
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
 	nav_mesh_setup_filter(&filter);
 
-	/* Ground centroids reachable from 'seed' by walking the CURRENT graph
-	   forward: an unbounded BFS over tile->links crossing every link type
-	   findPath itself can cross (doors, jumps, drops, teleporters, plats),
-	   skipping disabled polys exactly like the query filter would.  This
-	   mirrors authoritative findPath reachability, so the worth-it gate
-	   below reduces to "does the landing reach an item the launch cannot".
-	   Both sides MUST use the same unbounded semantics: the no-trap gate
-	   guarantees the landing paths back down to the launch, so its reach
-	   set is a superset of the launch's, and the set difference is exactly
-	   what the link unlocks.  Earlier asymmetric versions (bare floor-patch
-	   launch set, one-hop-capped landing set) both misfired: the narrow
-	   launch set let an e1m2 door RJ credit an item that had a perfectly
-	   good multi-door walking route, and the capped landing set killed the
-	   e3m5 terrace rung whose value sits several ordinary jump links above
-	   the landing ledge. */
-	auto reachableFrom = [&](int seed) {
-		const int npolys = tile->header->polyCount;
-		std::vector<char> seenPoly(npolys, 0);
-		std::vector<int> frontier;
-		seenPoly[seed] = 1;
-		frontier.push_back(seed);
-		for (size_t fi = 0; fi < frontier.size(); fi++)
-		{
-			int u = frontier[fi];
-			const dtPoly *pu = &tile->polys[u];
-			for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
-			{
-				if (tile->links[k].ref == 0) continue;
-				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
-				if ((int)np >= npolys || seenPoly[np]) continue;
-				if (tile->polys[np].flags == 0) continue;
-				seenPoly[np] = 1;
-				frontier.push_back((int)np);
-			}
-		}
-		return seenPoly;
-	};
-	/* Every poly in a ground patch shares one reach set (patch members are
-	   mutually walkable), so memoize per union-find root -- on big maps the
-	   candidate loop otherwise re-runs thousands of identical BFS passes. */
-	std::vector<std::vector<char>> reachCache(ground);
-	std::vector<char> reachCached(ground, 0);
+	/* Forward reach sets for the worth-it gate below (semantics + memoizing
+	   documented on nav_snap_reach). */
 	auto reachableCached = [&](int seed) -> const std::vector<char> & {
-		int c = gacomp[seed];
-		if (!reachCached[c])
-		{
-			reachCache[c] = reachableFrom(seed);
-			reachCached[c] = 1;
-		}
-		return reachCache[c];
+		return nav_snap_reach(navmesh, tile, mesh, ground, seed);
 	};
 
 	std::vector<int> seenLo, seenHi;
@@ -1811,11 +1840,9 @@ int nav_mesh_compute_deep_drops(
 
 	/* Walk-adjacency components (off-mesh hops excluded on purpose --
 	   the findPath gates below are what see those). */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, true);
 	std::vector<int> compsize(ground, 0);
-	for (int i = 0; i < ground; i++) { gacomp[i] = gf(i); compsize[gacomp[i]]++; }
+	for (int i = 0; i < ground; i++) compsize[gacomp[i]]++;
 	int maincomp = 0;
 	for (int i = 0; i < ground; i++)
 		if (compsize[i] > compsize[maincomp]) maincomp = i;
@@ -1823,8 +1850,7 @@ int nav_mesh_compute_deep_drops(
 	for (int i = 0; i < ground; i++)
 		if (gacomp[i] == maincomp && tile->polys[i].flags != 0) { mainrep = i; break; }
 
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
@@ -2132,13 +2158,8 @@ int nav_mesh_compute_swim_links(
 		return 0;
 
 	/* Walk-adjacency components, same as the deep-drop pass. */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, true);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
