@@ -572,12 +572,12 @@ void() bot_get =
 		}
 	}
 
-	// decode off-mesh link type from Z encoding: z' = z + 10000*(1+type)
-	link_type = 0;
-	if (wp_z > 9000)
+	// off-mesh link type from the metadata channel (0 = plain corner);
+	// the engine keeps it in step with the corner navigate() just gave us
 	{
-		link_type = rint(wp_z / 10000) - 1;
-		wp_z = wp_z - (link_type + 1) * 10000;
+		local vector li_type;
+		li_type = nav_link_info(0);
+		link_type = li_type_x;
 	}
 
 	// incidental pickup: only while on plain ground corridor steering --

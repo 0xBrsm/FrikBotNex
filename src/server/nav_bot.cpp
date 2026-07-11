@@ -86,6 +86,12 @@ extern ddef_t *ED_FindGlobal(char *name);
 /* ---- Per-bot path corridor ---- */
 
 static nav_corridor_t *nav_bot_corridors[MAX_SCOREBOARD];
+/* Off-mesh link the slot's LAST steer corner belongs to (0 = plain
+   ground corner).  Set every PF_nav_path_steer call; this is the ref
+   behind the nav_link_info/nav_link_serve_ent/nav_fail_current_link
+   metadata channel.  Unlike the corridor's pending ref (set only once
+   the 36u advance trigger fires), it is live for the whole approach. */
+static unsigned long long nav_bot_steer_link[MAX_SCOREBOARD];
 static nav_mesh_runtime_t *nav_mesh;
 static void nav_build_block_map(void);
 
@@ -3428,6 +3434,7 @@ void Nav_Shutdown(void)
 				nav_corridor_destroy(nav_bot_corridors[ci]);
 				nav_bot_corridors[ci] = NULL;
 			}
+			nav_bot_steer_link[ci] = 0;
 		}
 	}
 	if (nav_debug_polys != NULL)
@@ -3549,8 +3556,10 @@ static int nav_bot_can_rj(edict_t *bot)
 }
 
 /* vector nav_path_steer(vector pos) = #84
-   Uses dtPathCorridor to get next steering corner.
-   Returns corner position. Off-mesh links encoded in Z (10000 + type).
+   Uses dtPathCorridor to get next steering corner.  When the corner is
+   an off-mesh link, the slot's steer-link ref is set so the metadata
+   builtins (nav_link_info & co) describe it; the corner itself comes
+   back untouched.
    Returns '0 0 0' if corridor is empty. */
 static void PF_nav_path_steer(void)
 {
@@ -3568,6 +3577,7 @@ static void PF_nav_path_steer(void)
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;
+	nav_bot_steer_link[slot] = 0;
 
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
@@ -3585,7 +3595,7 @@ static void PF_nav_path_steer(void)
 	G_FLOAT(OFS_RETURN + 1) = corner[1];
 	G_FLOAT(OFS_RETURN + 2) = corner[2];
 
-	/* encode off-mesh link type in corner z for the QC side */
+	/* off-mesh corner: publish the link ref for the metadata builtins */
 	if (flags & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
 	{
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
@@ -3606,12 +3616,7 @@ static void PF_nav_path_steer(void)
 		}
 
 		if (lt > 0)
-		{
-			/* Multiplicative encoding so QC can recover both type and
-			   corner z: z' = z + 10000*(1+type).  Additive (+10000+type)
-			   was ambiguous — type and z can't be separated. */
-			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f * (1.0f + (float)lt);
-		}
+			nav_bot_steer_link[slot] = ref;
 	}
 }
 
@@ -3635,6 +3640,12 @@ static void PF_nav_fail_current_link(void)
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
 
+	/* Deliberately the corridor's PENDING ref, not the steer-link ref the
+	   metadata builtins use: pending is only set once the bot committed
+	   (36u advance trigger), so only genuine mid-traversal failures cool
+	   the link down.  Wiring this to the steer ref let a bot stalled on
+	   the APPROACH (crowded lane, long walk-in) condemn a healthy link
+	   map-wide for everyone -- e1m1/e3m6 goalfail storms. */
 	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
 	if (ref == 0) return;
 
@@ -3651,11 +3662,10 @@ static void PF_nav_fail_current_link(void)
 
 
 /* vector nav_link_info(float field) = #91
-   Bake-time metadata for the off-mesh link the calling bot is currently
-   traversing (the corridor's pending link).  The fields have always existed
-   in nav_off_mesh_link_t but never reached QC -- bot_move currently infers
-   the link type from the z-encoded steer corner and guesses the rest.
-   Returns '0 0 0' when the bot has no pending link.
+   Bake-time metadata for the off-mesh link behind the calling bot's
+   current steer corner (approach and traversal alike) -- this is the
+   sole channel for link type since the z-encoding retired.
+   Returns '0 0 0' when the steer corner is plain ground.
      field 0: (link_type, required_speed, wait_time)
      field 1: start endpoint (Quake coords)
      field 2: end endpoint (Quake coords)
@@ -3675,10 +3685,9 @@ static void PF_nav_link_info(void)
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;
-	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
 
-	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	ref = nav_bot_steer_link[slot];
 	if (ref == 0) return;
 	idx = nav_mesh_get_link_index(nav_mesh, ref);
 	if (idx < 0 || idx >= nav_mesh->link_count) return;
@@ -3731,6 +3740,12 @@ static void PF_nav_link_serve_ent(void)
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
 
+	/* Deliberately the PENDING ref (set at the 36u advance trigger), not
+	   the steer-link ref nav_link_info uses: the sole consumer is the QC
+	   plat-hold, whose stand-and-wait is only correct once the bot is AT
+	   the shaft.  Publishing the plat for the whole approach made bots
+	   freeze map-wide waiting on a top-parked lift they hadn't reached --
+	   and thus could never trigger down (e1m1/e3m6 goalfail storms). */
 	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
 	if (ref == 0) return;
 	idx = nav_mesh_get_link_index(nav_mesh, ref);
