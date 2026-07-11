@@ -3623,6 +3623,64 @@ static void PF_nav_fail_current_link(void)
 }
 
 
+/* vector nav_link_info(float field) = #91
+   Bake-time metadata for the off-mesh link the calling bot is currently
+   traversing (the corridor's pending link).  The fields have always existed
+   in nav_off_mesh_link_t but never reached QC -- bot_move currently infers
+   the link type from the z-encoded steer corner and guesses the rest.
+   Returns '0 0 0' when the bot has no pending link.
+     field 0: (link_type, required_speed, wait_time)
+     field 1: start endpoint (Quake coords)
+     field 2: end endpoint (Quake coords)
+     field 3: (height_delta, bidirectional, radius) */
+static void PF_nav_link_info(void)
+{
+	int field = (int)G_FLOAT(OFS_PARM0);
+	int slot, idx;
+	unsigned long long ref;
+	const nav_off_mesh_link_t *l;
+
+	G_FLOAT(OFS_RETURN + 0) = 0.0f;
+	G_FLOAT(OFS_RETURN + 1) = 0.0f;
+	G_FLOAT(OFS_RETURN + 2) = 0.0f;
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_bot_corridors[slot] == NULL) return;
+	if (nav_mesh == NULL) return;
+
+	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	if (ref == 0) return;
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_mesh->link_count) return;
+	l = &nav_mesh->links[idx];
+
+	switch (field)
+	{
+	case 0:
+		G_FLOAT(OFS_RETURN + 0) = (float)l->link_type;
+		G_FLOAT(OFS_RETURN + 1) = l->required_speed;
+		G_FLOAT(OFS_RETURN + 2) = l->wait_time;
+		break;
+	case 1:
+		G_FLOAT(OFS_RETURN + 0) = l->start[0];
+		G_FLOAT(OFS_RETURN + 1) = l->start[1];
+		G_FLOAT(OFS_RETURN + 2) = l->start[2];
+		break;
+	case 2:
+		G_FLOAT(OFS_RETURN + 0) = l->end[0];
+		G_FLOAT(OFS_RETURN + 1) = l->end[1];
+		G_FLOAT(OFS_RETURN + 2) = l->end[2];
+		break;
+	case 3:
+		G_FLOAT(OFS_RETURN + 0) = l->height_delta;
+		G_FLOAT(OFS_RETURN + 1) = (float)l->bidirectional;
+		G_FLOAT(OFS_RETURN + 2) = l->radius;
+		break;
+	}
+}
+
+
 /* vector nav_path_debug(entity bot, float index) = #85
    Return position of waypoint N in bot's cached path.
    Returns '0 0 0' if no valid path or index out of range.
@@ -4477,7 +4535,7 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 8] = PF_nav_stub;      /* was nav_wp_pos */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 9] = PF_nav_block;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_stub;     /* was nav_link_info */
+	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 14] = PF_nav_log_damage;

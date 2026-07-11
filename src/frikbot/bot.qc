@@ -89,6 +89,7 @@ vector(entity bot, float index)	nav_path_debug = #85;
 entity()				nav_find_goal = #86;
 void(entity e)				nav_block = #89;
 void(entity e)				nav_unblock = #90;
+vector(float field)			nav_link_info = #91;
 void(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) nav_report_stats = #92;
 void(float streak, string tgt, float tgt_dist) nav_debug_event = #93;
 void(entity targ, entity attacker, float amount) nav_log_damage = #94;
