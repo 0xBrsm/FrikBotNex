@@ -73,6 +73,17 @@ this notice in its entirety.
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
 
+// ---- Probe geometry ----
+// All derived from the player hull (VEC_HULL_MIN '-16 -16 -24' /
+// VEC_HULL_MAX '16 16 32': a 32x32 footprint) -- probes that don't
+// scale with the body they're probing for go stale if the hull ever
+// changes, and the bare numbers hide WHY these distances work.
+float BOT_PROBE_SIDE = 16;   // half the footprint: the shoulder itself
+float BOT_PROBE_AHEAD = 48;  // own half-box + one full body ahead
+float BOT_JUMP_WINDOW = 64;  // two body widths; must stay wider than the
+                             // corridor's 36u link-advance trigger or the
+                             // corner changes before the bot can jump
+
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
 
@@ -644,7 +655,7 @@ void() bot_get =
 		// Don't commit the jump into a blocked lane: a bot body (or
 		// wall) between here and the link start just bounces the
 		// jumper in place, and airborne frames can't steer around it.
-		if (jdist < 64 && (self.flags & FL_ONGROUND))
+		if (jdist < BOT_JUMP_WINDOW && (self.flags & FL_ONGROUND))
 		{
 			traceline(self.origin, wp + '0 0 24', FALSE, self);
 			if (trace_fraction == 1)
@@ -925,11 +936,11 @@ void() bot_get =
 			rt_x = self.b_wishdir_y;
 			rt_y = 0 - self.b_wishdir_x;
 			rt_z = 0;
-			traceline(self.origin + rt * 16,
-				self.origin + rt * 16 + self.b_wishdir * 48, FALSE, self);
+			traceline(self.origin + rt * BOT_PROBE_SIDE,
+				self.origin + rt * BOT_PROBE_SIDE + self.b_wishdir * BOT_PROBE_AHEAD, FALSE, self);
 			fr = trace_fraction;
-			traceline(self.origin - rt * 16,
-				self.origin - rt * 16 + self.b_wishdir * 48, FALSE, self);
+			traceline(self.origin - rt * BOT_PROBE_SIDE,
+				self.origin - rt * BOT_PROBE_SIDE + self.b_wishdir * BOT_PROBE_AHEAD, FALSE, self);
 			fl = trace_fraction;
 			if (fr < fl - 0.1)
 				self.b_wishdir = normalize(self.b_wishdir - rt * 0.8);
