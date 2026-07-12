@@ -72,6 +72,22 @@ this notice in its entirety.
 .entity _fg3; .float _fg3_time; .float _fg3_strikes;
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
+// Livelock backstop: every abandon signal above is phase- or goal-keyed,
+// and a real grind defeats all of them. The 2s net-pin (_nav_pin) samples
+// position at two instants and ALIASES -- an oscillating grind that swings
+// 100u+ off the jam point and back reads as ">24u moved" and never latches;
+// a bot cycling goals in place resets every goal-keyed timer each pick. So
+// a bot could grind one unreachable spot for a whole match (e2m6: locked on
+// item_shells for 90s against a plat the corridor can't clear; e4m8: churns
+// every goal against the same wall corner). Anchor on POSITION and run the
+// clock only while ALSO failing to close on the corner (_progress_stall):
+// a bot making headway or working an item cluster keeps reaching corners
+// and never accumulates; one pinned in a BOT_STUCK_BALL ball with a dead
+// corner for BOT_STUCK_TIME -- however it wiggles, whatever it re-picks --
+// is livelocked, so cool the goal and let the scorer route elsewhere.
+.vector _stuck_org;       // camp anchor (position, not corner)
+.float _stuck_since;      // when the current camp on this goal began, 0 if none
+.entity _stuck_tgt;       // goal the camp anchor belongs to
 
 // ---- Probe geometry ----
 // All derived from the player hull (VEC_HULL_MIN '-16 -16 -24' /
@@ -83,6 +99,19 @@ float BOT_PROBE_AHEAD = 48;  // own half-box + one full body ahead
 float BOT_JUMP_WINDOW = 64;  // two body widths; must stay wider than the
                              // corridor's 36u link-advance trigger or the
                              // corner changes before the bot can jump
+
+// ---- Livelock backstop thresholds ----
+// A bot en route to a reachable goal always does one of two things well
+// inside this window: reaches its corner (headway), or leaves a
+// BOT_STUCK_BALL ball around where it started stalling. Both are generous
+// -- a bot at run speed (320) clears the ball in under a second -- so this
+// only forces an abandon on a genuine grind, never on slow legitimate
+// navigation, a detour, or an item cluster.
+float BOT_STUCK_TIME = 5;    // seconds camped on one goal -> abandon
+float BOT_STUCK_BALL = 384;  // "left the area" radius (flat) -- must exceed
+                             // the shoulder-veer's own excursion, or a bot
+                             // that veers off the jam point and back resets
+                             // the clock every cycle and never trips
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -1009,6 +1038,98 @@ void() bot_get =
 				self.target1 = world;
 				return;
 			}
+		}
+
+		// --- livelock backstop (position-camp, keyed on the goal) ---
+		// See the _stuck_org field comment: catches the oscillating grind
+		// the 2s net-pin aliases through. Pure position anchor -- NOT gated
+		// on _progress_stall, which the stall_limit block below zeroes every
+		// ~1s and corner-flips reset constantly, so coupling to it never
+		// accumulates. Anchored to the goal too: a bot working an item
+		// cluster changes target as it grabs each one, re-anchoring and
+		// clearing the clock, so only a bot pinned on the SAME unreachable
+		// goal inside a BOT_STUCK_BALL ball for BOT_STUCK_TIME trips it.
+		// Reaching far from the anchor, switching goals, dropping the goal,
+		// or an excused ride/swim link all re-anchor and reset.
+		{
+			local vector camp;
+			local float camped;
+			camp = self.origin - self._stuck_org;
+			camp_z = 0;
+			camped = vlen(camp);
+			// One window for every link: the clock only runs while ACTIVELY
+			// pushing with no escape, and a correct plat/train wait holds
+			// wishdir at 0 (paused, below), so a lift no longer needs a
+			// padded budget -- continuous shoving at one for this long is a
+			// grind, not a wait. Swim stays fully excused (a vertical climb
+			// legitimately thrusts for many seconds without covering ground).
+			if (self.target1 == world || self.target1 == self
+				|| self.target1 != self._stuck_tgt
+				|| camped > BOT_STUCK_BALL
+				|| link_type == AI_SURFACE)
+			{
+				// Real escape -- left the ball, switched or dropped the goal,
+				// or an excused swim: re-anchor here and reset the clock.
+				self._stuck_org = self.origin;
+				self._stuck_tgt = self.target1;
+				self._stuck_since = 0;
+			}
+			else if (self.b_wishdir != '0 0 0')
+			{
+				// Camped on the same goal and actively pushing: run the clock.
+				// A held frame (wishdir 0) does NOT land here -- it PAUSES the
+				// clock (below), it does not reset it. That distinction is the
+				// whole fix: a plat link's own motion cycle briefly engages the
+				// plat-hold (wishdir 0) every few seconds, and resetting on
+				// that kept the timer from ever maturing on a bot grinding a
+				// lift it can't board (e2m6: Erwin's clock capped at ~4s, the
+				// plat's period, forever). A bot that legitimately boards and
+				// rides leaves the ball (camped > BALL) and resets up there.
+				if (self._stuck_since == 0)
+					self._stuck_since = time;
+				else if (time - self._stuck_since > BOT_STUCK_TIME)
+				{
+					// A shootable mover in the lane is the one honest reason
+					// a corridor stalls here -- gun it and keep the goal.
+					local vector sdir;
+					sdir = wp - self.origin;
+					sdir_z = 0;
+					if (vlen(sdir) > 0.1)
+					{
+						sdir = normalize(sdir);
+						traceline(self.origin, self.origin + sdir * 64, TRUE, self);
+						if (bot_shoot_lane_mover())
+						{
+							self._stuck_since = time;
+							return;
+						}
+					}
+					self._stuck_since = 0;
+					// Relocate OUT of the trap before re-picking. Cooling the
+					// goal alone isn't enough where the same spot has a
+					// compelling item cluster: the scorer waits out the 10s and
+					// routes the bot right back. Walk away from the dead corner
+					// for a beat so the next pick paths from open ground --
+					// hazard-checked so we never back into lava/slime behind us.
+					local vector away;
+					away = self.origin - wp;
+					away_z = 0;
+					if (vlen(away) > 0.1)
+					{
+						away = normalize(away);
+						if (!nav_hazard_between(self.origin, self.origin + away * 64))
+						{
+							self._backoff_dir = away;
+							self._nav_backoff = time + 1;
+						}
+					}
+					bot_mark_failed_goal(self.target1, 10, 4); // pin
+					self.target1 = world;
+					return;
+				}
+			}
+			// else: camped on the goal but held (wishdir 0) -- pause the clock,
+			// neither accumulate nor reset. A correct plat/door wait sits here.
 		}
 
 		local float stall_limit;
