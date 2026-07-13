@@ -88,6 +88,7 @@ this notice in its entirety.
 .vector _stuck_org;       // camp anchor (position, not corner)
 .float _stuck_since;      // when the current camp on this goal began, 0 if none
 .entity _stuck_tgt;       // goal the camp anchor belongs to
+.float _stuck_gstart;     // flat dist to the goal when this camp began
 
 // ---- Probe geometry ----
 // All derived from the player hull (VEC_HULL_MIN '-16 -16 -24' /
@@ -108,10 +109,19 @@ float BOT_JUMP_WINDOW = 64;  // two body widths; must stay wider than the
 // only forces an abandon on a genuine grind, never on slow legitimate
 // navigation, a detour, or an item cluster.
 float BOT_STUCK_TIME = 5;    // seconds camped on one goal -> abandon
-float BOT_STUCK_BALL = 384;  // "left the area" radius (flat) -- must exceed
-                             // the shoulder-veer's own excursion, or a bot
-                             // that veers off the jam point and back resets
-                             // the clock every cycle and never trips
+float BOT_STUCK_BALL = 384;  // "left the area" radius (flat) -- wide, so the
+                             // window survives a grind's own wide oscillation
+                             // (a veer off the jam point and back doesn't reset
+                             // it). Legit slow nav isn't caught by width -- the
+                             // goal-progress credit below spares it instead.
+float BOT_STUCK_GAIN = 96;   // getting this much closer to the goal resets the
+                             // clock. This is the real grind/legit-nav split:
+                             // a bot winding through complex geometry keeps
+                             // closing distance on its goal and never matures;
+                             // a grind (pinned or oscillating in place) never
+                             // earns the credit. Works at any ball size, unlike
+                             // width or an instantaneous wedge probe, which
+                             // can't tell a wide grind from wide winding nav.
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -778,60 +788,66 @@ void() bot_get =
 		}
 		else if (link_type == AI_PLAT_BOTTOM)
 		{
-			// Not aboard. If the plat serving this link is ABOVE the
-			// corner we're heading for, hold at the shaft lip — walking
-			// to the exact center means dropping into the pit under it
-			// (and blocking its return). Position, not state: a bot at
-			// the TOP lip must board a top-parked plat or walk off over
-			// a lowered one, never stand waiting. The 8x abandon window
-			// below covers the wait; a dead plat (targeted, never
-			// triggered) still times out.
+			// Not aboard. Board against the PLAT'S OWN deck center, not the
+			// corridor corner: the bake snaps a plat link's endpoint out onto
+			// the surrounding floor (the plat body isn't meshed), often tens
+			// of units off the deck, and as the bot nears it navigate() flips
+			// to an across-plat corner and back -- the bot ping-pongs at the
+			// plat's edge, boarding nothing (e2m6: a bot pinned 49u short of
+			// the boarding corner at a cycling lift, forever). Steering to the
+			// deck itself makes boarding deterministic: walk on when the deck
+			// is at a steppable level and parked, WAIT at the lip when it's
+			// away or moving. A dead/never-returning plat still times out
+			// (the 8x stall window below; the livelock backstop once shoving).
 			local entity bestpl;
-			local vector pc;
-			local float clearance;
+			local vector deck, pc;
+			local float clearance, dcenter, dz;
 
 			// The bake records which entity serves this link -- no more
 			// nearest-plat scan, which guessed and could latch onto a
 			// different plat than the one the link rides. Collapse-floor
 			// doors serve their exit links too, but the old scan never
-			// matched them (classname "door"), so keep holds plat-only.
+			// matched them (classname "door"), so keep this plat-only.
 			bestpl = nav_link_serve_ent();
 			if (bestpl.classname == "plat")
 			{
-				// Hold clear of the plat's OWN footprint, not a flat guess --
-				// a wide plat (e1m2's water lift is 126x86) made the old fixed
-				// 80/96u "close enough, stop" radius land inside the shaft it
-				// needs to return to. A bot that loses the boarding race (plat
-				// departs while it's still stepping on/near the deck) got
-				// frozen exactly there by the old logic instead of being moved
-				// clear, so it sat parked in the vacated shaft -- often
-				// underwater at the bottom -- until the plat came back down on
-				// top of it, hit plat_crush (plats.qc) and reversed. With
-				// enough bots losing that race the plat never stops bouncing.
+				// The deck center and how far the deck top sits above our
+				// feet right now (the ride brings it to us; we board when it
+				// arrives at a steppable level).
+				deck_x = (bestpl.absmin_x + bestpl.absmax_x) * 0.5;
+				deck_y = (bestpl.absmin_y + bestpl.absmax_y) * 0.5;
+				pc = deck - self.origin;
+				pc_z = 0;
+				dcenter = vlen(pc);
+				dz = bestpl.absmax_z - (self.origin_z - 24);
+
+				// Footprint half-extent + a body: a wide plat (e1m2's lift is
+				// 126x86) needs the lip measured from its own size, not a flat
+				// guess that lands inside the shaft it must return to.
 				clearance = bestpl.absmax_x - bestpl.absmin_x;
 				if (bestpl.absmax_y - bestpl.absmin_y > clearance)
 					clearance = bestpl.absmax_y - bestpl.absmin_y;
 				clearance = clearance * 0.5 + 32;
 
-				// Hold at the shaft lip while the plat is parked ABOVE the
-				// corner (walking to the exact center means dropping into
-				// the pit under it and blocking its return), and while it's
-				// moving through the shaft (stepping toward it just grinds
-				// against its side/underside; moving is transient, so this
-				// can't become a standing freeze).
-				if ((bestpl.absmax_z > wp_z + 32
-						&& self.origin_z < bestpl.absmax_z)
-					|| bestpl.velocity != '0 0 0')
+				// Only take over steering near the plat; far out, the corridor
+				// is still routing us in and its corner is fine.
+				if (dcenter < clearance + 96)
 				{
-					pc = wp - self.origin;
-					pc_z = 0;
-					if (vlen(pc) < 1)
-						self.b_wishdir = '0 0 0';
-					else if (vlen(pc) < clearance)
-						// Already inside the footprint -- walk back out to
-						// the lip instead of freezing in place.
-						self.b_wishdir = normalize(self.origin - wp);
+					if (bestpl.velocity == '0 0 0' && dz < 18 && dz > -32)
+					{
+						// Boardable: deck is parked at a steppable level.
+						// Commit straight onto it, ignoring the flip-flopping
+						// corner. Once aboard the riding branch above holds us.
+						if (dcenter > 1)
+							self.b_wishdir = normalize(pc);
+					}
+					else if (dcenter < clearance)
+						// Deck away/moving and we're inside its footprint --
+						// step back out to the lip, don't ride it down a shaft
+						// or get crushed by its return.
+						self.b_wishdir = normalize(self.origin - deck);
 					else
+						// Deck away/moving, we're at the lip -- wait for it.
 						self.b_wishdir = '0 0 0';
 				}
 			}
@@ -1052,11 +1068,20 @@ void() bot_get =
 		// Reaching far from the anchor, switching goals, dropping the goal,
 		// or an excused ride/swim link all re-anchor and reset.
 		{
-			local vector camp;
-			local float camped;
+			local vector camp, gflat;
+			local float camped, gdist;
 			camp = self.origin - self._stuck_org;
 			camp_z = 0;
 			camped = vlen(camp);
+			// Flat distance to the goal right now (the net-progress signal).
+			gdist = 99999;
+			if (self.target1 != world && self.target1 != self)
+			{
+				gflat = (self.target1.absmin + self.target1.absmax) * 0.5
+					- self.origin;
+				gflat_z = 0;
+				gdist = vlen(gflat);
+			}
 			// One window for every link: the clock only runs while ACTIVELY
 			// pushing with no escape, and a correct plat/train wait holds
 			// wishdir at 0 (paused, below), so a lift no longer needs a
@@ -1066,12 +1091,17 @@ void() bot_get =
 			if (self.target1 == world || self.target1 == self
 				|| self.target1 != self._stuck_tgt
 				|| camped > BOT_STUCK_BALL
+				|| gdist < self._stuck_gstart - BOT_STUCK_GAIN
 				|| link_type == AI_SURFACE)
 			{
-				// Real escape -- left the ball, switched or dropped the goal,
-				// or an excused swim: re-anchor here and reset the clock.
+				// Real escape / real progress -- switched or dropped the goal,
+				// left the ball, got BOT_STUCK_GAIN closer to the goal (the
+				// net-progress credit that separates a bot slowly winding
+				// toward its goal from one grinding an unreachable spot), or an
+				// excused swim: re-anchor here and reset the clock.
 				self._stuck_org = self.origin;
 				self._stuck_tgt = self.target1;
+				self._stuck_gstart = gdist;
 				self._stuck_since = 0;
 			}
 			else if (self.b_wishdir != '0 0 0')
