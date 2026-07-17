@@ -357,11 +357,14 @@ int nav_mesh_compute_orphan_jumps(
 /* Post-build pass: complete DIRECTED connectivity -- add the missing
    direction for areas reachable only one way (drop-in rooms with a teleport
    exit, etc.).  Adds only the absent direction, never bidirectional, so it
-   can't strand a bot.  Fills *out_links (malloc'd, caller frees); returns
-   the count. */
+   can't strand a bot.  'validate' models level/up moves (walk/jump);
+   'drop_validate' proves a downward candidate is a physically clean fall
+   (walk-off line, hull fall column, no lava) -- without it no drop links
+   are emitted.  Fills *out_links (malloc'd, caller frees); returns the
+   count. */
 int nav_mesh_compute_directed_links(
 	nav_mesh_runtime_t *navmesh,
-	nav_jump_validate_fn validate, void *user,
+	nav_jump_validate_fn validate, nav_jump_validate_fn drop_validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
 /* Post-build pass: bridge local connectivity gaps -- two walkable patches

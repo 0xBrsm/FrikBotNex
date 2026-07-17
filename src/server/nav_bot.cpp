@@ -322,11 +322,12 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	return AI_JUMP;
 }
 
-/* Validator for nav_mesh_compute_deep_drops: is a walk-off fall from 'from'
-   down to 'to' physically clean?  Mirrors the boundary drop detector's
-   gates (walk-off line, hull-truth fall column, no lava/slime landing) on
-   centroid pairs.  Reachability/no-trap gating happens in the pass itself. */
-static int nav_deep_drop_validate(const float *from, const float *to, void *user)
+/* Is a walk-off fall from 'from' down to 'to' physically clean?  Mirrors the
+   boundary drop detector's gates (walk-off line, hull-truth fall column, no
+   lava/slime landing) on centroid pairs.  'min_drop' is the caller's floor:
+   the deep-drop pass hands off anything shallower to the walk/jump passes,
+   while the directed pass validates right down to step height. */
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop)
 {
 	float drop = from[2] - to[2];
 	float dx = to[0] - from[0], dy = to[1] - from[1];
@@ -334,9 +335,8 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 #define DDFAIL(stage) do { if (nav_dd_debug_enabled()) fprintf(stderr, \
 	"DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): %s\n", \
 	from[0], from[1], from[2], to[0], to[1], to[2], stage); return 0; } while (0)
-	(void)user;
 
-	if (drop <= NAV_DEEP_DROP_HEIGHT_MIN)
+	if (drop <= min_drop)
 		DDFAIL("shallow");
 	if (hd < 8.0f)
 		DDFAIL("speed");
@@ -551,6 +551,21 @@ dry_fall:
 			DDFAIL("lava");
 	}
 	return AI_DROP;
+}
+
+/* Validator for nav_mesh_compute_deep_drops. */
+static int nav_deep_drop_validate(const float *from, const float *to, void *user)
+{
+	(void)user;
+	return nav_drop_validate_min(from, to, NAV_DEEP_DROP_HEIGHT_MIN);
+}
+
+/* Drop validator for the directed-connectivity pass: same physics gates,
+   but a directed repair may legitimately be as shallow as a step. */
+static int nav_dir_drop_validate(const float *from, const float *to, void *user)
+{
+	(void)user;
+	return nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT);
 }
 
 /* Validator for nav_mesh_compute_swim_links: can a player swim the straight
@@ -2298,7 +2313,7 @@ typedef int (*nav_conn_compute_fn)(nav_mesh_runtime_t *, nav_off_mesh_link_t **)
 
 static int nav_conn_pass_directed(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
 {
-	return nav_mesh_compute_directed_links(m, nav_link_validate, NULL, out);
+	return nav_mesh_compute_directed_links(m, nav_link_validate, nav_dir_drop_validate, NULL, out);
 }
 
 static int nav_conn_pass_gap_jumps(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)

@@ -1284,7 +1284,7 @@ extern "C" int nav_mesh_compute_orphan_jumps(
    strand a bot (the trap the earlier bidirectional SCC attempt caused).  */
 int nav_mesh_compute_directed_links(
 	nav_mesh_runtime_t *navmesh,
-	nav_jump_validate_fn validate, void *user,
+	nav_jump_validate_fn validate, nav_jump_validate_fn drop_validate, void *user,
 	nav_off_mesh_link_t **out_links)
 {
 	*out_links = nullptr;
@@ -1489,11 +1489,16 @@ int nav_mesh_compute_directed_links(
 					if (!type)
 					{
 						/* validate only models level/up moves.  A downward move
-						   is a drop -- survivable fall, clear-ish column, not into
-						   lava (the cycle's other half already exists, so the bot
-						   won't be stranded down there). */
+						   is a drop -- but only if the fall physics validator
+						   proves it (walk-off line, hull fall column, no lava).
+						   This used to stamp AI_DROP on the dz band alone, which
+						   baked through-the-wall "drops" (start's shells alcove:
+						   a 260u-horizontal 80u fall needs a 920u/s launch) that
+						   bots ground against forever. */
 						float ddz = to[2] - from[2];
-						if (ddz < -18.0f && ddz > -320.0f)  /* below step height = a drop */
+						if (ddz < -18.0f && ddz > -320.0f  /* below step height = a drop */
+							&& drop_validate != nullptr
+							&& drop_validate(from, to, user) == AI_DROP)
 							type = AI_DROP;
 					}
 					if (!type)
