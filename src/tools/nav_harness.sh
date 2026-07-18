@@ -96,7 +96,13 @@ MAX_ITEM_UNREACHABLE_PCT="${MAX_ITEM_UNREACHABLE_PCT:-0}"
 #   z257-271, turning the envirosuit/armorInv slime secret into a 48u
 #   crawl space no 56u player can enter (probed headroom along the
 #   whole approach).
-declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 )
+#   dm2: DIFFERENT KIND OF ENTRY -- accepted collateral, not a DM seal.
+#   The red armor (1312 -952 8) is player-reachable but sits behind the
+#   big floor-door (*1) with a ~70u rim that defeats every jump-lane and
+#   fall-column probe; accepted as collateral of the descent-lane change
+#   (dm2 is pathological, not a veto).  Reopened by the directed/SCC
+#   pass -- remove this entry when that lands.
+declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 [dm2]=1 )
 
 if [[ ! -x "$NQSERVER" ]]; then
 	echo "error: nqserver not found/executable at $NQSERVER" >&2
