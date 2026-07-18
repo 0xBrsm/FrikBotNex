@@ -1866,6 +1866,7 @@ int nav_mesh_compute_deep_drops(
 
 	/* Components that contain a level exit are escapable by definition. */
 	std::vector<char> compexit(ground, 0);
+	std::vector<int> exitreps;
 	for (int e = 0; e < nav_exit_point_count; e++)
 	{
 		float re[3], nearest[3];
@@ -1878,7 +1879,10 @@ int nav_mesh_compute_deep_drops(
 			unsigned int s, t, np;
 			mesh->decodePolyId(ref, s, t, np);
 			if ((int)np < ground)
+			{
 				compexit[gacomp[np]] = 1;
+				exitreps.push_back((int)np);
+			}
 		}
 	}
 
@@ -2105,6 +2109,19 @@ int nav_mesh_compute_deep_drops(
 						stop_ok = 1;
 					}
 				}
+			}
+			/* Exit reachability over the full link graph: compexit only
+			   marks the exit poly's own ground patch, but an exit on a
+			   jump-up pedestal (hip2m1's secret room) is still an escape
+			   for every poly that can PATH to it. */
+			for (size_t e = 0; !escapes && e < exitreps.size(); e++)
+			{
+				if (exitreps[e] == lo) { escapes = 1; break; }
+				float rx[3];
+				nav_quake_to_recast(&q[exitreps[e] * 3], rx);
+				dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)exitreps[e],
+					rl, rx, &filter, path, &pc, 256);
+				escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
 			}
 			if (!escapes)
 			{
