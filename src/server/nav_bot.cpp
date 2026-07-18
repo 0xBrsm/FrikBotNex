@@ -218,7 +218,8 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
                 steps straight across); bidirectional, the safest connection.
      AI_JUMP -- run-jump (up / across / across-and-down), bidirectional.
    Endpoints are walkable by construction, so no standability re-check. */
-static int nav_drop_validate_min(const float *from, const float *to, float min_drop);
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop,
+	float dry_cap, float speed_cap);
 
 static int nav_link_validate(const float *from, const float *to, void *user)
 {
@@ -478,7 +479,8 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 		   that fall; reject only when no trajectory connects (e2m1's
 		   through-rock links fail everything). */
 		if (!lane && dz < -NAV_JUMP_HEIGHT_MIN
-			&& nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT) == AI_DROP)
+			&& nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT,
+				NAV_DEEP_DROP_SCAN_MAX, NAV_PHYS_RUN_SPEED) == AI_DROP)
 			lane = 2;
 		if (!lane)
 		{
@@ -508,8 +510,16 @@ static int nav_link_validate(const float *from, const float *to, void *user)
    boundary drop detector's gates (walk-off line, hull-truth fall column, no
    lava/slime landing) on centroid pairs.  'min_drop' is the caller's floor:
    the deep-drop pass hands off anything shallower to the walk/jump passes,
-   while the directed pass validates right down to step height. */
-static int nav_drop_validate_min(const float *from, const float *to, float min_drop)
+   while the directed pass validates right down to step height.
+   'dry_cap'/'speed_cap' are the caller's WILLINGNESS policy, not physics:
+   the routine deep-drop tier keeps a conservative budget, while last-resort
+   repair (directed pass, jump-family steep drops) validates at physics
+   truth -- any fall is survivable in Quake (flat 5HP past 650u/s, water
+   negates), so the only physics bounds are the scan range and real run
+   speed.  hip1m4's arena traps need 720-1000u designed falls that the
+   routine budget must not veto when they are the only entry. */
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop,
+	float dry_cap, float speed_cap)
 {
 	float drop = from[2] - to[2];
 	float dx = to[0] - from[0], dy = to[1] - from[1];
@@ -579,11 +589,11 @@ static int nav_drop_validate_min(const float *from, const float *to, float min_d
 			}
 			if (!found)
 				{ DDOFF("nosurf"); continue; }
-			if (from[2] - surface > NAV_DEEP_DROP_HEIGHT_MAX)
+			if (from[2] - surface > dry_cap)
 				{ DDOFF("deepdry"); continue; }
 			/* Horizontal drift during the dry fall is physics-capped. */
 			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / NAV_PHYS_GRAVITY);
-			if (kOff[oi] > NAV_DEEP_DROP_MAX_SPEED * ts)
+			if (kOff[oi] > speed_cap * ts)
 				{ DDOFF("drift"); break; }
 			if (!nav_trace_clear_at_height(from, entry, from[2] + 24.0f, NULL))
 				{ DDOFF("walkoff"); continue; }
@@ -646,13 +656,13 @@ static int nav_drop_validate_min(const float *from, const float *to, float min_d
 	}
 
 dry_fall:
-	if (drop > NAV_DEEP_DROP_HEIGHT_MAX)
+	if (drop > dry_cap)
 		DDFAIL("deep-dry");
 	/* Horizontal reach is physics-limited, not a fixed radius: the launch
 	   speed needed to cover hd during the fall must fit inside a full run.
 	   Dry landings only -- a water landing swims its horizontal remainder,
 	   which the entry-column search caps per offset. */
-	if (hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / NAV_PHYS_GRAVITY))
+	if (hd > speed_cap * sqrtf(2.0f * drop / NAV_PHYS_GRAVITY))
 		DDFAIL("speed");
 
 	/* Fall-column search: the landing rep point is often tucked under the
@@ -690,7 +700,7 @@ dry_fall:
 				continue;
 			/* Drift during the fall is physics-capped: air-steering covers
 			   both the along-line and the sideways component. */
-			if (sqrtf(o * o + kLat[li] * kLat[li]) > NAV_DEEP_DROP_MAX_SPEED * ts)
+			if (sqrtf(o * o + kLat[li] * kLat[li]) > speed_cap * ts)
 				{ DDOFF("drift"); continue; }
 			p[0] = from[0] + dirh[0] * o - dirh[1] * kLat[li];
 			p[1] = from[1] + dirh[1] * o + dirh[0] * kLat[li];
@@ -821,19 +831,24 @@ dry_fall:
 	return AI_DROP;
 }
 
-/* Validator for nav_mesh_compute_deep_drops. */
+/* Validator for nav_mesh_compute_deep_drops: routine links, conservative
+   willingness budget. */
 static int nav_deep_drop_validate(const float *from, const float *to, void *user)
 {
 	(void)user;
-	return nav_drop_validate_min(from, to, NAV_DEEP_DROP_HEIGHT_MIN);
+	return nav_drop_validate_min(from, to, NAV_DEEP_DROP_HEIGHT_MIN,
+		NAV_DEEP_DROP_HEIGHT_MAX, NAV_DEEP_DROP_MAX_SPEED);
 }
 
 /* Drop validator for the directed-connectivity pass: same physics gates,
-   but a directed repair may legitimately be as shallow as a step. */
+   but a directed repair may legitimately be as shallow as a step -- and,
+   being the component's last resort, is bounded by physics truth rather
+   than the routine willingness budget. */
 static int nav_dir_drop_validate(const float *from, const float *to, void *user)
 {
 	(void)user;
-	return nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT);
+	return nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT,
+		NAV_DEEP_DROP_SCAN_MAX, NAV_PHYS_RUN_SPEED);
 }
 
 /* Validator for nav_mesh_compute_swim_links: can a player swim the straight

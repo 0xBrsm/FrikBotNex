@@ -1467,18 +1467,22 @@ int nav_mesh_compute_directed_links(
 					const float *qo = &q[o * 3], *qm = &q[m * 3];
 					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
 					float hd = sqrtf(dx * dx + dy * dy);
-					float dz = qo[2] - qm[2], adz = dz < 0 ? -dz : dz;
 					if (hd > 320.0f) { rej_far++; continue; }
 					if (hd < 8.0f) { rej_near++; continue; }
-					if (adz > 320.0f) { rej_dz++; continue; }
-					float cost = hd + adz;
-					if (cost >= bestcost) continue;
-
 					/* The link runs FROM the main side TO the comp for IN, and
 					   FROM the comp TO the main side for OUT.  Name the ends so
 					   validate sees the actual direction of travel. */
 					const float *from = need_in ? qm : qo;
 					const float *to   = need_in ? qo : qm;
+					/* Up moves are bounded by jump reach.  Down moves are
+					   drops: falls are never lethal, so the only bound is the
+					   validator's scan range -- some areas are only enterable
+					   by a designed deep shaft (hip1m4's lower level, ~880u). */
+					float tdz = to[2] - from[2];
+					if (tdz > 320.0f || tdz < -NAV_DEEP_DROP_SCAN_MAX) { rej_dz++; continue; }
+					float adz = tdz < 0 ? -tdz : tdz;
+					float cost = hd + adz;
+					if (cost >= bestcost) continue;
 					int type = validate(from, to, user);
 					/* Never restore one-way connectivity with a rocket jump: bots
 					   grind RJ links (they can't reliably execute them, or own no
@@ -1495,8 +1499,7 @@ int nav_mesh_compute_directed_links(
 						   baked through-the-wall "drops" (start's shells alcove:
 						   a 260u-horizontal 80u fall needs a 920u/s launch) that
 						   bots ground against forever. */
-						float ddz = to[2] - from[2];
-						if (ddz < -18.0f && ddz > -320.0f  /* below step height = a drop */
+						if (tdz < -18.0f  /* below step height = a drop */
 							&& drop_validate != nullptr
 							&& drop_validate(from, to, user) == AI_DROP)
 							type = AI_DROP;
@@ -1506,7 +1509,7 @@ int nav_mesh_compute_directed_links(
 						rej_val++;
 						if (dbg && rej_val <= 10)
 							fprintf(stderr, "Nav: DIRDBG valfail (%.0f %.0f %.0f)->(%.0f %.0f %.0f) hd=%.0f dz=%.0f\n",
-								from[0], from[1], from[2], to[0], to[1], to[2], hd, dz);
+								from[0], from[1], from[2], to[0], to[1], to[2], hd, tdz);
 						continue;
 					}
 					bestcost = cost; bestType = type;
