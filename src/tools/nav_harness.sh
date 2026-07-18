@@ -83,6 +83,21 @@ MAX_LAVA_PCT="${MAX_LAVA_PCT:-2}"
 MAX_SPAWN_UNREACHABLE="${MAX_SPAWN_UNREACHABLE:-0}"
 MAX_ITEM_UNREACHABLE_PCT="${MAX_ITEM_UNREACHABLE_PCT:-0}"
 
+# Items the map author sealed away in deathmatch -- geometry-proven, not
+# nav bugs.  id's pattern: an SP hazard/trap is papered over with a
+# DM-only func_wall (skill spawnflags 1792 = never spawns in SP), and
+# items placed for the SP route get stranded behind it.
+#   e2m6: the flooded oubliette is the SP collapse-floor trap; in DM the
+#   trap-floor doors are NOT_IN_DEATHMATCH and func_wall *69 seals the
+#   pit, stranding two bottom item_health that lack the 2048 flag
+#   (the armor beside them has it).  Flood-fill of world+*69 hull-0
+#   confirms no entry.
+#   e2m4: DM-only func_walls *59/*60 floor the slime moat over at
+#   z257-271, turning the envirosuit/armorInv slime secret into a 48u
+#   crawl space no 56u player can enter (probed headroom along the
+#   whole approach).
+declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 )
+
 if [[ ! -x "$NQSERVER" ]]; then
 	echo "error: nqserver not found/executable at $NQSERVER" >&2
 	exit 1
@@ -301,10 +316,13 @@ for m in $MAPS; do
 					reasons+=("$spawn_bad/$spawn_tot spawns unreachable")
 				fi
 				if [[ "${item_tot:-0}" -gt 0 ]]; then
-					item_pct=$((100 * item_bad / item_tot))
+					known="${KNOWN_UNREACHABLE_ITEMS[$m]:-0}"
+					item_eff=$((item_bad - known))
+					[[ "$item_eff" -lt 0 ]] && item_eff=0
+					item_pct=$((100 * item_eff / item_tot))
 					if [[ "$item_pct" -gt "$MAX_ITEM_UNREACHABLE_PCT" ]]; then
 						status="FAIL"
-						reasons+=("$item_bad/$item_tot items unreachable (${item_pct}%)")
+						reasons+=("$item_bad/$item_tot items unreachable (${item_pct}% over known $known)")
 					fi
 				fi
 			fi

@@ -218,6 +218,8 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
                 steps straight across); bidirectional, the safest connection.
      AI_JUMP -- run-jump (up / across / across-and-down), bidirectional.
    Endpoints are walkable by construction, so no standability re-check. */
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop);
+
 static int nav_link_validate(const float *from, const float *to, void *user)
 {
 	vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32}, zero = {0, 0, 0};
@@ -284,6 +286,69 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 		}
 	}
 
+	/* Fully submerged pair: ballistic gates are meaningless in water -- a
+	   swimmer freely climbs over a divider and back down (e2m6's flooded
+	   oubliette bottom).  Accept if some raised straight chord between the
+	   endpoints runs through open water; reject only when every chord up
+	   to the divider cap is blocked or breaks the surface. */
+	{
+		vec3_t wp;
+		wp[0] = from[0]; wp[1] = from[1]; wp[2] = from[2] + 8.0f;
+		if (SV_PointContents(wp) == CONTENTS_WATER)
+		{
+			wp[0] = to[0]; wp[1] = to[1]; wp[2] = to[2] + 8.0f;
+			if (SV_PointContents(wp) == CONTENTS_WATER)
+			{
+				static const float kH[] = { 8, 24, 48, 72, 96, 120 };
+				/* Lateral offsets thread the chord between narrow parked
+				   brush entities (e2m6's 38u plat columns standing in the
+				   flooded oubliette) that SV_Move clips but a swimmer just
+				   slides around. */
+				static const float kLat[] = { 0, -24, 24, -48, 48 };
+				float px = -(to[1] - from[1]) / hd;
+				float py = (to[0] - from[0]) / hd;
+				float base = from[2] > to[2] ? from[2] : to[2];
+				int hi, oor = 0;
+				for (hi = 0; hi < (int)(sizeof(kH)/sizeof(kH[0])) && !oor; hi++)
+				{
+					int li;
+					for (li = 0; li < (int)(sizeof(kLat)/sizeof(kLat[0])); li++)
+					{
+						int s, steps, wet = 1;
+						ts[0] = from[0] + px * kLat[li];
+						ts[1] = from[1] + py * kLat[li];
+						ts[2] = base + kH[hi];
+						te[0] = to[0] + px * kLat[li];
+						te[1] = to[1] + py * kLat[li];
+						te[2] = base + kH[hi];
+						if (SV_PointContents(ts) != CONTENTS_WATER
+							|| SV_PointContents(te) != CONTENTS_WATER)
+						{
+							if (li == 0)
+								oor = 1;  /* left the water body: no higher chord */
+							continue;
+						}
+						steps = (int)(hd / 16.0f) + 1;
+						for (s = 1; s < steps && wet; s++)
+						{
+							vec3_t sp;
+							sp[0] = ts[0] + (te[0] - ts[0]) * ((float)s / (float)steps);
+							sp[1] = ts[1] + (te[1] - ts[1]) * ((float)s / (float)steps);
+							sp[2] = ts[2];
+							if (SV_PointContents(sp) != CONTENTS_WATER)
+								wet = 0;
+						}
+						if (!wet)
+							continue;
+						tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+						if (!tr.startsolid && tr.fraction >= 1.0f)
+							return AI_JUMP;
+					}
+				}
+			}
+		}
+	}
+
 	/* JUMP: clear dz against gravity (apex v0^2/2g ~45u up), run distance <=
 	   maxspeed * air time, apex arc wall-free.  Use SIGNED dz, not |dz| --
 	   a downward target gets a LONGER airtime (falls further before landing),
@@ -311,6 +376,123 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	airtime = (v0 + sqrt(disc)) / g;
 	if (hd / airtime > maxspeed)
 		return 0;
+	/* Descent-arc trace.  The apex-height line below clears ANYTHING lower
+	   than the apex, including a solid wall face between the arc and a
+	   recessed landing -- e2m1's citadel baked -264u "jumps" whose whole
+	   fall path was rock, and bots ground on them forever.  Point-trace
+	   the falling half of the parabola (apex -> landing) to prove the
+	   descent lane actually reaches the target.  A POINT, not the player
+	   box, and only the DESCENT: box sweeps of either half were tried and
+	   severed working links map-wide.  Ascent box contact is normal Quake
+	   movement (a jump-up rises against the ledge wall and slips over the
+	   lip), and the min-speed fall's box hugs the launch cliff and grazes
+	   the landing floor -- all things a real jumper (faster launch,
+	   air-steer) clears, so only an actually-solid descent lane rejects. */
+	{
+		/* Sampled trajectory family: the full-impulse arc (apex ~45u) is
+		   only ONE member.  A jump under a low ceiling bonks and continues
+		   with a flattened arc, so a window opening rejects the full arc
+		   (lintel) AND the straight chord (sill) while an intermediate
+		   bonk height threads between (e2m3's level 87u window jump).
+		   Sample bonk heights down to near-chord; any clear descent lane
+		   proves a connecting trajectory. */
+		static const float kBonk[] = { -1.0f, 30.0f, 18.0f, 8.0f };
+		int k, lane = 0;
+		for (k = 0; k < (int)(sizeof(kBonk)/sizeof(kBonk[0])) && !lane; k++)
+		{
+			float h = kBonk[k] < 0.0f ? v0 * v0 / (2.0f * g) : kBonk[k];
+			float t_up, t_dn, at, f_apex;
+			int nseg, i;
+			if (h < dz)
+				continue;           /* bonked too low to ever reach the landing */
+			t_up = (v0 - sqrtf(v0 * v0 - 2.0f * g * h)) / g;
+			t_dn = sqrtf(2.0f * (h - dz) / g);
+			at = t_up + t_dn;
+			if (hd / at > maxspeed)
+				continue;           /* this member can't cover the distance */
+			f_apex = t_up / at;
+			nseg = (int)((hd * (1.0f - f_apex)) / 24.0f) + 1;
+			if (nseg < 3) nseg = 3;
+			if (nseg > 8) nseg = 8;
+			/* Start at the (possibly bonked) apex; +1 floor clearance
+			   mirrors the sweeps above.  Endpoints keep the origin's 24u
+			   lift, so the trace ends a body-height above the landing
+			   floor and never reads the floor itself as a hit. */
+			ts[0] = from[0] + dx * f_apex;
+			ts[1] = from[1] + dy * f_apex;
+			ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f + h;
+			for (i = 1; i <= nseg; i++)
+			{
+				float t = t_dn * (float)i / (float)nseg;
+				float f = f_apex + (1.0f - f_apex) * (float)i / (float)nseg;
+				te[0] = from[0] + dx * f;
+				te[1] = from[1] + dy * f;
+				te[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f
+					+ h - 0.5f * g * t * t;
+				tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+				if (tr.startsolid)
+					break;
+				if (tr.fraction < 1.0f)
+				{
+					/* Wall-flush landing: boundary sample points sit ON
+					   the landing poly's wall-side edge, so the terminal
+					   sample can end a hair inside that wall (e2m3's
+					   window landing, item niches).  Touching down a few
+					   units short is the same landing -- accept a hit
+					   whose endpoint is within grazing range of the
+					   target on the FINAL segment only. */
+					float ex = tr.endpos[0] - te[0];
+					float ey = tr.endpos[1] - te[1];
+					float ez = tr.endpos[2] - te[2];
+					if (!(i == nseg && ex * ex + ey * ey + ez * ez <= 16.0f * 16.0f))
+						break;
+				}
+				ts[0] = te[0]; ts[1] = te[1]; ts[2] = te[2];
+			}
+			if (i > nseg)
+				lane = k == 0 ? 1 : 2;
+		}
+		if (!lane)
+		{
+			/* Near-flat limit of the family: an open body-height lane
+			   straight from launch to landing (a corridor step-down whose
+			   ceiling forbids any real apex). */
+			ts[0] = from[0]; ts[1] = from[1];
+			ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f;
+			te[0] = to[0]; te[1] = to[1];
+			te[2] = to[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f;
+			tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+			if (!tr.startsolid)
+			{
+				float ex = tr.endpos[0] - te[0];
+				float ey = tr.endpos[1] - te[1];
+				float ez = tr.endpos[2] - te[2];
+				if (tr.fraction >= 1.0f
+					|| ex * ex + ey * ey + ez * ez <= 16.0f * 16.0f)
+					lane = 2;
+			}
+		}
+		/* Steep end of the family: a recessed landing (item niche under a
+		   lintel) blocks every launch lane yet is reachable by walking off
+		   the edge and falling in.  Accept when real fall physics prove
+		   that fall; reject only when no trajectory connects (e2m1's
+		   through-rock links fail everything). */
+		if (!lane && dz < -NAV_JUMP_HEIGHT_MIN
+			&& nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT) == AI_DROP)
+			lane = 2;
+		if (!lane)
+		{
+			if (nav_dd_debug_enabled())
+				fprintf(stderr, "JVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): no lane\n",
+					from[0], from[1], from[2], to[0], to[1], to[2]);
+			return 0;
+		}
+		/* Family members below the full arc already proved a specific
+		   threaded lane; the apex-height line would just re-veto them on
+		   the very lintel they threaded under. */
+		if (lane == 2)
+			return AI_JUMP;
+	}
 	{
 		float apexz = (to[2] > from[2] ? to[2] : from[2]) + NAV_PHYS_JUMP_APEX + NAV_PHYS_FLOOR_OFFSET;
 		ts[0] = from[0]; ts[1] = from[1]; ts[2] = apexz;
@@ -338,8 +520,10 @@ static int nav_drop_validate_min(const float *from, const float *to, float min_d
 
 	if (drop <= min_drop)
 		DDFAIL("shallow");
-	if (hd < 8.0f)
-		DDFAIL("speed");
+	/* hd near zero is NOT degenerate: a sheer well (e3m7's 240u shaft)
+	   puts the landing rep plumb under the mouth.  dirh consumers all
+	   clamp the divisor, and the station/column search handles the
+	   straight-down case like any other. */
 
 	/* Underwater landing: the fall becomes "drop into the water body, then
 	   swim to the floor" -- the landing poly needn't be plumb below the
@@ -478,22 +662,30 @@ dry_fall:
 	   Probe columns at offsets along the walk-off line. */
 	{
 		static const float kRel[] = { 0, -16, 16, -32, 32, -48, 48 };
+		/* Mid-line stations: the open fall shaft can sit anywhere along
+		   the walk-off line, not only at the landing (dm6's LG pit is
+		   entered over its east mouth ~90u before the rep point, which
+		   tucks under the walkway).  A mid-line landing is validated
+		   like any off-rep column by the walkback + midgap gates. */
+		static const float kFrac[] = { 0.75f, 0.5f, 0.25f };
 		static const float kLat[] = { 0, -16, 16, -32, 32, -48, 48, -64, 64, -96, 96 };
 		float dirh[2], ts;
 		int oi, li, ok = 0;
+		int nrel = (int)(sizeof(kRel)/sizeof(kRel[0]));
+		int nsta = nrel + (hd > 96.0f ? (int)(sizeof(kFrac)/sizeof(kFrac[0])) : 0);
 		char miss[200];
 		miss[0] = 0;
 #define DDOFF(why) do { if (nav_dd_debug_enabled() && li == 0) { size_t l = strlen(miss); \
-	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", kRel[oi], why); } } while (0)
+	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", o - hd, why); } } while (0)
 		ts = sqrtf(2.0f * drop / NAV_PHYS_GRAVITY);
 		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
 		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
-		for (oi = 0; oi < (int)(sizeof(kRel)/sizeof(kRel[0])) && !ok; oi++)
+		for (oi = 0; oi < nsta && !ok; oi++)
 		for (li = 0; li < (int)(sizeof(kLat)/sizeof(kLat[0])) && !ok; li++)
 		{
 			vec3_t p, fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
 			trace_t tr;
-			float o = hd + kRel[oi];
+			float o = oi < nrel ? hd + kRel[oi] : hd * kFrac[oi - nrel];
 			if (o < 0.0f)
 				continue;
 			/* Drift during the fall is physics-capped: air-steering covers
@@ -514,7 +706,7 @@ dry_fall:
 			/* Landed off the rep point: the remainder is a level walk.
 			   Mid-point floor probe guards against the level trace sailing
 			   over a trench between the column and the rep point. */
-			if (kRel[oi] != 0.0f || kLat[li] != 0.0f)
+			if (o != hd || kLat[li] != 0.0f)
 			{
 				vec3_t land, mid, mlow, zero = {0, 0, 0};
 				trace_t mtr;
@@ -532,6 +724,82 @@ dry_fall:
 			ok = 1;
 		}
 #undef DDOFF
+		if (!ok)
+		{
+			/* Ballistic walk-off: a roofed niche (e2m4's envirosuit
+			   shelf) is invisible to every vertical column -- the roof
+			   blocks the plumb probe -- yet a player walking off the
+			   rim at moderate speed falls in under the roof lip.
+			   Simulate the real parabola from the actual rim at several
+			   launch speeds. */
+			static const float kV[] = { 90, 150, 210, 270, 320 };
+			vec3_t rim, zero = {0, 0, 0};
+			float s, rimz = from[2];
+			int vi, have_rim = 0;
+			for (s = 8.0f; s <= hd + 48.0f; s += 8.0f)
+			{
+				vec3_t a, b;
+				trace_t ftr;
+				a[0] = from[0] + dirh[0] * s;
+				a[1] = from[1] + dirh[1] * s;
+				a[2] = from[2] + 24.0f;
+				b[0] = a[0]; b[1] = a[1]; b[2] = from[2] - 20.0f;
+				ftr = SV_Move(a, zero, zero, b, MOVE_NOMONSTERS, NULL);
+				if (ftr.startsolid)
+					break;
+				if (ftr.fraction >= 1.0f)
+				{
+					rim[0] = a[0]; rim[1] = a[1]; rim[2] = rimz;
+					have_rim = 1;
+					break;
+				}
+				rimz = ftr.endpos[2];
+			}
+			if (have_rim
+				&& !nav_trace_clear_at_height(from, rim, from[2] + 24.0f, NULL))
+				have_rim = 0;
+			for (vi = 0; have_rim && vi < (int)(sizeof(kV)/sizeof(kV[0])) && !ok; vi++)
+			{
+				vec3_t p0, p1;
+				trace_t str;
+				float v = kV[vi], t = 0.0f;
+				p0[0] = rim[0]; p0[1] = rim[1]; p0[2] = rim[2] + 2.0f;
+				while (1)
+				{
+					float ex, ey, ez;
+					t += 12.0f / v;
+					if (v * t > hd + 96.0f)
+						break;
+					p1[0] = rim[0] + dirh[0] * v * t;
+					p1[1] = rim[1] + dirh[1] * v * t;
+					p1[2] = rim[2] + 2.0f - 0.5f * NAV_PHYS_GRAVITY * t * t;
+					str = SV_Move(p0, zero, zero, p1, MOVE_NOMONSTERS, NULL);
+					if (str.startsolid)
+						break;
+					if (str.fraction < 1.0f)
+					{
+						ex = str.endpos[0] - to[0];
+						ey = str.endpos[1] - to[1];
+						ez = str.endpos[2] - to[2];
+						if (ex * ex + ey * ey <= 48.0f * 48.0f
+							&& ez >= -8.0f && ez <= 40.0f)
+							ok = 1;
+						break;
+					}
+					if (p1[2] <= to[2])
+					{
+						ex = p1[0] - to[0];
+						ey = p1[1] - to[1];
+						if (ex * ex + ey * ey <= 48.0f * 48.0f)
+							ok = 1;
+						break;
+					}
+					if (p1[2] < to[2] - 80.0f)
+						break;
+					p0[0] = p1[0]; p0[1] = p1[1]; p0[2] = p1[2];
+				}
+			}
+		}
 		if (!ok)
 		{
 			if (nav_dd_debug_enabled())
@@ -1016,6 +1284,24 @@ static int nav_is_floor_collapse_door(edict_t *e)
 		&& nav_top_face_has_clearance(e);
 }
 
+/* A thin down-moving door parked at its top stop: a sinking floor slab.
+   Thin doors bake as static floor (nav_is_brush_entity), so when one
+   sinks it carries its rider down -- e1m6's shootable secret staircase
+   is four of these, each a 30u-deep step that drops into the passage
+   beneath.  Too narrow for the collapse-floor footprint test, but the
+   thinness plus top clearance is the same map-author evidence: this is
+   floor, and its travel is a route. */
+static int nav_is_sinking_floor_door(edict_t *e)
+{
+	eval_t *pos1 = GetEdictFieldValue(e, "pos1");
+	eval_t *pos2 = GetEdictFieldValue(e, "pos2");
+	return pos1 && pos2
+		&& pos2->vector[2] < pos1->vector[2] - 32.0f
+		&& e->v.origin[2] == pos1->vector[2]
+		&& (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
+		&& nav_top_face_has_clearance(e);
+}
+
 /* A door-lift: an up-moving door parked at its bottom stop with an item
    or spawn resting on the top face (hip1m5's keylift RL).  The parked
    top IS the item's floor -- holding the door open for link passes
@@ -1067,6 +1353,16 @@ static int nav_is_brush_entity(edict_t *e)
 #define NAV_MAX_OPEN_DOORS 128
 static struct { edict_t *e; vec3_t org; } nav_opened_doors[NAV_MAX_OPEN_DOORS];
 static int nav_opened_door_count;
+
+/* Bottom-parked plats get the same treatment for the same reason: they
+   are excluded from the raster (the parked body would fragment the
+   lower room), so traces must not clip them either.  A thin deck parked
+   flush in a floor slot seals the pit its elevator serves (e3m7's well:
+   every fall column into the 240u shaft startsolids on the parked
+   deck).  The plat vacates the column in play -- riding it is the plat
+   link's job, and stepping into the hole it leaves is a plain drop. */
+static struct { edict_t *e; float solid; } nav_unsolid_plats[NAV_MAX_OPEN_DOORS];
+static int nav_unsolid_plat_count;
 
 static void nav_doors_open_for_build(void)
 {
@@ -1135,6 +1431,23 @@ static void nav_doors_open_for_build(void)
 	}
 	if (nav_opened_door_count > 0)
 		fprintf(stderr, "Nav: %d doors held open for link validation\n", nav_opened_door_count);
+
+	nav_unsolid_plat_count = 0;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *e = EDICT_NUM(i);
+		if (e->free) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")) continue;
+		if (nav_is_brush_entity(e)) continue;   /* top-resting plats are baked: stay solid */
+		if (nav_unsolid_plat_count >= NAV_MAX_OPEN_DOORS) break;
+		nav_unsolid_plats[nav_unsolid_plat_count].e = e;
+		nav_unsolid_plats[nav_unsolid_plat_count].solid = e->v.solid;
+		nav_unsolid_plat_count++;
+		e->v.solid = SOLID_NOT;
+		SV_LinkEdict(e, false);
+	}
+	if (nav_unsolid_plat_count > 0)
+		fprintf(stderr, "Nav: %d parked plats unclipped for link validation\n", nav_unsolid_plat_count);
 }
 
 static void nav_doors_restore(void)
@@ -1148,6 +1461,13 @@ static void nav_doors_restore(void)
 		SV_LinkEdict(e, false);
 	}
 	nav_opened_door_count = 0;
+	for (i = 0; i < nav_unsolid_plat_count; i++)
+	{
+		edict_t *e = nav_unsolid_plats[i].e;
+		e->v.solid = nav_unsolid_plats[i].solid;
+		SV_LinkEdict(e, false);
+	}
+	nav_unsolid_plat_count = 0;
 }
 
 static int nav_door_held_open(edict_t *e)
@@ -1518,9 +1838,73 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		eval_t *pos1, *pos2, *spd;
 		float top_z, bot_z, speed, travel;
 		if (e->free) continue;
+
+		/* fd_secret trapdoor: a secret door (movedir stays zero -- secrets
+		   never call SetMovedir) lying flat as a baked thin floor panel.
+		   When it opens it slides AWAY, vacating its whole footprint, and
+		   the route is a fall to whatever floor lies beneath (dm6's LG-pit
+		   lid).  pos1/pos2 are computed lazily by fd_secret_use, so the
+		   collapse/sinking predicates can't see it; the panel shape plus
+		   the vertical shaft below IS the tell.  One-way: nothing carries
+		   a player back up through the opening. */
+		if (!strcasecmp(pr_strings + (int)e->v.classname, "door")
+			&& e->v.movedir[0] == 0.0f && e->v.movedir[1] == 0.0f
+			&& e->v.movedir[2] == 0.0f
+			&& (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
+			&& nav_top_face_has_clearance(e))
+		{
+			float sx = e->v.absmax[0] - e->v.absmin[0];
+			float sy = e->v.absmax[1] - e->v.absmin[1];
+			float min_horiz = sx < sy ? sx : sy;
+			if (min_horiz >= 64.0f)
+			{
+				vec3_t ts, te, zero = {0, 0, 0};
+				trace_t tr;
+				float cx = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
+				float cy = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
+				float panel_top = e->v.absmax[2];
+				ts[0] = cx; ts[1] = cy; ts[2] = e->v.absmin[2] - 2.0f;
+				te[0] = cx; te[1] = cy; te[2] = ts[2] - NAV_DEEP_DROP_HEIGHT_MAX;
+				tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, e);
+				if (!tr.startsolid && tr.fraction < 1.0f
+					&& panel_top - tr.endpos[2] > 32.0f)
+				{
+					vec3_t lc;
+					int lcont;
+					lc[0] = cx; lc[1] = cy; lc[2] = tr.endpos[2] + 8.0f;
+					lcont = SV_PointContents(lc);
+					if (lcont != CONTENTS_LAVA && lcont != CONTENTS_SLIME)
+					{
+						float half_x = sx * 0.5f, half_y = sy * 0.5f;
+						float rad = (half_x > half_y ? half_x : half_y) + 24.0f;
+						nav_link_ensure_cap(&links, n, &cap);
+						links[n].start[0] = cx;
+						links[n].start[1] = cy;
+						links[n].start[2] = panel_top;
+						links[n].end[0] = cx;
+						links[n].end[1] = cy;
+						links[n].end[2] = tr.endpos[2];
+						links[n].radius = rad > 64.0f ? rad : 64.0f;
+						links[n].bidirectional = 0;
+						links[n].link_type = AI_PLAT_BOTTOM;
+						links[n].height_delta = panel_top - tr.endpos[2];
+						links[n].wait_time = sqrtf(2.0f * (panel_top - tr.endpos[2]) / NAV_PHYS_GRAVITY);
+						links[n].required_speed = 0;
+						links[n].serve_ent = i;
+						if (nav_debug_cvar.value)
+							Con_Printf("Nav: trapdoor link (%.0f %.0f) z %.0f -> %.0f\n",
+								cx, cy, panel_top, tr.endpos[2]);
+						n++;
+					}
+				}
+				continue;
+			}
+		}
+
 		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")
 			&& !(!strcasecmp(pr_strings + (int)e->v.classname, "door")
-				&& nav_is_floor_collapse_door(e))) continue;
+				&& (nav_is_floor_collapse_door(e)
+					|| nav_is_sinking_floor_door(e)))) continue;
 
 		/* pos1 = top, pos2 = bottom (QC fields, set by plat spawn code;
 		   same ordering for a collapse-floor door, which opens down).
