@@ -96,13 +96,18 @@ MAX_ITEM_UNREACHABLE_PCT="${MAX_ITEM_UNREACHABLE_PCT:-0}"
 #   z257-271, turning the envirosuit/armorInv slime secret into a 48u
 #   crawl space no 56u player can enter (probed headroom along the
 #   whole approach).
-#   dm2: DIFFERENT KIND OF ENTRY -- accepted collateral, not a DM seal.
-#   The red armor (1312 -952 8) is player-reachable but sits behind the
-#   big floor-door (*1) with a ~70u rim that defeats every jump-lane and
-#   fall-column probe; accepted as collateral of the descent-lane change
-#   (dm2 is pathological, not a veto).  Reopened by the directed/SCC
-#   pass -- remove this entry when that lands.
-declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 [dm2]=1 )
+#   r1m3: item_health authored at (-532 1696 -640) settles, via the SAME
+#   256u droptofloor trace the real engine runs (cross-checked byte-for-
+#   byte against pr_cmds.c PF_droptofloor), onto a knife-edge rim at
+#   z=-824 -- the lip where a deep pit's walls begin their drop to the
+#   true floor 248u further down at z=-1072.  TRIDUMP confirms the rim is
+#   real solid geometry (not a phantom edge), but it's proven too narrow
+#   for a player-sized box to stand on anywhere near the item without
+#   clipping the shaft walls, so Recast correctly erodes it out of the
+#   walkable navmesh -- no snap-tie-break bug (unlike hip3m4) and no
+#   nearby poly to widen the query into.  Geometry-proven unreachable
+#   pickup, not a nav bug.
+declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 [r1m3]=1 )
 
 if [[ ! -x "$NQSERVER" ]]; then
 	echo "error: nqserver not found/executable at $NQSERVER" >&2
