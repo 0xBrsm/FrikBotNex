@@ -555,6 +555,52 @@ int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
 	return *out_ref != 0;
 }
 
+/* Goal-point floor snap.  dtFindNearestPolyQuery favors any poly a
+   point is "over" within walkableClimb, clamping the vertical term
+   toward zero -- when two floors stack within climb height of the
+   query point (a pit floor directly under a plateau), BOTH clamp to
+   d=0 and the FIRST poly the tile query happens to visit wins the
+   tie, regardless of which floor is actually closer.  That silently
+   snaps a goal (item, path endpoint) onto the wrong level entirely.
+   Skip the clamp and rank by true 3D distance so the closer floor
+   always wins the tie. */
+static int nav_mesh_goal_floor_snap(const nav_mesh_runtime_t *navmesh,
+	const dtQueryFilter *filter, const float *rc_point, const float *half_extents,
+	dtPolyRef *out_ref, float *out_pt, bool *out_over)
+{
+	dtPolyRef polys[128];
+	int n = 0;
+
+	if (dtStatusFailed(navmesh->query->queryPolygons(
+			rc_point, half_extents, filter, polys, &n, 128)))
+		return 0;
+
+	float best_d = FLT_MAX;
+	*out_ref = 0;
+	if (out_over)
+		*out_over = false;
+	for (int i = 0; i < n; i++)
+	{
+		float pt[3];
+		bool over = false;
+		if (dtStatusFailed(navmesh->query->closestPointOnPoly(polys[i], rc_point, pt, &over)))
+			continue;
+		float dx = pt[0] - rc_point[0];
+		float dy = pt[1] - rc_point[1];
+		float dz = pt[2] - rc_point[2];
+		float d = dx * dx + dy * dy + dz * dz;
+		if (d < best_d)
+		{
+			best_d = d;
+			*out_ref = polys[i];
+			dtVcopy(out_pt, pt);
+			if (out_over)
+				*out_over = over;
+		}
+	}
+	return *out_ref != 0;
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -569,7 +615,6 @@ static int nav_mesh_find_nearest_internal(
 	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
 	float recast_point[3];
 	const float *extents;
-	dtStatus status;
 
 	if (navmesh == nullptr || navmesh->query == nullptr || navmesh->navmesh == nullptr)
 	{
@@ -599,14 +644,8 @@ static int nav_mesh_find_nearest_internal(
 	}
 	else
 	{
-		status = navmesh->query->findNearestPoly(
-			recast_point,
-			extents,
-			&filter,
-			nearest_ref,
-			nearest_pt,
-			is_over_poly);
-		if (dtStatusFailed(status))
+		if (!nav_mesh_goal_floor_snap(navmesh, &filter, recast_point, extents,
+				nearest_ref, nearest_pt, is_over_poly))
 		{
 			nav_set_error(error, error_size, "Detour findNearestPoly failed");
 			return 0;
@@ -4346,6 +4385,22 @@ extern "C" int nav_mesh_find_path(
 		}
 	}
 
+	if (getenv("NAV_DUMP_PARTIAL_PATH") != NULL)
+	{
+		const dtMeshTile *et = nullptr;
+		const dtPoly *ep = nullptr;
+		if (!dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(end_ref, &et, &ep)))
+		{
+			unsigned int ls, lt, lp;
+			navmesh->navmesh->decodePolyId(end_ref, ls, lt, lp);
+			float c[3], q[3];
+			nav_mesh_poly_center(et, ep, c);
+			nav_recast_to_quake(c, q);
+			fprintf(stderr, "Nav: ENDSNAP end_ref poly=%u type=%d over_poly=%d (%.0f %.0f %.0f)\n",
+				lp, ep->getType(), end_over_poly ? 1 : 0, q[0], q[1], q[2]);
+		}
+	}
+
 	path_count = 0;
 	status = navmesh->query->findPath(
 		start_ref,
@@ -4370,6 +4425,23 @@ extern "C" int nav_mesh_find_path(
 			   chase phantom mesh gaps. */
 			const char *oon = dtStatusDetail(status, DT_OUT_OF_NODES)
 				? ", out of nodes" : "";
+			if (getenv("NAV_DUMP_PARTIAL_PATH") != NULL)
+			{
+				for (i = 0; i < path_count; i++)
+				{
+					const dtMeshTile *pt = nullptr;
+					const dtPoly *pp = nullptr;
+					unsigned int ls, lt, lp;
+					if (dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(path_refs[i], &pt, &pp)))
+						continue;
+					navmesh->navmesh->decodePolyId(path_refs[i], ls, lt, lp);
+					float c[3], q[3];
+					nav_mesh_poly_center(pt, pp, c);
+					nav_recast_to_quake(c, q);
+					fprintf(stderr, "Nav: PPATH[%d] poly=%u type=%d (%.0f %.0f %.0f)\n",
+						i, lp, pp->getType(), q[0], q[1], q[2]);
+				}
+			}
 			/* Report WHERE the search dead-ended, in quake coords -- the
 			   gap between here and the goal is the thing to go look at. */
 			const dtMeshTile *stop_tile = nullptr;
