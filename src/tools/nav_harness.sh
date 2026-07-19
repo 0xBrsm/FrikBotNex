@@ -52,7 +52,11 @@ BATCH_SIZE="${BATCH_SIZE:-6}"
 OUTDIR="${OUTDIR:-$GAMEDIR/navruns/harness}"
 if [[ "$MODE" == "conn" || "$MODE" == "bakesum" ]]; then
 	BOTS=1
-	DURATION="${DURATION:-90}" # worst-case mesh-build wait; early-kill makes the typical map much faster
+	DURATION="${DURATION:-240}" # worst-case mesh-build wait; early-kill makes the typical map much faster.
+	# 90 covered id1 alone, but several mission-pack maps (bigger, more off-mesh
+	# links) blow past that under normal batch-parallel load; 240 is cheap
+	# since early-kill means fast maps never wait it out, it only raises the
+	# ceiling for the slow ones. True outliers get their own budget below.
 elif [[ "$MODE" == "full" ]]; then
 	BOTS="${BOTS:-4}"
 	DURATION="${DURATION:-60}"
@@ -109,6 +113,27 @@ MAX_ITEM_UNREACHABLE_PCT="${MAX_ITEM_UNREACHABLE_PCT:-0}"
 #   pickup, not a nav bug.
 declare -A KNOWN_UNREACHABLE_ITEMS=( [e2m6]=2 [e2m4]=2 [r1m3]=1 )
 
+# Maps whose bake genuinely needs more than the fast-gate's default DURATION
+# budget -- not a nav bug, just a big navmesh.  nav_mesh_disable_orphan_slivers
+# recomputes disjoint-component analysis after every off-mesh-link pass, and
+# that cost scales with poly count + component count, not map size per se.
+#   r1m4: 12925 polys, up to 341 pre-cull orphan components -- bake measured
+#   at 11m16s of CPU time (real time stretches further under device
+#   contention: 36m34s observed on a loaded box). CONNECTIVITY confirmed
+#   clean (0/12 spawns, 0/90 items unreachable) once it's given enough time
+#   to finish. Bumping the global default DURATION to cover this would slow
+#   the fast gate down for all 68 other maps just for one outlier, so give
+#   it its own budget instead.
+#   hip3m1: confirmed clean solo (0/57 items unreachable) but doesn't finish
+#   within the 240s general MP budget under batch-parallel load.
+#   hip2m3: confirmed clean solo (0/84 items unreachable, incl. a rocket-jump
+#   grab reach) but likewise blows the 240s budget under batch-parallel load.
+#   e3m5: id1, not mission-pack -- pre-existing note above already flagged
+#   this map's bake as load-dependent (observed <140s cool, >230s thermally
+#   throttled); confirmed clean (0/6 spawns, 0/97 items unreachable) but
+#   needed 600-900s under this session's sustained device load.
+declare -A MAP_DURATION_OVERRIDE=( [r1m4]=1400 [hip3m1]=900 [hip2m3]=900 [e3m5]=900 )
+
 if [[ ! -x "$NQSERVER" ]]; then
 	echo "error: nqserver not found/executable at $NQSERVER" >&2
 	exit 1
@@ -140,7 +165,11 @@ run_map() {
 	# the soak on an empty server (all non-DM maps have reachable exits).
 	local slack=20
 	[[ "$MODE" == "behav" ]] && { extra=(+nav_debug 1 +noexit 1); slack=600; }
-	timeout "$((DURATION + slack))" "$NQSERVER" -dedicated "$BOTS" -port 0 -game "$GAME" \
+	local dur="${MAP_DURATION_OVERRIDE[$m]:-$DURATION}"
+	# -k: nqserver doesn't reliably die on the initial SIGTERM mid-bake (observed
+	# 900s timeout -> 2194s actual wall time on r1m4), so force a SIGKILL if it's
+	# still alive 60s after the term signal instead of trusting it to exit.
+	timeout -k 60 "$((dur + slack))" "$NQSERVER" -dedicated "$BOTS" -port 0 -game "$GAME" \
 		+deathmatch 1 +skill 2 +temp1 "$BOTS" "${extra[@]}" +map "$m" \
 		>"$log" 2>&1 &
 	pid=$!
