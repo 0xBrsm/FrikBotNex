@@ -364,7 +364,10 @@ void() bot_build_movevect =
 	vang_x = vang_z = 0;
 	makevectors(vang);
 
-	spd = sv_maxspeed * 2;
+	if (self.b_speed_cap > 0)
+		spd = self.b_speed_cap;
+	else
+		spd = sv_maxspeed * 2;
 	self.movevect_x = (self.b_wishdir * v_forward) * spd;
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
 	// swimming: send the vertical component as upmove so the bot can
@@ -741,6 +744,31 @@ void() bot_get =
 				flat_to_wp_z = flat_to_wp_z + 24;
 			if (vlen(flat_to_wp) > 0.1)
 				self.b_wishdir = normalize(flat_to_wp);
+
+			// The bake only proved this drop survivable at its modeled
+			// required_speed, not a full sprint -- approaching faster can
+			// overshoot bot_air_guide's correction authority and sail past
+			// the landing shelf into whatever's below it. Throttle the
+			// ground approach to what the mesh actually validated, floored
+			// at the stuck-streak detector's own noise floor (bot_debug_metrics
+			// flags <1u/frame as wedged) rather than a fraction of sv_maxspeed,
+			// which has no inherent relation to the server's tick rate. A bare
+			// 2x margin isn't enough -- ground friction and wall-slide bleed
+			// off some of the commanded speed before it becomes displacement,
+			// so bots parked exactly at a thin floor still dip under 1u/frame
+			// on ordinary noise and keep re-tripping the detector. 4x holds up
+			// under that noise while still well short of sv_maxspeed*0.25.
+			if (self.waterlevel < 2 && (self.flags & FL_ONGROUND))
+			{
+				local vector li_speed;
+				local float cap, noise_floor;
+				li_speed = nav_link_info(0);
+				cap = li_speed_y;
+				noise_floor = 4 / frametime;
+				if (cap < noise_floor)
+					cap = noise_floor;
+				self.b_speed_cap = cap;
+			}
 		}
 	}
 	else if (link_type == AI_JUMP)

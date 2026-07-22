@@ -46,6 +46,7 @@ float CSTATE_RETREAT = 2;
 .vector	b_angle, mouse_emu;
 .vector	movevect;
 .vector	b_wishdir;
+.float	b_speed_cap;	// 0 = uncapped (sv_maxspeed*2 wish); else clamps bot_build_movevect's wish speed
 
 // movement modes (for metrics)
 .float _m_move_mode;

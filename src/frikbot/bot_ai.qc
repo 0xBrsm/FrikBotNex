@@ -413,6 +413,7 @@ void() BotAI =
 	self.button2 = 0;
 	self.button0 = 0;
 	self.b_wishdir = '0 0 0';
+	self.b_speed_cap = 0;
 
 	// --- perceive ---
 	bot_projectile_scan();
