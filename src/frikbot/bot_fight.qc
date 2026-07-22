@@ -25,11 +25,39 @@ this notice in its entirety.
 // corridor and never routes over hazard floors) -- so a fight that drifts
 // near a lava/slime pit can strafe or flee a bot straight into it, with
 // nothing to pull it back out while the enemy keeps it pinned in combat.
+//
+// A single same-height sample only catches hazard flush with the bot's own
+// feet -- it's blind to a ledge/cliff a step ahead that drops into a hazard
+// pool far below (the sample point reads open air, not lava). Step straight
+// down from the ahead point instead (mirrors nav_hazard_between's 32-unit
+// line-stepping in bot_move.qc) so a fall-into-hazard is caught the same
+// way a flush hazard already is; stop early once real ground is found.
+//
+// A flat 32-unit lookahead is only one physics tick of travel at run speed
+// (~320 ups) -- real momentum can't turn on a dime, so by the time a check
+// one tick out finally reads unsafe, ground friction needs several more
+// ticks to bleed off the speed already carried toward the edge, walking
+// the bot over it anyway. Scale the lookahead by the bot's own current
+// speed (a physical invariant, not a per-map constant) so it always covers
+// roughly its own coast-to-stop distance.
 float(vector dir) bot_combat_hazard_ahead =
 {
-	local float c;
-	c = pointcontents(self.origin + normalize(dir) * 32);
-	return (c == CONTENT_LAVA || c == CONTENT_SLIME);
+	local vector p;
+	local float c, step, lookahead;
+
+	lookahead = 32 + vlen(self.velocity) * 0.3;
+	p = self.origin + normalize(dir) * lookahead;
+	step = 0;
+	while (step <= 600)
+	{
+		c = pointcontents(p - '0 0 1' * step);
+		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
+			return TRUE;
+		if (c == CONTENT_SOLID)
+			return FALSE;
+		step = step + 32;
+	}
+	return FALSE;
 };
 
 // -=-=- "Know thy enemy" — Opponent Modeling -=-=-
