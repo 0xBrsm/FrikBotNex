@@ -20,46 +20,6 @@ this notice in its entirety.
 
 .entity avoid;
 
-// Combat strafe/retreat pick a direction purely relative to the enemy,
-// with no ground awareness (unlike bot_get(), which follows the navmesh
-// corridor and never routes over hazard floors) -- so a fight that drifts
-// near a lava/slime pit can strafe or flee a bot straight into it, with
-// nothing to pull it back out while the enemy keeps it pinned in combat.
-//
-// A single same-height sample only catches hazard flush with the bot's own
-// feet -- it's blind to a ledge/cliff a step ahead that drops into a hazard
-// pool far below (the sample point reads open air, not lava). Step straight
-// down from the ahead point instead (mirrors nav_hazard_between's 32-unit
-// line-stepping in bot_move.qc) so a fall-into-hazard is caught the same
-// way a flush hazard already is; stop early once real ground is found.
-//
-// A flat 32-unit lookahead is only one physics tick of travel at run speed
-// (~320 ups) -- real momentum can't turn on a dime, so by the time a check
-// one tick out finally reads unsafe, ground friction needs several more
-// ticks to bleed off the speed already carried toward the edge, walking
-// the bot over it anyway. Scale the lookahead by the bot's own current
-// speed (a physical invariant, not a per-map constant) so it always covers
-// roughly its own coast-to-stop distance.
-float(vector dir) bot_combat_hazard_ahead =
-{
-	local vector p;
-	local float c, step, lookahead;
-
-	lookahead = 32 + vlen(self.velocity) * 0.3;
-	p = self.origin + normalize(dir) * lookahead;
-	step = 0;
-	while (step <= 600)
-	{
-		c = pointcontents(p - '0 0 1' * step);
-		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
-			return TRUE;
-		if (c == CONTENT_SOLID)
-			return FALSE;
-		step = step + 32;
-	}
-	return FALSE;
-};
-
 // -=-=- "Know thy enemy" — Opponent Modeling -=-=-
 
 void() bot_opp_model_reset =
@@ -522,7 +482,7 @@ void() bot_combat_strafe =
 	else if (foedist - 32 > ideal)
 		movedir = movedir + normalize(org - self.origin) * 0.5;
 
-	if (bot_combat_hazard_ahead(movedir) || !frik_walkmove(movedir))
+	if (nav_hazard_ahead(movedir, 0) || !frik_walkmove(movedir))
 	{
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 		self.b_strafe_time = time + 0.1;
@@ -542,7 +502,7 @@ void() bot_retreat =
 
 
 	if (self.b_skill == 0)
-	{ if (random() < 0.3 && !bot_combat_hazard_ahead(away)) frik_walkmove(away); return; }
+	{ if (random() < 0.3 && !nav_hazard_ahead(away, 0)) frik_walkmove(away); return; }
 
 	// team: bias toward nearest buddy
 	if (teamplay)
@@ -552,7 +512,7 @@ void() bot_retreat =
 			away = normalize(away + normalize(mate.origin - self.origin) * 0.3);
 	}
 	if (self.b_skill == 1)
-	{ if (!bot_combat_hazard_ahead(away)) frik_walkmove(away); return; }
+	{ if (!nav_hazard_ahead(away, 0)) frik_walkmove(away); return; }
 
 	// skill 2-3: angular retreat
 	makevectors(self.v_angle);
@@ -567,10 +527,10 @@ void() bot_retreat =
 	}
 
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
-	if (bot_combat_hazard_ahead(movedir) || !frik_walkmove(movedir))
+	if (nav_hazard_ahead(movedir, 0) || !frik_walkmove(movedir))
 	{
 		movedir = normalize(away + right * self.b_strafe_dir * -0.7);
-		if (!bot_combat_hazard_ahead(movedir))
+		if (!nav_hazard_ahead(movedir, 0))
 			frik_walkmove(movedir);
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 	}
@@ -659,13 +619,13 @@ void() bot_fight_style =
 		v2_x = v_y; v2_y = v_x * -1;
 		if (vlen(self.avoid.origin - (self.origin + v1)) < vlen(self.avoid.origin - (self.origin + v2)))
 		{
-			if (!bot_combat_hazard_ahead(v2)) frik_walkmove(v2);
-			else if (!bot_combat_hazard_ahead(v1)) frik_walkmove(v1);
+			if (!nav_hazard_ahead(v2, 0)) frik_walkmove(v2);
+			else if (!nav_hazard_ahead(v1, 0)) frik_walkmove(v1);
 		}
 		else
 		{
-			if (!bot_combat_hazard_ahead(v1)) frik_walkmove(v1);
-			else if (!bot_combat_hazard_ahead(v2)) frik_walkmove(v2);
+			if (!nav_hazard_ahead(v1, 0)) frik_walkmove(v1);
+			else if (!nav_hazard_ahead(v2, 0)) frik_walkmove(v2);
 		}
 		return;
 	}

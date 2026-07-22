@@ -505,6 +505,57 @@ float(vector from, vector to) nav_hazard_between =
 	return FALSE;
 };
 
+// A single same-height sample only catches hazard flush with the bot's own
+// feet -- it's blind to a ledge/cliff a step ahead that drops into a hazard
+// pool far below (the sample point reads open air, not lava). Step straight
+// down from the ahead point instead (mirrors nav_hazard_between's 32-unit
+// line-stepping above) so a fall-into-hazard is caught the same way a flush
+// hazard already is; stop early once real ground is found.
+//
+// A flat 32-unit lookahead is only one physics tick of travel at run speed
+// (~320 ups) -- real momentum can't turn on a dime, so by the time a check
+// one tick out finally reads unsafe, ground friction needs several more
+// ticks to bleed off the speed already carried toward the edge, walking
+// the bot over it anyway. Scale the lookahead by the bot's own current
+// speed (a physical invariant, not a per-map constant) so it always covers
+// roughly its own coast-to-stop distance.
+//
+// Originally combat-only (strafe/retreat pick a direction purely relative
+// to the enemy, with no ground awareness) -- but the navmesh corridor can
+// have its own connectivity gaps (a poly sequence that funnels a straight
+// line over a hazard the bake never meant to link), so bot_get()'s plain
+// corridor steering (link_type 0) uses this too as a backstop the mesh
+// itself is supposed to make unnecessary.
+//
+// cap_dist bounds how far ahead the sample point can land (0 = uncapped,
+// what combat callers want -- there's no waypoint to overshoot past).
+// bot_get() passes the remaining distance to its corridor corner: without
+// that cap, a bot approaching a turn projects straight through the corner
+// into whatever unrelated geometry (including hazard) happens to sit past
+// it -- geometry the bot was never actually going to enter -- and flags a
+// dead corridor that was never really there.
+float(vector dir, float cap_dist) nav_hazard_ahead =
+{
+	local vector p;
+	local float c, step, lookahead;
+
+	lookahead = 32 + vlen(self.velocity) * 0.3;
+	if (cap_dist > 0 && lookahead > cap_dist)
+		lookahead = cap_dist;
+	p = self.origin + normalize(dir) * lookahead;
+	step = 0;
+	while (step <= 600)
+	{
+		c = pointcontents(p - '0 0 1' * step);
+		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
+			return TRUE;
+		if (c == CONTENT_SOLID)
+			return FALSE;
+		step = step + 32;
+	}
+	return FALSE;
+};
+
 // Opportunistic pickup radius/threshold: nav_find_goal only ever commits
 // to ONE item at a time, so a bot beelining across the map for the RL
 // walked straight past a shotgun or a health box sitting a few steps off
@@ -652,6 +703,21 @@ void() bot_get =
 		self._m_move_mode = MM_ROAM;
 	else
 		self._m_move_mode = MM_NAV;
+
+	// Backstop: a plain corridor corner is never supposed to route over
+	// hazard (the bake excludes lava/slime floors entirely), but a mesh
+	// connectivity gap can still funnel a straight line over one the bake
+	// never meant to link. Treat it exactly like a dead corridor -- drop
+	// the goal and let the next frame re-plan -- rather than trusting the
+	// mesh blindly and walking in.
+	if (link_type == 0 && nav_hazard_ahead(self.b_wishdir, vlen(steer)))
+	{
+		if (self.target1 != world && self.target1 != self)
+			bot_mark_failed_goal(self.target1, 10, 1); // corridor
+		self.target1 = world;
+		self.b_wishdir = '0 0 0';
+		return;
+	}
 
 	// off-mesh link actions
 	if (link_type == AI_DROP)
