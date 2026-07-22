@@ -45,6 +45,10 @@ const double NAV_HULL_MIN_AREA   = 0.5;
 const float  NAV_HULL_FLOOR_DROP = 24.0f;    /* hull-1 floor -> feet level */
 const double NAV_HULL_HAZARD_SAMPLE_AREA = 1024.0; /* subdivide until a tri is ~32x32 or smaller */
 const int    NAV_HULL_HAZARD_MAX_DEPTH   = 8;      /* recursion cap for degenerate slivers */
+const double NAV_HULL_HAZARD_CLEARANCE   = 16.0;   /* player radius; matches the hull-1 wall
+                                                       setback from qbsp's pre-expansion (see file
+                                                       header) -- hazard boundaries get no such
+                                                       setback for free, so it's probed for here */
 
 struct V3
 {
@@ -226,7 +230,16 @@ static void emit_tri_verts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, bool is_ha
    the fully-excluded behavior the whole-face version intended), while a
    slime leaf is still emitted, tagged hazard so nav_mesh.cpp can give it
    a steep-but-finite pathfinding cost -- a bot only crosses it when nothing
-   dry reaches the goal, never as a shortcut. */
+   dry reaches the goal, never as a shortcut.
+
+   A leaf's own centroid isn't enough: hull-1 walls get a 16u player-radius
+   setback for free from qbsp's pre-expansion (file header), but this check
+   runs against raw hull 0, with no expansion at all. A leaf whose centroid
+   lands dry can still be flush against a lava edge for its whole footprint,
+   so a bot standing there is standing in lava. Probe a ring at player-radius
+   around the centroid, in the (planar) leaf's own plane, and let any hit
+   -- not just the centroid -- decide the leaf, so the exclusion/cost
+   boundary gets the same real-world clearance walls already have. */
 static void emit_tri_dry_parts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int depth)
 {
 	V3 e1 = vsub(c2, a), e2 = vsub(c3, a);
@@ -249,15 +262,36 @@ static void emit_tri_dry_parts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int de
 		return;
 
 	V3 c = vadd(vscale(vadd(vadd(a, c2), c3), 1.0 / 3.0), unlift);
-	vec3_t p;
-	p[0] = (float)(c.x + b->org[0]);
-	p[1] = (float)(c.y + b->org[1]);
-	p[2] = (float)(c.z + b->org[2]);
-	int contents = SV_PointContents(p);
-	if (contents == CONTENTS_LAVA)
-		return; /* never a valid route -- exclude this leaf, never cost it */
 
-	emit_tri_verts(b, a, c2, c3, unlift, contents == CONTENTS_SLIME);
+	double crlen = sqrt(vdot(cr, cr));
+	V3 nrm = crlen > 1e-9 ? vscale(cr, 1.0 / crlen) : v3(0.0, 0.0, 1.0);
+	double e1len = sqrt(vdot(e1, e1));
+	V3 u = e1len > 1e-9 ? vscale(e1, 1.0 / e1len) : v3(1.0, 0.0, 0.0);
+	V3 v = vcross(nrm, u);
+
+	bool any_slime = false;
+	for (int i = -1; i < 8; i++)
+	{
+		V3 s = c;
+		if (i >= 0)
+		{
+			double ang = i * (M_PI / 4.0);
+			V3 off = vadd(vscale(u, NAV_HULL_HAZARD_CLEARANCE * cos(ang)),
+			              vscale(v, NAV_HULL_HAZARD_CLEARANCE * sin(ang)));
+			s = vadd(c, off);
+		}
+		vec3_t p;
+		p[0] = (float)(s.x + b->org[0]);
+		p[1] = (float)(s.y + b->org[1]);
+		p[2] = (float)(s.z + b->org[2]);
+		int contents = SV_PointContents(p);
+		if (contents == CONTENTS_LAVA)
+			return; /* lava within player-radius -- never a valid route */
+		if (contents == CONTENTS_SLIME)
+			any_slime = true;
+	}
+
+	emit_tri_verts(b, a, c2, c3, unlift, any_slime);
 }
 
 /* Fan-triangulate and append, applying entity origin, the lift-off
