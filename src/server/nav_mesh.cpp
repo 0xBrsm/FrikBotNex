@@ -4658,7 +4658,8 @@ extern "C" int navigate(nav_corridor_t *c,
 	const float *agent_pos,
 	float *corner_pos,
 	unsigned char *corner_flags,
-	unsigned long long *corner_ref)
+	unsigned long long *corner_ref,
+	nav_standable_fn standable)
 {
 	float rc_pos[3];
 	float snapped_pos[3];
@@ -4858,6 +4859,35 @@ extern "C" int navigate(nav_corridor_t *c,
 			dtVcopy(corners, center);
 			flags[0] = 0;
 			refs[0] = next_ref;
+		}
+	}
+
+	/* Same phantom border, descent case: a corner at roughly level height
+	   (too small a delta to trip the climb check above) can still sit past
+	   the true ledge lip over open air -- the widened/dilated poly reads as
+	   flat ground because it's the SAME triangle's height, just stretched
+	   past the real edge.  A real ledge drop has no floor there; probe it
+	   and swap in the next corridor poly's center, same recovery as above. */
+	if (standable != nullptr && !(flags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
+		&& c->corridor.getPathCount() > 1)
+	{
+		float qcorner[3];
+
+		nav_recast_to_quake(corners, qcorner);
+		if (!standable(qcorner))
+		{
+			float center[3];
+			dtPolyRef next_ref = c->corridor.getPath()[1];
+
+			if (nav_poly_center(navmesh, next_ref, center))
+			{
+				float h = 0;
+				if (dtStatusSucceed(navmesh->query->getPolyHeight(next_ref, center, &h)))
+					center[1] = h;
+				dtVcopy(corners, center);
+				flags[0] = 0;
+				refs[0] = next_ref;
+			}
 		}
 	}
 

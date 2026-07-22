@@ -495,17 +495,29 @@ int nav_corridor_set(nav_corridor_t *c,
 	const float *start, const float *target,
 	const unsigned long long *path_refs, int path_count);
 
+/* Runtime standability probe: does a player hull have real floor to rest
+   on at this Quake-space point?  Used by navigate() to catch a funnel
+   corner sitting on a "phantom border" -- hull-1 widening plus raster
+   dilation can extend a poly a few units past the true walkable edge at
+   roughly level height (too small a drop for the climb-fallback below to
+   catch), so the corner reads as ordinary ground when it actually
+   overhangs a real fall. NULL disables the check. Implemented in
+   nav_bot.cpp via SV_Move. */
+typedef int (*nav_standable_fn)(const float *quake_point);
+
 /* Per-frame: find next corner to steer toward.
    Returns 1 if a corner was found, 0 if path is empty.
    corner_pos: Quake coords of the steering target.
    corner_flags: DT_STRAIGHTPATH_* flags (off-mesh, end, etc.)
-   corner_ref: poly ref of the corner. */
+   corner_ref: poly ref of the corner.
+   standable: optional phantom-border probe, see nav_standable_fn above. */
 int navigate(nav_corridor_t *c,
 	const nav_mesh_runtime_t *navmesh,
 	const float *agent_pos,
 	float *corner_pos,
 	unsigned char *corner_flags,
-	unsigned long long *corner_ref);
+	unsigned long long *corner_ref,
+	nav_standable_fn standable);
 
 /* Advance past an off-mesh connection. Returns landing position. */
 int nav_corridor_offmesh(nav_corridor_t *c,

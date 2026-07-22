@@ -211,6 +211,25 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
 	return !trace.allsolid && !trace.startsolid && trace.fraction >= 1.0f;
 }
 
+/* navigate()'s phantom-border probe (nav_standable_fn): sweep the player
+   hull down at a Quake-space point.  Real hull-1 floor catches it; a
+   phantom sliver extending past the true ledge edge lets it fall clean
+   through.  Same technique as the bake-time edge standability check
+   above (nav_link_validate et al.), just single-sample -- a false
+   positive here only costs a harmless poly-center redirect, not a
+   missed link. */
+static int nav_bot_standable(const float *point)
+{
+	vec3_t ds, de, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+	trace_t tr;
+
+	VectorCopy(point, ds);
+	ds[2] += 26.0f;
+	VectorCopy(point, de);
+	tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+	return tr.startsolid || tr.allsolid || tr.fraction < 1.0f;
+}
+
 /* Decide how a player could traverse from 'from' to 'to' (Quake FOOT points,
    navmesh poly centroids), for nav_mesh_compute_orphan_jumps.  Returns the link
    type, or 0 if none:
@@ -4264,7 +4283,7 @@ static void PF_nav_path_steer(void)
 		nav_bot_can_rj(PROG_TO_EDICT(pr_global_struct->self)));
 
 	if (!navigate(nav_bot_corridors[slot], nav_mesh, pos,
-		corner, &flags, &ref))
+		corner, &flags, &ref, nav_bot_standable))
 		return;
 
 	G_FLOAT(OFS_RETURN + 0) = corner[0];
