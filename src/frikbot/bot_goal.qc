@@ -49,11 +49,11 @@ this notice in its entirety.
 
 Map Stuff — item registry
 
-Classifies every item ONCE at map load.
-Caches objective facts on each entity:
+Classifies every item at map load, then re-scans every
+10s (see BotAI in bot_ai.qc) to catch backpacks that
+spawn mid-match. Caches objective facts on each entity:
 what resource, which pool, how much it gives.
 All string comparisons happen here, nowhere else.
-Rebuilt every 10s to catch backpacks.
 
 -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 */
@@ -86,6 +86,7 @@ float CAP_ROCKETS	= 100;
 float CAP_CELLS		= 100;
 
 // ---- pickup amounts (engine constants) ----
+float GIVE_HEALTH_ROTTEN = 15;
 float GIVE_HEALTH_NORMAL = 25;
 float GIVE_HEALTH_MEGA	= 100;
 float GIVE_WEP_SHELLS	= 5;
@@ -143,6 +144,8 @@ void(entity it) map_classify =
 		it.item_res = RES_HEALTH; it.item_pool = POOL_HEALTH;
 		if (it.spawnflags & 2)
 		{ it.item_mag = GIVE_HEALTH_MEGA / CAP_HEALTH; it.item_respawn_dur = RESPAWN_MEGA; }
+		else if (it.spawnflags & 1)
+		{ it.item_mag = GIVE_HEALTH_ROTTEN / CAP_HEALTH; it.item_respawn_dur = RESPAWN_ITEM; }
 		else
 		{ it.item_mag = GIVE_HEALTH_NORMAL / CAP_HEALTH; it.item_respawn_dur = RESPAWN_ITEM; }
 		return;
@@ -294,7 +297,7 @@ float(entity it) bot_want =
 {
 	local float has, need, w;
 	local float hp, ap, survival;
-	local float best_tier, best_ammo, combat;
+	local float best_tier, combat;
 
 	// bot state: two axes
 	hp = self.health / CAP_HEALTH;
@@ -303,21 +306,52 @@ float(entity it) bot_want =
 	if (ap > 1) ap = 1;
 	survival = hp * (0.5 + ap * 0.5);
 
+	// best_tier: highest-tier weapon owned (armament quality, ammo aside).
+	// combat: best tier×ammo product across ALL owned weapons, not just
+	// the top-tier one — a bot holding an empty RL and a full-ammo SNG is
+	// combat-ready via the SNG, not helpless. An else-if chain here only
+	// ever looked at the single highest-tier gun's ammo, so an empty top
+	// weapon zeroed combat outright and made every ammo/weapon want spike
+	// as if the bot had nothing, even carrying a fully-loaded backup.
+	local float t;
 	best_tier = 0;
-	best_ammo = 0;
+	combat = 0;
 	if (self.items & IT_ROCKET_LAUNCHER)
-	{	best_tier = 1.0; best_ammo = self.ammo_rockets / CAP_ROCKETS; }
-	else if (self.items & IT_LIGHTNING)
-	{	best_tier = 1.0; best_ammo = self.ammo_cells / CAP_CELLS; }
-	else if (self.items & IT_GRENADE_LAUNCHER)
-	{	best_tier = 0.5; best_ammo = self.ammo_rockets / CAP_ROCKETS; }
-	else if (self.items & IT_SUPER_NAILGUN)
-	{	best_tier = 0.5; best_ammo = self.ammo_nails / CAP_NAILS; }
-	else if (self.items & IT_NAILGUN)
-	{	best_tier = 0.15; best_ammo = self.ammo_nails / CAP_NAILS; }
-	else if (self.items & IT_SUPER_SHOTGUN)
-	{	best_tier = 0.15; best_ammo = self.ammo_shells / CAP_SHELLS; }
-	combat = best_tier * best_ammo;
+	{
+		if (1.0 > best_tier) best_tier = 1.0;
+		t = 1.0 * (self.ammo_rockets / CAP_ROCKETS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_LIGHTNING)
+	{
+		if (1.0 > best_tier) best_tier = 1.0;
+		t = 1.0 * (self.ammo_cells / CAP_CELLS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_GRENADE_LAUNCHER)
+	{
+		if (0.5 > best_tier) best_tier = 0.5;
+		t = 0.5 * (self.ammo_rockets / CAP_ROCKETS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_SUPER_NAILGUN)
+	{
+		if (0.5 > best_tier) best_tier = 0.5;
+		t = 0.5 * (self.ammo_nails / CAP_NAILS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_NAILGUN)
+	{
+		if (0.15 > best_tier) best_tier = 0.15;
+		t = 0.15 * (self.ammo_nails / CAP_NAILS);
+		if (t > combat) combat = t;
+	}
+	if (self.items & IT_SUPER_SHOTGUN)
+	{
+		if (0.15 > best_tier) best_tier = 0.15;
+		t = 0.15 * (self.ammo_shells / CAP_SHELLS);
+		if (t > combat) combat = t;
+	}
 
 	// how much of this resource does the bot already have?
 	has = bot_has(it);

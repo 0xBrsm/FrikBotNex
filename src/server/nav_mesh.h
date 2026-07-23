@@ -39,6 +39,12 @@ void nav_set_error(char *error, size_t error_size, const char *format, ...)
 #define NAV_AREA_DOOR      4   /* door (cost 2.0 — brief wait) */
 #define NAV_AREA_RJ        5   /* rocket jump (cost 10.0 — expensive, risky) */
 #define NAV_AREA_NEAR_WALL 6   /* within walkable_radius of wall (cost 3.0) */
+#define NAV_AREA_HAZARD    7   /* slime ground only -- survivable but costly
+                                   (cost 40, avoided unless it's the only route
+                                   to a goal). Lava is never tagged this: it's an
+                                   effectively-instant kill and is fully excluded
+                                   from the mesh at build time instead (nav_hull.cpp),
+                                   never just discouraged. */
 
 /* Poly flags (dtPoly.flags) for per-bot filtering.  WALK is on every
    traversable poly; RJ additionally marks rocket-jump off-mesh links so a
@@ -74,14 +80,39 @@ typedef struct
 	float	required_speed;		/* min velocity to clear (jumps) */
 	float	height_delta;		/* vertical change start→end */
 	float	wait_time;		/* seconds to wait (platforms, doors) */
+	int	serve_ent;		/* edict serving the link (plat/train), 0 = none */
 } nav_off_mesh_link_t;
 
 /* C++ only: close extern "C", include Detour, define struct */
 #ifdef __cplusplus
 } /* close extern "C" for Detour includes */
+#include <vector>
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 class dtQueryFilter;
+
+/* Lazily-built per-mesh caches shared by the conn link passes (directed/
+   gap/RJ/swim/deep-drop): ground union-find components under both
+   disabled-poly policies, Quake-coord poly centroids, and forward
+   reach-sets memoized per walk component.  The mesh is immutable between
+   Detour realizes, so each is computed at most once per realize no matter
+   how many passes ask for it. */
+struct nav_conn_snapshot
+{
+	std::vector<float> centroids;   /* ground*3, Quake coords */
+	std::vector<int> comp_all;      /* UF root per ground poly; disabled polys bridge */
+	std::vector<int> comp_enabled;  /* UF root per ground poly; disabled polys don't */
+	std::vector<std::vector<char>> reach; /* per comp_all root: forward reach set */
+	std::vector<char> reach_built;
+	bool have_centroids;
+	bool have_all;
+	bool have_enabled;
+
+	nav_conn_snapshot()
+		: have_centroids(false), have_all(false), have_enabled(false)
+	{
+	}
+};
 
 struct nav_mesh_runtime_s
 {
@@ -91,6 +122,7 @@ struct nav_mesh_runtime_s
 	float query_half_extents_actor_origin[3]; /* tight: actor origin -> surface snap */
 	nav_off_mesh_link_t *links;
 	int link_count;
+	nav_conn_snapshot snap;
 
 	nav_mesh_runtime_s()
 		: navmesh(nullptr), query(nullptr), links(nullptr), link_count(0)
@@ -163,6 +195,10 @@ typedef struct
 	int	detail_mesh_count;
 	int	detail_vertex_count;
 	int	detail_triangle_count;
+	/* Compensator telemetry: how often the repair/cull passes fired.
+	   Nonzero means an upstream imprecision is being masked (BAKESUM). */
+	int	regions_repaired;
+	int	sliver_polys_disabled;
 } nav_mesh_summary_t;
 
 typedef struct
@@ -210,6 +246,13 @@ const nav_off_mesh_link_t *nav_mesh_get_link(
 int nav_mesh_get_link_type(
 	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref);
 
+/* Look up the build-time link index (== dtOffMeshConnection::userId) for an
+   off-mesh connection polygon.  This is the index nav_mesh_get_link() and a
+   per-link runtime side-table (e.g. temporary failure cooldowns) key on.
+   Returns -1 if not an off-mesh connection. */
+int nav_mesh_get_link_index(
+	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref);
+
 /* Heightfield probe: check if a point (Quake coords) is blocked by solid
    geometry. Returns 1 if there is a solid span (wall) between floor_z and
    floor_z + walkable_height at this XY. Returns 0 if clear/open. */
@@ -244,20 +287,62 @@ typedef int (*nav_mesh_link_callback_t)(
 	nav_off_mesh_link_t **out_links,
 	void *user_data);
 
-nav_mesh_runtime_t *nav_mesh_build(
+/* The bake is split so the conn fixpoint loop can rebuild cheaply:
+   off-mesh links never touch Recast geometry (the link callback reads only
+   contour edges + heightfield), so the Recast pipeline -- heightfield,
+   regions, contours, callback link detection, poly/detail meshes -- runs
+   once per map (nav_mesh_bake_begin) and each link-set change only re-emits
+   the Detour tile (nav_mesh_bake_realize).  Provably identical output to
+   rebuilding from scratch, at a fraction of the cost. */
+typedef struct nav_mesh_bake_s nav_mesh_bake_t;
+
+nav_mesh_bake_t *nav_mesh_bake_begin(
 	const float *verts, int vertex_count,
 	const int *tris, int triangle_count,
+	const unsigned char *tri_hazard, /* one byte per triangle, may be NULL */
 	const nav_mesh_build_config_t *config,
-	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
-	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback, void *callback_data,
 	char *error, size_t error_size);
+
+/* Build a Detour navmesh from the baked Recast products plus the given
+   off-mesh links (callback-detected links are appended automatically).
+   May be called repeatedly with different link sets. */
+nav_mesh_runtime_t *nav_mesh_bake_realize(
+	const nav_mesh_bake_t *bake,
+	const nav_off_mesh_link_t *off_mesh_links, int off_mesh_link_count,
+	nav_mesh_summary_t *summary,
+	char *error, size_t error_size);
+
+void nav_mesh_bake_end(nav_mesh_bake_t *bake);
 
 /* Physics check for an orphan-connecting jump: can a player jump from foot
    point 'from' (lower, main mesh) up to 'to' (higher, stranded area)?
    Returns nonzero if makeable (height/reach in range, standable ends, clear
    arc).  Implemented in nav_bot.cpp via SV_Move. */
 typedef int (*nav_jump_validate_fn)(const float *from, const float *to, void *user);
+
+/* Rocket-jump-only worth-it check: does the high ledge -- or anywhere else
+   a bot can already walk to from it for free -- hold something (an item)
+   that justifies spending the risk to reach it?  'pts' is every ground-poly
+   centroid reachable from the landing by walking the CURRENT mesh graph
+   forward, including already-baked ordinary jump/drop/door links (so a
+   landing that leads into a room via one more hop still counts), but NOT
+   through teleporters or plat/train rides (those can bridge to a totally
+   unrelated part of the map, which would make nearly any landing "reach"
+   nearly any item and defeat the gate).  'already_pts'/'already_count' is
+   every ground-poly centroid in the LAUNCH point's own ordinary-walking
+   component (no jump/drop/door assistance at all) -- an item credited via
+   'pts' that's ALSO reachable from one of these doesn't justify the RJ,
+   since a bot gets it for free by walking the way it already does (e1m2: a
+   landing atop a hallway door credited the green armor sitting right past
+   that same door, reachable on foot with no jump). NULL means "always
+   worth it" (used by the cheap jump/gap/directed passes, which never gate
+   on value). Implemented in nav_bot.cpp via sv.edicts; also cross-checks
+   candidate items below the landing against the deep-drop pass's own
+   physics validator, so a coincidentally-nearby item on the far side of a
+   wall doesn't count. Returns nonzero if the ledge is worth linking to. */
+typedef int (*nav_jump_value_fn)(const float *pts, int count,
+	const float *already_pts, int already_count, void *user);
 
 /* Post-build pass: find ground components stranded from the main mesh and, for
    each, emit ONE hull-validated jump-up link reconnecting it (a ledge into an
@@ -272,11 +357,14 @@ int nav_mesh_compute_orphan_jumps(
 /* Post-build pass: complete DIRECTED connectivity -- add the missing
    direction for areas reachable only one way (drop-in rooms with a teleport
    exit, etc.).  Adds only the absent direction, never bidirectional, so it
-   can't strand a bot.  Fills *out_links (malloc'd, caller frees); returns
-   the count. */
+   can't strand a bot.  'validate' models level/up moves (walk/jump);
+   'drop_validate' proves a downward candidate is a physically clean fall
+   (walk-off line, hull fall column, no lava) -- without it no drop links
+   are emitted.  Fills *out_links (malloc'd, caller frees); returns the
+   count. */
 int nav_mesh_compute_directed_links(
 	nav_mesh_runtime_t *navmesh,
-	nav_jump_validate_fn validate, void *user,
+	nav_jump_validate_fn validate, nav_jump_validate_fn drop_validate, void *user,
 	nav_off_mesh_link_t **out_links);
 
 /* Post-build pass: bridge local connectivity gaps -- two walkable patches
@@ -292,11 +380,17 @@ int nav_mesh_compute_gap_jumps(
 /* Post-build pass: add one-way rocket-jump-up links to high ledges that
    are out of run-jump reach -- but ONLY where the high end can already get
    back down some other way, so a launcher-less bot is never trapped (it
-   abandons the goal instead).  Fills *out_links (malloc'd, caller frees);
-   returns the count. */
+   abandons the goal instead), AND only where has_value confirms there's
+   actually a goal to abandon (NULL skips this check).  Without it, every
+   candidate that merely fails the up-access reachability probe gets a
+   link regardless of whether the ledge holds anything -- and reachability
+   probes fail constantly on ordinary scenery nubs (monster perches, window
+   ledges) that were never meant to be player-reachable at all.  Fills
+   *out_links (malloc'd, caller frees); returns the count. */
 int nav_mesh_compute_rocket_jumps(
 	nav_mesh_runtime_t *navmesh,
 	nav_jump_validate_fn validate, void *user,
+	nav_jump_value_fn has_value, void *value_user,
 	nav_off_mesh_link_t **out_links);
 
 /* Register level-exit points (trigger_changelevel centers) before the
@@ -401,17 +495,29 @@ int nav_corridor_set(nav_corridor_t *c,
 	const float *start, const float *target,
 	const unsigned long long *path_refs, int path_count);
 
+/* Runtime standability probe: does a player hull have real floor to rest
+   on at this Quake-space point?  Used by navigate() to catch a funnel
+   corner sitting on a "phantom border" -- hull-1 widening plus raster
+   dilation can extend a poly a few units past the true walkable edge at
+   roughly level height (too small a drop for the climb-fallback below to
+   catch), so the corner reads as ordinary ground when it actually
+   overhangs a real fall. NULL disables the check. Implemented in
+   nav_bot.cpp via SV_Move. */
+typedef int (*nav_standable_fn)(const float *quake_point);
+
 /* Per-frame: find next corner to steer toward.
    Returns 1 if a corner was found, 0 if path is empty.
    corner_pos: Quake coords of the steering target.
    corner_flags: DT_STRAIGHTPATH_* flags (off-mesh, end, etc.)
-   corner_ref: poly ref of the corner. */
+   corner_ref: poly ref of the corner.
+   standable: optional phantom-border probe, see nav_standable_fn above. */
 int navigate(nav_corridor_t *c,
 	const nav_mesh_runtime_t *navmesh,
 	const float *agent_pos,
 	float *corner_pos,
 	unsigned char *corner_flags,
-	unsigned long long *corner_ref);
+	unsigned long long *corner_ref,
+	nav_standable_fn standable);
 
 /* Advance past an off-mesh connection. Returns landing position. */
 int nav_corridor_offmesh(nav_corridor_t *c,
@@ -421,6 +527,12 @@ int nav_corridor_offmesh(nav_corridor_t *c,
 
 /* Get corridor length (number of polys remaining). */
 int nav_corridor_length(const nav_corridor_t *c);
+
+/* Poly ref of the off-mesh link the corridor is currently mid-traversal on
+   (see nav_corridor_s::pending_link_ref), or 0 if none.  Lets callers tag
+   "the link I'm on right now" -- e.g. to cool it down after a bot gives up
+   repeatedly failing to execute it. */
+unsigned long long nav_corridor_pending_link(const nav_corridor_t *c);
 
 /* Waypoint-vs-navmesh validation (nav_val.cpp) */
 void Nav_Validate(const nav_mesh_runtime_t *mesh, const char *mapname);

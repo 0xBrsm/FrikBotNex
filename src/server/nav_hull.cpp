@@ -43,6 +43,12 @@ const double NAV_HULL_BOX_PAD    = 64.0;     /* carve box beyond model bounds */
 const double NAV_HULL_FACE_LIFT  = 0.5;      /* lift off plane for neighbor test */
 const double NAV_HULL_MIN_AREA   = 0.5;
 const float  NAV_HULL_FLOOR_DROP = 24.0f;    /* hull-1 floor -> feet level */
+const double NAV_HULL_HAZARD_SAMPLE_AREA = 1024.0; /* subdivide until a tri is ~32x32 or smaller */
+const int    NAV_HULL_HAZARD_MAX_DEPTH   = 8;      /* recursion cap for degenerate slivers */
+const double NAV_HULL_HAZARD_CLEARANCE   = 16.0;   /* player radius; matches the hull-1 wall
+                                                       setback from qbsp's pre-expansion (see file
+                                                       header) -- hazard boundaries get no such
+                                                       setback for free, so it's probed for here */
 
 struct V3
 {
@@ -172,18 +178,140 @@ struct Builder
 	double org[3];
 	std::vector<float> verts;
 	std::vector<int> tris;
+	std::vector<unsigned char> hazard; /* one entry per triangle in tris (slime only) */
 	int emitted;
 };
 
 static Builder nav_builder;
 static bool nav_builder_active = false;
 
+/* Append one triangle, applying the lift-off correction, entity origin,
+   and the 24u origin->feet drop -- same per-vertex transform emit_winding
+   uses for a whole face, just for 3 verts instead of a fan. is_hazard
+   tags the triangle for nav_mesh.cpp to route into a high-cost (not
+   excluded) Detour area -- only ever set for slime, never lava; see
+   emit_tri_dry_parts below for why the two are treated differently. */
+static void emit_tri_verts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, bool is_hazard)
+{
+	V3 tri[3] = {a, c2, c3};
+	int base = (int)(b->verts.size() / 3);
+	for (int i = 0; i < 3; i++)
+	{
+		V3 p = vadd(tri[i], unlift);
+		b->verts.push_back((float)(p.x + b->org[0]));
+		b->verts.push_back((float)(p.y + b->org[1]));
+		b->verts.push_back((float)(p.z + b->org[2]) - NAV_HULL_FLOOR_DROP);
+	}
+	b->tris.push_back(base);
+	b->tris.push_back(base + 1);
+	b->tris.push_back(base + 2);
+	b->hazard.push_back(is_hazard ? 1 : 0);
+	b->emitted++;
+}
+
+/* Adaptive point sample for the liquid-hazard check: a floor face coming
+   out of the clipnode tree is only split where hull 1 sees a solid/empty
+   boundary, and lava/slime never creates one (see carve_leaf), so a floor
+   that's part dry and part lava/slime can arrive here as one large,
+   unsplit winding (dm4: a dry walkway sharing a face with an adjoining
+   slime pool). A single centroid-only hazard check on the WHOLE face
+   (the original approach) drops the entire winding the moment any part
+   of it touches hazard -- on e1m1/e2m7/e4m5 that nuked large dry floor
+   spans (and anything resting on them) sharing one big BSP face with a
+   small slime corner. Exclude at LEAF granularity instead: recursively
+   quarter until each leaf is small enough that no sample point can hide
+   a hazard patch, checking hull 0 at each leaf's centroid.
+
+   Lava and slime are NOT survival-equivalent (client.qc: lava deals
+   10*waterlevel every 0.2s, ~150dps fully submerged -- effectively an
+   instant, unrecoverable kill; slime deals 4*waterlevel every 1s, ~12dps
+   -- a real but survivable cost). So they're handled differently: a lava
+   leaf is dropped from the mesh outright (never a valid route, matching
+   the fully-excluded behavior the whole-face version intended), while a
+   slime leaf is still emitted, tagged hazard so nav_mesh.cpp can give it
+   a steep-but-finite pathfinding cost -- a bot only crosses it when nothing
+   dry reaches the goal, never as a shortcut.
+
+   A leaf's own centroid isn't enough: hull-1 walls get a 16u player-radius
+   setback for free from qbsp's pre-expansion (file header), but this check
+   runs against raw hull 0, with no expansion at all. A leaf whose centroid
+   lands dry can still be flush against a lava edge for its whole footprint,
+   so a bot standing there is standing in lava. Probe a ring at player-radius
+   around the centroid, in the (planar) leaf's own plane, and let any hit
+   -- not just the centroid -- decide the leaf, so the exclusion/cost
+   boundary gets the same real-world clearance walls already have. */
+static void emit_tri_dry_parts(Builder *b, V3 a, V3 c2, V3 c3, V3 unlift, int depth)
+{
+	V3 e1 = vsub(c2, a), e2 = vsub(c3, a);
+	V3 cr = vcross(e1, e2);
+	double area = 0.5 * sqrt(vdot(cr, cr));
+
+	if (area > NAV_HULL_HAZARD_SAMPLE_AREA && depth < NAV_HULL_HAZARD_MAX_DEPTH)
+	{
+		V3 m12 = vscale(vadd(a, c2), 0.5);
+		V3 m23 = vscale(vadd(c2, c3), 0.5);
+		V3 m31 = vscale(vadd(c3, a), 0.5);
+		emit_tri_dry_parts(b, a, m12, m31, unlift, depth + 1);
+		emit_tri_dry_parts(b, m12, c2, m23, unlift, depth + 1);
+		emit_tri_dry_parts(b, m31, m23, c3, unlift, depth + 1);
+		emit_tri_dry_parts(b, m12, m23, m31, unlift, depth + 1);
+		return;
+	}
+
+	if (area < NAV_HULL_MIN_AREA)
+		return;
+
+	V3 c = vadd(vscale(vadd(vadd(a, c2), c3), 1.0 / 3.0), unlift);
+
+	double crlen = sqrt(vdot(cr, cr));
+	V3 nrm = crlen > 1e-9 ? vscale(cr, 1.0 / crlen) : v3(0.0, 0.0, 1.0);
+	double e1len = sqrt(vdot(e1, e1));
+	V3 u = e1len > 1e-9 ? vscale(e1, 1.0 / e1len) : v3(1.0, 0.0, 0.0);
+	V3 v = vcross(nrm, u);
+
+	bool any_slime = false;
+	for (int i = -1; i < 8; i++)
+	{
+		V3 s = c;
+		if (i >= 0)
+		{
+			double ang = i * (M_PI / 4.0);
+			V3 off = vadd(vscale(u, NAV_HULL_HAZARD_CLEARANCE * cos(ang)),
+			              vscale(v, NAV_HULL_HAZARD_CLEARANCE * sin(ang)));
+			s = vadd(c, off);
+		}
+		vec3_t p;
+		p[0] = (float)(s.x + b->org[0]);
+		p[1] = (float)(s.y + b->org[1]);
+		p[2] = (float)(s.z + b->org[2]);
+		int contents = SV_PointContents(p);
+		if (contents == CONTENTS_LAVA)
+			return; /* lava within player-radius -- never a valid route */
+		if (contents == CONTENTS_SLIME)
+			any_slime = true;
+	}
+
+	emit_tri_verts(b, a, c2, c3, unlift, any_slime);
+}
+
 /* Fan-triangulate and append, applying entity origin, the lift-off
-   correction, and the 24u origin->feet drop. */
-static void emit_winding(Builder *b, const Winding &w, V3 unlift)
+   correction, and the 24u origin->feet drop. is_floor routes each fan
+   triangle through the liquid-hazard split above instead of a single
+   whole-face emission: only faces whose normal points mostly down (i.e.
+   floors, which have solid below and open space above) are candidates,
+   so walls/ceilings skip the (expensive, and meaningless for a vertical
+   or upward-facing face) contents check. */
+static void emit_winding(Builder *b, const Winding &w, V3 unlift, bool is_floor)
 {
 	if (w.size() < 3 || winding_area(w) < NAV_HULL_MIN_AREA)
 		return;
+
+	if (is_floor)
+	{
+		for (size_t i = 1; i + 1 < w.size(); i++)
+			emit_tri_dry_parts(b, w[0], w[i], w[i + 1], unlift, 0);
+		return;
+	}
 
 	int base = (int)(b->verts.size() / 3);
 	for (size_t i = 0; i < w.size(); i++)
@@ -198,13 +326,14 @@ static void emit_winding(Builder *b, const Winding &w, V3 unlift)
 		b->tris.push_back(base);
 		b->tris.push_back(base + (int)i);
 		b->tris.push_back(base + (int)i + 1);
+		b->hazard.push_back(0);
 		b->emitted++;
 	}
 }
 
 /* Push a (lifted) face winding through the clipnode tree and emit only
    the pieces that land in solid leaves — the true hull boundary. */
-static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unlift)
+static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unlift, bool is_floor)
 {
 	Winding cur = w;
 	while (cur.size() >= 3)
@@ -212,7 +341,7 @@ static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unli
 		if (node_num < 0)
 		{
 			if (node_num == CONTENTS_SOLID || node_num == CONTENTS_SKY)
-				emit_winding(b, cur, unlift);
+				emit_winding(b, cur, unlift, is_floor);
 			return;
 		}
 
@@ -226,7 +355,7 @@ static void emit_solid_parts(Builder *b, int node_num, const Winding &w, V3 unli
 		Winding back = clip_winding(cur, n, d);
 
 		if (front.size() >= 3)
-			emit_solid_parts(b, node->children[0], front, unlift);
+			emit_solid_parts(b, node->children[0], front, unlift, is_floor);
 		node_num = node->children[1];
 		cur.swap(back);
 	}
@@ -236,8 +365,13 @@ static void carve_leaf(Builder *b, int contents, const Polytope &poly)
 {
 	if (contents == CONTENTS_SOLID || contents == CONTENTS_SKY)
 		return;
-	/* Lava/slime polytopes: skipping them leaves pit floors out of the
-	   mesh entirely, matching the old render-face extraction. */
+	/* This never actually fires: qbsp collapses water/slime/lava into
+	   plain CONTENTS_EMPTY in the clip hulls (hull 1/2), so hull 1's
+	   clipnode tree can't tell a dry floor from a lava-pit floor.  The
+	   real hazard filter is the SV_PointContents probe in emit_winding,
+	   which asks hull 0 (the only tree that keeps the distinction).
+	   Kept as a cheap no-op guard in case some qbsp variant ever does
+	   preserve liquid leaves in the clip hulls. */
 	if (contents == CONTENTS_LAVA || contents == CONTENTS_SLIME)
 		return;
 
@@ -251,13 +385,18 @@ static void carve_leaf(Builder *b, int contents, const Polytope &poly)
 
 		/* Lift slightly toward the neighbor so tree classification is
 		   unambiguous; emit_winding shifts back. */
-		V3 lift = vscale(f.n, NAV_HULL_FACE_LIFT / sqrt(vdot(f.n, f.n)));
+		double f_n_len = sqrt(vdot(f.n, f.n));
+		V3 lift = vscale(f.n, NAV_HULL_FACE_LIFT / f_n_len);
 		Winding lifted;
 		lifted.reserve(f.w.size());
 		for (size_t k = 0; k < f.w.size(); k++)
 			lifted.push_back(vadd(f.w[k], lift));
 
-		emit_solid_parts(b, b->hull->firstclipnode, lifted, vscale(lift, -1.0));
+		/* Face normal points out of the empty polytope, into the solid
+		   (module doc above) -- a floor has solid BELOW it, so its
+		   normal points down, not up. */
+		bool is_floor = (f.n.z / f_n_len) < -0.7;
+		emit_solid_parts(b, b->hull->firstclipnode, lifted, vscale(lift, -1.0), is_floor);
 	}
 }
 
@@ -375,6 +514,7 @@ extern "C" void nav_hull_begin(void)
 {
 	nav_builder.verts.clear();
 	nav_builder.tris.clear();
+	nav_builder.hazard.clear();
 	nav_builder.emitted = 0;
 	nav_builder_active = true;
 }
@@ -400,10 +540,12 @@ extern "C" int nav_hull_add_model(struct model_s *mod, const float *origin)
 }
 
 extern "C" int nav_hull_end(float **out_verts, int *out_vert_count,
-	int **out_tris, int *out_tri_count)
+	int **out_tris, int *out_tri_count,
+	unsigned char **out_hazard)
 {
 	*out_verts = NULL; *out_vert_count = 0;
 	*out_tris = NULL;  *out_tri_count = 0;
+	*out_hazard = NULL;
 
 	if (!nav_builder_active)
 		return 0;
@@ -411,24 +553,30 @@ extern "C" int nav_hull_end(float **out_verts, int *out_vert_count,
 
 	size_t vn = nav_builder.verts.size();
 	size_t tn = nav_builder.tris.size();
+	size_t hn = nav_builder.hazard.size();
 	if (vn == 0 || tn == 0)
 		return 0;
 
 	float *verts = (float *)malloc(vn * sizeof(float));
 	int *tris = (int *)malloc(tn * sizeof(int));
-	if (!verts || !tris)
+	unsigned char *hazard = (unsigned char *)malloc(hn * sizeof(unsigned char));
+	if (!verts || !tris || !hazard)
 	{
 		free(verts);
 		free(tris);
+		free(hazard);
 		return 0;
 	}
 	memcpy(verts, nav_builder.verts.data(), vn * sizeof(float));
 	memcpy(tris, nav_builder.tris.data(), tn * sizeof(int));
+	memcpy(hazard, nav_builder.hazard.data(), hn * sizeof(unsigned char));
 
 	*out_verts = verts;  *out_vert_count = (int)(vn / 3);
 	*out_tris = tris;    *out_tri_count = (int)(tn / 3);
+	*out_hazard = hazard;
 
 	nav_builder.verts.clear();
 	nav_builder.tris.clear();
+	nav_builder.hazard.clear();
 	return 1;
 }

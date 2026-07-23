@@ -277,7 +277,7 @@ void() bot_debug_metrics =
 	}
 
 	local float on_lava;
-	on_lava = (self.sense_ground_type < -3);
+	on_lava = (self.sense_ground_type == CONTENT_LAVA);
 	if (on_lava)
 		self._m_lava = self._m_lava + 1;
 
@@ -289,6 +289,22 @@ void() bot_debug_metrics =
 		else if (self._m_move_mode == MM_COMBAT) self._m_le_combat = self._m_le_combat + 1;
 		else self._m_le_roam = self._m_le_roam + 1;
 
+		// Forensic dump on lava entry, reusing the stuck-streak dump
+		// builtin: move_mode in the "streak" slot distinguishes this from
+		// a real stuck event (which only ever fires at streak==30).
+		if (cvar("nav_debug"))
+		{
+			local string tgt_name;
+			local float tgt_dist;
+			if (self.target1 == self) { tgt_name = "ROAM"; tgt_dist = 0; }
+			else if (self.target1)
+			{
+				tgt_name = self.target1.classname;
+				tgt_dist = rint(vlen(self.target1.origin - self.origin));
+			}
+			else { tgt_name = "NONE"; tgt_dist = 0; }
+			nav_debug_event(self._m_move_mode, tgt_name, tgt_dist);
+		}
 	}
 	self._m_was_lava = on_lava;
 
@@ -397,6 +413,7 @@ void() BotAI =
 	self.button2 = 0;
 	self.button0 = 0;
 	self.b_wishdir = '0 0 0';
+	self.b_speed_cap = 0;
 
 	// --- perceive ---
 	bot_projectile_scan();
@@ -456,7 +473,7 @@ void() BotAI =
 		// get a goal if we don't have one
 		if (!self.target1)
 		{
-			if (!item_head)
+			if (!item_head || time > item_reg_time + 10)
 				map_stuff();
 			self.target1 = nav_find_goal();
 			if (self.target1)

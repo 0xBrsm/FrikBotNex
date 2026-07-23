@@ -20,6 +20,7 @@ extern "C" {
 #include "nav_bot.h"
 #include "nav_hull.h"
 #include "nav_mesh.h"
+#include "nav_physics.h"
 #include "DetourNavMesh.h"
 #include "DetourNavMeshQuery.h"
 #include "DetourPathCorridor.h"
@@ -28,6 +29,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <vector>
+#include <algorithm>
 
 #include <math.h>
 
@@ -69,51 +71,27 @@ extern ddef_t *ED_FindGlobal(char *name);
 #define NAV_DETAIL_SAMPLE_MAX_ERROR   1.0f
 
 
-/* Jump/drop link detection */
-#define NAV_JUMP_IMPULSE            270.0f  /* Quake jump velocity (SV_ClientThink) */
-#define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
-#define NAV_JUMP_HEIGHT_MAX         48.0f  /* max jump-up height in Quake */
-/* Drops have no walkableClimb floor: a contour boundary edge means the
+/* Jump/drop link detection (kinematics + the shared jump/RJ/drop envelopes
+   and caps live in nav_physics.h).
+   Drops have no walkableClimb floor: a contour boundary edge means the
    surfaces did NOT connect, so even a small clear fall needs a link (dm4
-   GL pocket: 8u drop over an unwalkable hull-bevel ridge).  Keep above
-   contour simplification error so an edge can't "drop" onto itself. */
-#define NAV_DROP_HEIGHT_MIN          6.0f
-/* Quake players survive long falls (damage only past ~265u, death past
-   ~800u), and whole lower regions are reached by dropping in.  Capping at
-   128u orphaned them from the mesh.  Reach deep enough to link those drops;
-   the fall-column hull-truth + lane checks still gate each candidate. */
-#define NAV_DROP_HEIGHT_MAX        192.0f  /* max drop-down height (dry land) */
-/* Water negates fall damage, so a deep plunge into a pool is survivable and
-   common (dm3's -370 pool holds items).  Allow a much deeper drop ONLY when
-   the landing is underwater, and always pair it with an AI_SURFACE swim-out
-   so the bot can climb back to the ledge -- a deep drop-in with no exit is
-   the pit-trap that a blanket cap raise caused before. */
-#define NAV_WATER_DROP_HEIGHT_MAX  400.0f  /* max drop-down into water */
-/* Deep dry drops past NAV_DROP_HEIGHT_MAX are handled by a separate
-   post-build pass (nav_mesh_compute_deep_drops) that only links landings
-   which can already path back out -- a flat cap raise to 320 dropped bots
-   into exitless dm3 pits, so depth alone can't be the gate.  Falls kill
-   past ~800u; stay under that. */
-#define NAV_DEEP_DROP_HEIGHT_MIN    48.0f  /* below this, walk/jump passes own it */
-#define NAV_DEEP_DROP_HEIGHT_MAX   700.0f
-#define NAV_DEEP_DROP_MAX_SPEED    300.0f  /* launch speed budget (full run ~320) */
-/* Rocket jump: the bot fires an RL at its feet while jumping for a big
-   upward boost a normal run-jump can't reach.  Only used for orphan ledges
-   above normal jump height; a single RJ clears ~250u up.  Horizontal reach
-   while gaining that height is modest -- keep it tight so RJ stays a
-   near-vertical last resort, never a substitute for a run-jump across. */
-#define NAV_RJ_HEIGHT_MAX          256.0f  /* max single-rocket-jump up height */
-#define NAV_RJ_HORIZ_MAX           128.0f  /* max horizontal while RJ-ing up */
+   GL pocket: 8u drop over an unwalkable hull-bevel ridge). */
+#define NAV_JUMP_HEIGHT_MIN         18.0f  /* below this, walkableClimb handles it */
 #define NAV_JUMP_PROBE_DIST         48.0f  /* how far to project from edge */
 #define NAV_JUMP_LINK_RADIUS        16.0f  /* agent radius */
 #define NAV_START_SNAP_MAX_DIST     24.0f
 #define NAV_JUMP_LAND_SNAP_MAX_DIST 24.0f
-#define NAV_PLAYER_FLOOR_OFFSET     24.0f
 #define NAV_DEBUG_MARKER_LIFT       24.0f
 
 /* ---- Per-bot path corridor ---- */
 
 static nav_corridor_t *nav_bot_corridors[MAX_SCOREBOARD];
+/* Off-mesh link the slot's LAST steer corner belongs to (0 = plain
+   ground corner).  Set every PF_nav_path_steer call; this is the ref
+   behind the nav_link_info/nav_link_serve_ent/nav_fail_current_link
+   metadata channel.  Unlike the corridor's pending ref (set only once
+   the 36u advance trigger fires), it is live for the whole approach. */
+static unsigned long long nav_bot_steer_link[MAX_SCOREBOARD];
 static nav_mesh_runtime_t *nav_mesh;
 static void nav_build_block_map(void);
 
@@ -133,6 +111,53 @@ static struct {
 } nav_block_map[NAV_MAX_BLOCK_ENTITIES];
 static int nav_block_map_count = 0;
 
+/* Per-link temporary failure cooldown: a bot that gives up repeatedly
+   failing to execute a specific off-mesh link (see nav_fail_current_link)
+   marks it here so nobody -- this bot or any other -- routes through it
+   again until the cooldown expires.  Indexed by link index (== build-time
+   userId, see nav_mesh_get_link_index), sized to nav_mesh->link_count. */
+static float *nav_link_fail_until = NULL;
+static int nav_link_fail_count = 0;
+
+#define NAV_LINK_FAIL_COOLDOWN 15.0f
+
+static void nav_link_fail_reset(void)
+{
+	free(nav_link_fail_until);
+	nav_link_fail_until = NULL;
+	nav_link_fail_count = 0;
+	if (nav_mesh != NULL)
+	{
+		nav_link_fail_count = nav_mesh->link_count;
+		if (nav_link_fail_count > 0)
+			nav_link_fail_until = (float *)calloc((size_t)nav_link_fail_count, sizeof(float));
+	}
+}
+
+/* Does this path cross an off-mesh link that is cooling down?  The steer
+   side already refuses to walk onto a cooling link (PF_nav_path_steer
+   reports a dead corridor) -- the PLANNER must agree, or goal picking
+   churns: nav_find_goal paths an item straight over the cooled link, the
+   first steer call kills the corridor, the goal is abandoned and re-picked
+   at think rate for the whole cooldown (e1m1: one bot's LINKFAIL pinned
+   another into a 15s GOALFAIL storm because every route out of its pocket
+   crossed the cooled link). */
+static int nav_path_has_cooling_link(const dtPolyRef *path, int path_count)
+{
+	int i, idx;
+
+	if (nav_link_fail_until == NULL)
+		return 0;
+	for (i = 0; i < path_count; i++)
+	{
+		idx = nav_mesh_get_link_index(nav_mesh, (unsigned long long)path[i]);
+		if (idx >= 0 && idx < nav_link_fail_count
+			&& sv.time < nav_link_fail_until[idx])
+			return 1;
+	}
+	return 0;
+}
+
 static int nav_bot_slot(void)
 {
 	edict_t *e = PROG_TO_EDICT(pr_global_struct->self);
@@ -150,7 +175,7 @@ static float nav_xy_dist_sq(const float *a, const float *b)
 
 static float nav_player_floor_z(float origin_z)
 {
-	return origin_z - NAV_PLAYER_FLOOR_OFFSET;
+	return origin_z - NAV_PHYS_FLOOR_OFFSET;
 }
 
 static float nav_debug_marker_z(float surface_z)
@@ -186,6 +211,25 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
 	return !trace.allsolid && !trace.startsolid && trace.fraction >= 1.0f;
 }
 
+/* navigate()'s phantom-border probe (nav_standable_fn): sweep the player
+   hull down at a Quake-space point.  Real hull-1 floor catches it; a
+   phantom sliver extending past the true ledge edge lets it fall clean
+   through.  Same technique as the bake-time edge standability check
+   above (nav_link_validate et al.), just single-sample -- a false
+   positive here only costs a harmless poly-center redirect, not a
+   missed link. */
+static int nav_bot_standable(const float *point)
+{
+	vec3_t ds, de, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+	trace_t tr;
+
+	VectorCopy(point, ds);
+	ds[2] += 26.0f;
+	VectorCopy(point, de);
+	tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+	return tr.startsolid || tr.allsolid || tr.fraction < 1.0f;
+}
+
 /* Decide how a player could traverse from 'from' to 'to' (Quake FOOT points,
    navmesh poly centroids), for nav_mesh_compute_orphan_jumps.  Returns the link
    type, or 0 if none:
@@ -193,15 +237,18 @@ static int nav_trace_clear_at_height(const float *start, const float *end, float
                 steps straight across); bidirectional, the safest connection.
      AI_JUMP -- run-jump (up / across / across-and-down), bidirectional.
    Endpoints are walkable by construction, so no standability re-check. */
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop,
+	float dry_cap, float speed_cap);
+
 static int nav_link_validate(const float *from, const float *to, void *user)
 {
 	vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32}, zero = {0, 0, 0};
 	vec3_t ts, te;
 	trace_t tr;
 	float dz, adz, dx, dy, hd, disc, airtime;
-	const float g = 800.0f;                 /* sv_gravity */
-	const float v0 = NAV_JUMP_IMPULSE;       /* 270, jump up-velocity */
-	const float maxspeed = 320.0f;           /* ground run speed */
+	const float g = NAV_PHYS_GRAVITY;
+	const float v0 = NAV_PHYS_JUMP_IMPULSE;
+	const float maxspeed = NAV_PHYS_RUN_SPEED;
 	(void)user;
 
 	dz = to[2] - from[2];
@@ -216,8 +263,8 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	   missing.  Step height bounds the climb. */
 	if (adz <= NAV_JUMP_HEIGHT_MIN)
 	{
-		ts[0] = from[0]; ts[1] = from[1]; ts[2] = from[2] + 24 + 18;
-		te[0] = to[0]; te[1] = to[1]; te[2] = to[2] + 24 + 18;
+		ts[0] = from[0]; ts[1] = from[1]; ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
+		te[0] = to[0]; te[1] = to[1]; te[2] = to[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
 		tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
 		if (!tr.startsolid && tr.fraction > 0.97f)
 			return AI_WALK;
@@ -250,11 +297,74 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 			{
 				/* +1: the down-trace endpos rests ON the floor plane; a box
 				   whose bottom sits exactly there reports startsolid. */
-				ts[0] = from[0]; ts[1] = from[1]; ts[2] = fz1 + 24 + 1;
-				te[0] = to[0]; te[1] = to[1]; te[2] = fz2 + 24 + 1;
+				ts[0] = from[0]; ts[1] = from[1]; ts[2] = fz1 + NAV_PHYS_FLOOR_OFFSET + 1;
+				te[0] = to[0]; te[1] = to[1]; te[2] = fz2 + NAV_PHYS_FLOOR_OFFSET + 1;
 				tr = SV_Move(ts, pmins, pmaxs, te, MOVE_NOMONSTERS, NULL);
 				if (!tr.startsolid && tr.fraction > 0.97f)
 					return AI_WALK;
+			}
+		}
+	}
+
+	/* Fully submerged pair: ballistic gates are meaningless in water -- a
+	   swimmer freely climbs over a divider and back down (e2m6's flooded
+	   oubliette bottom).  Accept if some raised straight chord between the
+	   endpoints runs through open water; reject only when every chord up
+	   to the divider cap is blocked or breaks the surface. */
+	{
+		vec3_t wp;
+		wp[0] = from[0]; wp[1] = from[1]; wp[2] = from[2] + 8.0f;
+		if (SV_PointContents(wp) == CONTENTS_WATER)
+		{
+			wp[0] = to[0]; wp[1] = to[1]; wp[2] = to[2] + 8.0f;
+			if (SV_PointContents(wp) == CONTENTS_WATER)
+			{
+				static const float kH[] = { 8, 24, 48, 72, 96, 120 };
+				/* Lateral offsets thread the chord between narrow parked
+				   brush entities (e2m6's 38u plat columns standing in the
+				   flooded oubliette) that SV_Move clips but a swimmer just
+				   slides around. */
+				static const float kLat[] = { 0, -24, 24, -48, 48 };
+				float px = -(to[1] - from[1]) / hd;
+				float py = (to[0] - from[0]) / hd;
+				float base = from[2] > to[2] ? from[2] : to[2];
+				int hi, oor = 0;
+				for (hi = 0; hi < (int)(sizeof(kH)/sizeof(kH[0])) && !oor; hi++)
+				{
+					int li;
+					for (li = 0; li < (int)(sizeof(kLat)/sizeof(kLat[0])); li++)
+					{
+						int s, steps, wet = 1;
+						ts[0] = from[0] + px * kLat[li];
+						ts[1] = from[1] + py * kLat[li];
+						ts[2] = base + kH[hi];
+						te[0] = to[0] + px * kLat[li];
+						te[1] = to[1] + py * kLat[li];
+						te[2] = base + kH[hi];
+						if (SV_PointContents(ts) != CONTENTS_WATER
+							|| SV_PointContents(te) != CONTENTS_WATER)
+						{
+							if (li == 0)
+								oor = 1;  /* left the water body: no higher chord */
+							continue;
+						}
+						steps = (int)(hd / 16.0f) + 1;
+						for (s = 1; s < steps && wet; s++)
+						{
+							vec3_t sp;
+							sp[0] = ts[0] + (te[0] - ts[0]) * ((float)s / (float)steps);
+							sp[1] = ts[1] + (te[1] - ts[1]) * ((float)s / (float)steps);
+							sp[2] = ts[2];
+							if (SV_PointContents(sp) != CONTENTS_WATER)
+								wet = 0;
+						}
+						if (!wet)
+							continue;
+						tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+						if (!tr.startsolid && tr.fraction >= 1.0f)
+							return AI_JUMP;
+					}
+				}
 			}
 		}
 	}
@@ -274,7 +384,7 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 		   caller pairs this with a drop-out so the ledge isn't a one-way trap. */
 		if (dz > NAV_JUMP_HEIGHT_MAX && dz <= NAV_RJ_HEIGHT_MAX && hd <= NAV_RJ_HORIZ_MAX)
 		{
-			float topz = to[2] + 24.0f + 18.0f;
+			float topz = to[2] + NAV_PHYS_FLOOR_OFFSET + NAV_PHYS_STEP_HEIGHT;
 			ts[0] = from[0]; ts[1] = from[1]; ts[2] = topz;
 			te[0] = to[0]; te[1] = to[1]; te[2] = topz;
 			tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
@@ -286,8 +396,126 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	airtime = (v0 + sqrt(disc)) / g;
 	if (hd / airtime > maxspeed)
 		return 0;
+	/* Descent-arc trace.  The apex-height line below clears ANYTHING lower
+	   than the apex, including a solid wall face between the arc and a
+	   recessed landing -- e2m1's citadel baked -264u "jumps" whose whole
+	   fall path was rock, and bots ground on them forever.  Point-trace
+	   the falling half of the parabola (apex -> landing) to prove the
+	   descent lane actually reaches the target.  A POINT, not the player
+	   box, and only the DESCENT: box sweeps of either half were tried and
+	   severed working links map-wide.  Ascent box contact is normal Quake
+	   movement (a jump-up rises against the ledge wall and slips over the
+	   lip), and the min-speed fall's box hugs the launch cliff and grazes
+	   the landing floor -- all things a real jumper (faster launch,
+	   air-steer) clears, so only an actually-solid descent lane rejects. */
 	{
-		float apexz = (to[2] > from[2] ? to[2] : from[2]) + 45.0f + 24.0f;
+		/* Sampled trajectory family: the full-impulse arc (apex ~45u) is
+		   only ONE member.  A jump under a low ceiling bonks and continues
+		   with a flattened arc, so a window opening rejects the full arc
+		   (lintel) AND the straight chord (sill) while an intermediate
+		   bonk height threads between (e2m3's level 87u window jump).
+		   Sample bonk heights down to near-chord; any clear descent lane
+		   proves a connecting trajectory. */
+		static const float kBonk[] = { -1.0f, 30.0f, 18.0f, 8.0f };
+		int k, lane = 0;
+		for (k = 0; k < (int)(sizeof(kBonk)/sizeof(kBonk[0])) && !lane; k++)
+		{
+			float h = kBonk[k] < 0.0f ? v0 * v0 / (2.0f * g) : kBonk[k];
+			float t_up, t_dn, at, f_apex;
+			int nseg, i;
+			if (h < dz)
+				continue;           /* bonked too low to ever reach the landing */
+			t_up = (v0 - sqrtf(v0 * v0 - 2.0f * g * h)) / g;
+			t_dn = sqrtf(2.0f * (h - dz) / g);
+			at = t_up + t_dn;
+			if (hd / at > maxspeed)
+				continue;           /* this member can't cover the distance */
+			f_apex = t_up / at;
+			nseg = (int)((hd * (1.0f - f_apex)) / 24.0f) + 1;
+			if (nseg < 3) nseg = 3;
+			if (nseg > 8) nseg = 8;
+			/* Start at the (possibly bonked) apex; +1 floor clearance
+			   mirrors the sweeps above.  Endpoints keep the origin's 24u
+			   lift, so the trace ends a body-height above the landing
+			   floor and never reads the floor itself as a hit. */
+			ts[0] = from[0] + dx * f_apex;
+			ts[1] = from[1] + dy * f_apex;
+			ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f + h;
+			for (i = 1; i <= nseg; i++)
+			{
+				float t = t_dn * (float)i / (float)nseg;
+				float f = f_apex + (1.0f - f_apex) * (float)i / (float)nseg;
+				te[0] = from[0] + dx * f;
+				te[1] = from[1] + dy * f;
+				te[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f
+					+ h - 0.5f * g * t * t;
+				tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+				if (tr.startsolid)
+					break;
+				if (tr.fraction < 1.0f)
+				{
+					/* Wall-flush landing: boundary sample points sit ON
+					   the landing poly's wall-side edge, so the terminal
+					   sample can end a hair inside that wall (e2m3's
+					   window landing, item niches).  Touching down a few
+					   units short is the same landing -- accept a hit
+					   whose endpoint is within grazing range of the
+					   target on the FINAL segment only. */
+					float ex = tr.endpos[0] - te[0];
+					float ey = tr.endpos[1] - te[1];
+					float ez = tr.endpos[2] - te[2];
+					if (!(i == nseg && ex * ex + ey * ey + ez * ez <= 16.0f * 16.0f))
+						break;
+				}
+				ts[0] = te[0]; ts[1] = te[1]; ts[2] = te[2];
+			}
+			if (i > nseg)
+				lane = k == 0 ? 1 : 2;
+		}
+		if (!lane)
+		{
+			/* Near-flat limit of the family: an open body-height lane
+			   straight from launch to landing (a corridor step-down whose
+			   ceiling forbids any real apex). */
+			ts[0] = from[0]; ts[1] = from[1];
+			ts[2] = from[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f;
+			te[0] = to[0]; te[1] = to[1];
+			te[2] = to[2] + NAV_PHYS_FLOOR_OFFSET + 1.0f;
+			tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
+			if (!tr.startsolid)
+			{
+				float ex = tr.endpos[0] - te[0];
+				float ey = tr.endpos[1] - te[1];
+				float ez = tr.endpos[2] - te[2];
+				if (tr.fraction >= 1.0f
+					|| ex * ex + ey * ey + ez * ez <= 16.0f * 16.0f)
+					lane = 2;
+			}
+		}
+		/* Steep end of the family: a recessed landing (item niche under a
+		   lintel) blocks every launch lane yet is reachable by walking off
+		   the edge and falling in.  Accept when real fall physics prove
+		   that fall; reject only when no trajectory connects (e2m1's
+		   through-rock links fail everything). */
+		if (!lane && dz < -NAV_JUMP_HEIGHT_MIN
+			&& nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT,
+				NAV_DEEP_DROP_SCAN_MAX, NAV_PHYS_RUN_SPEED) == AI_DROP)
+			lane = 2;
+		if (!lane)
+		{
+			if (nav_dd_debug_enabled())
+				fprintf(stderr, "JVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): no lane\n",
+					from[0], from[1], from[2], to[0], to[1], to[2]);
+			return 0;
+		}
+		/* Family members below the full arc already proved a specific
+		   threaded lane; the apex-height line would just re-veto them on
+		   the very lintel they threaded under. */
+		if (lane == 2)
+			return AI_JUMP;
+	}
+	{
+		float apexz = (to[2] > from[2] ? to[2] : from[2]) + NAV_PHYS_JUMP_APEX + NAV_PHYS_FLOOR_OFFSET;
 		ts[0] = from[0]; ts[1] = from[1]; ts[2] = apexz;
 		te[0] = to[0]; te[1] = to[1]; te[2] = apexz;
 		tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, NULL);
@@ -297,11 +525,20 @@ static int nav_link_validate(const float *from, const float *to, void *user)
 	return AI_JUMP;
 }
 
-/* Validator for nav_mesh_compute_deep_drops: is a walk-off fall from 'from'
-   down to 'to' physically clean?  Mirrors the boundary drop detector's
-   gates (walk-off line, hull-truth fall column, no lava/slime landing) on
-   centroid pairs.  Reachability/no-trap gating happens in the pass itself. */
-static int nav_deep_drop_validate(const float *from, const float *to, void *user)
+/* Is a walk-off fall from 'from' down to 'to' physically clean?  Mirrors the
+   boundary drop detector's gates (walk-off line, hull-truth fall column, no
+   lava/slime landing) on centroid pairs.  'min_drop' is the caller's floor:
+   the deep-drop pass hands off anything shallower to the walk/jump passes,
+   while the directed pass validates right down to step height.
+   'dry_cap'/'speed_cap' are the caller's WILLINGNESS policy, not physics:
+   the routine deep-drop tier keeps a conservative budget, while last-resort
+   repair (directed pass, jump-family steep drops) validates at physics
+   truth -- any fall is survivable in Quake (flat 5HP past 650u/s, water
+   negates), so the only physics bounds are the scan range and real run
+   speed.  hip1m4's arena traps need 720-1000u designed falls that the
+   routine budget must not veto when they are the only entry. */
+static int nav_drop_validate_min(const float *from, const float *to, float min_drop,
+	float dry_cap, float speed_cap)
 {
 	float drop = from[2] - to[2];
 	float dx = to[0] - from[0], dy = to[1] - from[1];
@@ -309,18 +546,19 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 #define DDFAIL(stage) do { if (nav_dd_debug_enabled()) fprintf(stderr, \
 	"DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): %s\n", \
 	from[0], from[1], from[2], to[0], to[1], to[2], stage); return 0; } while (0)
-	(void)user;
 
-	if (drop <= NAV_DEEP_DROP_HEIGHT_MIN)
+	if (drop <= min_drop)
 		DDFAIL("shallow");
-	if (hd < 8.0f)
-		DDFAIL("speed");
+	/* hd near zero is NOT degenerate: a sheer well (e3m7's 240u shaft)
+	   puts the landing rep plumb under the mouth.  dirh consumers all
+	   clamp the divisor, and the station/column search handles the
+	   straight-down case like any other. */
 
 	/* Underwater landing: the fall becomes "drop into the water body, then
 	   swim to the floor" -- the landing poly needn't be plumb below the
 	   ledge (e3m5's hole floor is 824u under its rim platform behind an
 	   overhanging slope, but water catches the fall after ~210u).  The
-	   lethal-fall cap applies to the DRY portion only. */
+	   deep-drop dry cap applies to the DRY portion only. */
 	{
 		vec3_t wp;
 		wp[0] = to[0]; wp[1] = to[1]; wp[2] = to[2] + 8.0f;
@@ -370,11 +608,11 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 			}
 			if (!found)
 				{ DDOFF("nosurf"); continue; }
-			if (from[2] - surface > NAV_DEEP_DROP_HEIGHT_MAX)
+			if (from[2] - surface > dry_cap)
 				{ DDOFF("deepdry"); continue; }
 			/* Horizontal drift during the dry fall is physics-capped. */
-			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / 800.0f);
-			if (kOff[oi] > NAV_DEEP_DROP_MAX_SPEED * ts)
+			ts = sqrtf(2.0f * (from[2] - surface > 16.0f ? from[2] - surface : 16.0f) / NAV_PHYS_GRAVITY);
+			if (kOff[oi] > speed_cap * ts)
 				{ DDOFF("drift"); break; }
 			if (!nav_trace_clear_at_height(from, entry, from[2] + 24.0f, NULL))
 				{ DDOFF("walkoff"); continue; }
@@ -412,7 +650,7 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 				}
 				dir[0] = goal[0] - entry[0]; dir[1] = goal[1] - entry[1]; dir[2] = goal[2] - entry[2];
 				len = sqrtf(dir[0]*dir[0] + dir[1]*dir[1] + dir[2]*dir[2]);
-				if (len > 600.0f) /* swim-reach cap, as in the swim pass */
+				if (len > NAV_DEEP_DROP_WET_LEG)
 					{ DDOFF("wetlen"); continue; }
 				for (s = 16.0f; s < len && wet; s += 16.0f)
 				{
@@ -437,13 +675,13 @@ static int nav_deep_drop_validate(const float *from, const float *to, void *user
 	}
 
 dry_fall:
-	if (drop > NAV_DEEP_DROP_HEIGHT_MAX)
+	if (drop > dry_cap)
 		DDFAIL("deep-dry");
 	/* Horizontal reach is physics-limited, not a fixed radius: the launch
 	   speed needed to cover hd during the fall must fit inside a full run.
 	   Dry landings only -- a water landing swims its horizontal remainder,
 	   which the entry-column search caps per offset. */
-	if (hd > NAV_DEEP_DROP_MAX_SPEED * sqrtf(2.0f * drop / 800.0f))
+	if (hd > speed_cap * sqrtf(2.0f * drop / NAV_PHYS_GRAVITY))
 		DDFAIL("speed");
 
 	/* Fall-column search: the landing rep point is often tucked under the
@@ -453,27 +691,35 @@ dry_fall:
 	   Probe columns at offsets along the walk-off line. */
 	{
 		static const float kRel[] = { 0, -16, 16, -32, 32, -48, 48 };
+		/* Mid-line stations: the open fall shaft can sit anywhere along
+		   the walk-off line, not only at the landing (dm6's LG pit is
+		   entered over its east mouth ~90u before the rep point, which
+		   tucks under the walkway).  A mid-line landing is validated
+		   like any off-rep column by the walkback + midgap gates. */
+		static const float kFrac[] = { 0.75f, 0.5f, 0.25f };
 		static const float kLat[] = { 0, -16, 16, -32, 32, -48, 48, -64, 64, -96, 96 };
 		float dirh[2], ts;
 		int oi, li, ok = 0;
+		int nrel = (int)(sizeof(kRel)/sizeof(kRel[0]));
+		int nsta = nrel + (hd > 96.0f ? (int)(sizeof(kFrac)/sizeof(kFrac[0])) : 0);
 		char miss[200];
 		miss[0] = 0;
 #define DDOFF(why) do { if (nav_dd_debug_enabled() && li == 0) { size_t l = strlen(miss); \
-	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", kRel[oi], why); } } while (0)
-		ts = sqrtf(2.0f * drop / 800.0f);
+	snprintf(miss + l, sizeof(miss) - l, " r%+.0f=%s", o - hd, why); } } while (0)
+		ts = sqrtf(2.0f * drop / NAV_PHYS_GRAVITY);
 		dirh[0] = dx / (hd > 8.0f ? hd : 8.0f);
 		dirh[1] = dy / (hd > 8.0f ? hd : 8.0f);
-		for (oi = 0; oi < (int)(sizeof(kRel)/sizeof(kRel[0])) && !ok; oi++)
+		for (oi = 0; oi < nsta && !ok; oi++)
 		for (li = 0; li < (int)(sizeof(kLat)/sizeof(kLat[0])) && !ok; li++)
 		{
 			vec3_t p, fs, fe, hmins = {-16, -16, -24}, hmaxs = {16, 16, 32};
 			trace_t tr;
-			float o = hd + kRel[oi];
+			float o = oi < nrel ? hd + kRel[oi] : hd * kFrac[oi - nrel];
 			if (o < 0.0f)
 				continue;
 			/* Drift during the fall is physics-capped: air-steering covers
 			   both the along-line and the sideways component. */
-			if (sqrtf(o * o + kLat[li] * kLat[li]) > NAV_DEEP_DROP_MAX_SPEED * ts)
+			if (sqrtf(o * o + kLat[li] * kLat[li]) > speed_cap * ts)
 				{ DDOFF("drift"); continue; }
 			p[0] = from[0] + dirh[0] * o - dirh[1] * kLat[li];
 			p[1] = from[1] + dirh[1] * o + dirh[0] * kLat[li];
@@ -489,7 +735,7 @@ dry_fall:
 			/* Landed off the rep point: the remainder is a level walk.
 			   Mid-point floor probe guards against the level trace sailing
 			   over a trench between the column and the rep point. */
-			if (kRel[oi] != 0.0f || kLat[li] != 0.0f)
+			if (o != hd || kLat[li] != 0.0f)
 			{
 				vec3_t land, mid, mlow, zero = {0, 0, 0};
 				trace_t mtr;
@@ -509,6 +755,82 @@ dry_fall:
 #undef DDOFF
 		if (!ok)
 		{
+			/* Ballistic walk-off: a roofed niche (e2m4's envirosuit
+			   shelf) is invisible to every vertical column -- the roof
+			   blocks the plumb probe -- yet a player walking off the
+			   rim at moderate speed falls in under the roof lip.
+			   Simulate the real parabola from the actual rim at several
+			   launch speeds. */
+			static const float kV[] = { 90, 150, 210, 270, 320 };
+			vec3_t rim, zero = {0, 0, 0};
+			float s, rimz = from[2];
+			int vi, have_rim = 0;
+			for (s = 8.0f; s <= hd + 48.0f; s += 8.0f)
+			{
+				vec3_t a, b;
+				trace_t ftr;
+				a[0] = from[0] + dirh[0] * s;
+				a[1] = from[1] + dirh[1] * s;
+				a[2] = from[2] + 24.0f;
+				b[0] = a[0]; b[1] = a[1]; b[2] = from[2] - 20.0f;
+				ftr = SV_Move(a, zero, zero, b, MOVE_NOMONSTERS, NULL);
+				if (ftr.startsolid)
+					break;
+				if (ftr.fraction >= 1.0f)
+				{
+					rim[0] = a[0]; rim[1] = a[1]; rim[2] = rimz;
+					have_rim = 1;
+					break;
+				}
+				rimz = ftr.endpos[2];
+			}
+			if (have_rim
+				&& !nav_trace_clear_at_height(from, rim, from[2] + 24.0f, NULL))
+				have_rim = 0;
+			for (vi = 0; have_rim && vi < (int)(sizeof(kV)/sizeof(kV[0])) && !ok; vi++)
+			{
+				vec3_t p0, p1;
+				trace_t str;
+				float v = kV[vi], t = 0.0f;
+				p0[0] = rim[0]; p0[1] = rim[1]; p0[2] = rim[2] + 2.0f;
+				while (1)
+				{
+					float ex, ey, ez;
+					t += 12.0f / v;
+					if (v * t > hd + 96.0f)
+						break;
+					p1[0] = rim[0] + dirh[0] * v * t;
+					p1[1] = rim[1] + dirh[1] * v * t;
+					p1[2] = rim[2] + 2.0f - 0.5f * NAV_PHYS_GRAVITY * t * t;
+					str = SV_Move(p0, zero, zero, p1, MOVE_NOMONSTERS, NULL);
+					if (str.startsolid)
+						break;
+					if (str.fraction < 1.0f)
+					{
+						ex = str.endpos[0] - to[0];
+						ey = str.endpos[1] - to[1];
+						ez = str.endpos[2] - to[2];
+						if (ex * ex + ey * ey <= 48.0f * 48.0f
+							&& ez >= -8.0f && ez <= 40.0f)
+							ok = 1;
+						break;
+					}
+					if (p1[2] <= to[2])
+					{
+						ex = p1[0] - to[0];
+						ey = p1[1] - to[1];
+						if (ex * ex + ey * ey <= 48.0f * 48.0f)
+							ok = 1;
+						break;
+					}
+					if (p1[2] < to[2] - 80.0f)
+						break;
+					p0[0] = p1[0]; p0[1] = p1[1]; p0[2] = p1[2];
+				}
+			}
+		}
+		if (!ok)
+		{
 			if (nav_dd_debug_enabled())
 				fprintf(stderr, "DDVAL (%.0f %.0f %.0f)->(%.0f %.0f %.0f): column-miss%s\n",
 					from[0], from[1], from[2], to[0], to[1], to[2], miss);
@@ -526,6 +848,26 @@ dry_fall:
 			DDFAIL("lava");
 	}
 	return AI_DROP;
+}
+
+/* Validator for nav_mesh_compute_deep_drops: routine links, conservative
+   willingness budget. */
+static int nav_deep_drop_validate(const float *from, const float *to, void *user)
+{
+	(void)user;
+	return nav_drop_validate_min(from, to, NAV_DEEP_DROP_HEIGHT_MIN,
+		NAV_DEEP_DROP_HEIGHT_MAX, NAV_DEEP_DROP_MAX_SPEED);
+}
+
+/* Drop validator for the directed-connectivity pass: same physics gates,
+   but a directed repair may legitimately be as shallow as a step -- and,
+   being the component's last resort, is bounded by physics truth rather
+   than the routine willingness budget. */
+static int nav_dir_drop_validate(const float *from, const float *to, void *user)
+{
+	(void)user;
+	return nav_drop_validate_min(from, to, NAV_PHYS_STEP_HEIGHT,
+		NAV_DEEP_DROP_SCAN_MAX, NAV_PHYS_RUN_SPEED);
 }
 
 /* Validator for nav_mesh_compute_swim_links: can a player swim the straight
@@ -716,7 +1058,7 @@ static int nav_find_bot_poly(dtNavMeshQuery *query, edict_t *bot, const float *q
 		return 0;
 	if (!over_poly && nav_xy_dist_sq(qpos, test) > 8.0f * 8.0f)
 		return 0;
-	if (!nav_trace_clear_at_height(qpos, test, test[2] + NAV_PLAYER_FLOOR_OFFSET, bot))
+	if (!nav_trace_clear_at_height(qpos, test, test[2] + NAV_PHYS_FLOOR_OFFSET, bot))
 		return 0;
 
 	return 1;
@@ -730,6 +1072,7 @@ static struct {
 	float nav_pos[3]; /* position snapped to navmesh (Recast coords) */
 } nav_item_cache[NAV_MAX_ITEMS];
 static int nav_item_count = 0;
+static double nav_item_cache_time = 0;
 static func_t nav_bot_want_func = 0;
 
 static void nav_ent_pos(edict_t *ent, float *pos);
@@ -839,6 +1182,100 @@ static int nav_cn_is_item(const char *cn)
 	return !strncmp(cn, "item_", 5) || !strncmp(cn, "weapon_", 7);
 }
 
+/* Is item 'o' credited from ANY of 'pts' -- same-ledge (roughly level,
+   path-validated to cap the "whole map is connected" false positive) or
+   deep-drop (a real walk-off fall onto it, per the deep-drop pass's own
+   physics validator)?  Shared by nav_rj_has_value below to test both the
+   post-jump landing's reach and the launch point's own already-reachable-
+   by-foot neighborhood -- see nav_jump_value_fn's doc (nav_mesh.h) for why
+   both sides need the identical test. */
+static int nav_rj_item_credited(edict_t *o, const float *pts, int count)
+{
+	int p;
+	for (p = 0; p < count; p++)
+	{
+		const float *to = &pts[p * 3];
+		float dx = o->v.origin[0] - to[0];
+		float dy = o->v.origin[1] - to[1];
+		float dz = o->v.origin[2] - to[2];
+		if (dx < -150.0f || dx > 150.0f) continue;
+		if (dy < -150.0f || dy > 150.0f) continue;
+		/* Same-ledge case: item sits roughly at this reachable point's
+		   height. Straight-line XY/Z proximity alone isn't enough --
+		   a thin wall or door can put an item in an adjoining room
+		   within the same box without there being any walkable route
+		   between them (e1m2: a hallway-door ledge credited a key and
+		   rockets sitting one room over, through the wall, spawning a
+		   rocket jump that dead-ends at the door with nothing to
+		   reach). A raw findPath isn't enough either -- the whole map
+		   is connected, so any item is technically "reachable" by
+		   some long way around; that would make this check pass for
+		   virtually everything.  Cap the path to a handful of polys
+		   so only a genuinely-local, direct hop counts, not a trek
+		   across the level. */
+		if (dz >= -40.0f && dz <= 96.0f)
+		{
+			vec3_t item_pos;
+			nav_ent_pos(o, item_pos);
+			nav_mesh_path_result_t pr;
+			char perr[64];
+			if (nav_mesh_find_path(nav_mesh, to, item_pos, &pr, perr, sizeof(perr))
+				&& pr.path_ref_count <= 5)
+				return 1;
+		}
+		/* Below the ledge: don't just trust straight-line distance --
+		   a static height band can credit a scenery nub with a health
+		   kit that's actually on the far side of a wall, coincidentally
+		   almost straight down.  Run the deep-drop pass's own physics
+		   validator (walk-off + fall-column + lava check) to confirm
+		   the ledge really can fall onto this item, matching the "RJ up
+		   to a vantage, then fall to the goal" chain the deep-drop pass
+		   builds afterward (e2m2's rocket ammo under a tall scaffold). */
+		if (dz < -40.0f)
+		{
+			vec3_t item_floor;
+			item_floor[0] = o->v.origin[0];
+			item_floor[1] = o->v.origin[1];
+			item_floor[2] = nav_player_floor_z(o->v.origin[2]);
+			if (nav_deep_drop_validate(to, item_floor, NULL) == AI_DROP)
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/* Rocket-jump worth-it check (nav_jump_value_fn): is there an item resting
+   near ANY poly reachable from this candidate ledge by walking the current
+   mesh (nav_mesh_compute_rocket_jumps hands over that whole reachable set,
+   not just the one poly it picked as cheapest) that ISN'T also reachable
+   from the launch point's own ordinary-walking neighborhood?  Without the
+   second half, crediting only checked whether SOMETHING sat near the
+   landing -- but a landing right above a doorway credits whatever's in the
+   next room over regardless of whether a bot would've just walked through
+   that same door for free, producing an RJ that "unlocks" an item already
+   on the normal path (e1m2: a ledge atop a hallway door credited the green
+   armor sitting right past that door, no jump required to reach it either
+   way). Skip any item the launch point can already get to on foot; only
+   credit ones that genuinely need the jump. */
+static int nav_rj_has_value(const float *pts, int count,
+	const float *already_pts, int already_count, void *user)
+{
+	int i;
+	(void)user;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *o = EDICT_NUM(i);
+		const char *cn;
+		if (o->free) continue;
+		cn = pr_strings + (int)o->v.classname;
+		if (!nav_cn_is_item(cn)) continue;
+		if (!nav_rj_item_credited(o, pts, count)) continue;
+		if (nav_rj_item_credited(o, already_pts, already_count)) continue;
+		return 1;
+	}
+	return 0;
+}
+
 /* A spawn point or item resting on a door's top face is map-author
    evidence the door is meant to be stood on -- bake doors like that
    even when they're too narrow for the room-sized footprint test
@@ -878,6 +1315,24 @@ static int nav_is_floor_collapse_door(edict_t *e)
 		&& e->v.origin[2] == pos1->vector[2]
 		&& (min_horiz >= 128.0f
 			|| (min_horiz >= 48.0f && nav_door_top_supports_entity(e)))
+		&& nav_top_face_has_clearance(e);
+}
+
+/* A thin down-moving door parked at its top stop: a sinking floor slab.
+   Thin doors bake as static floor (nav_is_brush_entity), so when one
+   sinks it carries its rider down -- e1m6's shootable secret staircase
+   is four of these, each a 30u-deep step that drops into the passage
+   beneath.  Too narrow for the collapse-floor footprint test, but the
+   thinness plus top clearance is the same map-author evidence: this is
+   floor, and its travel is a route. */
+static int nav_is_sinking_floor_door(edict_t *e)
+{
+	eval_t *pos1 = GetEdictFieldValue(e, "pos1");
+	eval_t *pos2 = GetEdictFieldValue(e, "pos2");
+	return pos1 && pos2
+		&& pos2->vector[2] < pos1->vector[2] - 32.0f
+		&& e->v.origin[2] == pos1->vector[2]
+		&& (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
 		&& nav_top_face_has_clearance(e);
 }
 
@@ -932,6 +1387,16 @@ static int nav_is_brush_entity(edict_t *e)
 #define NAV_MAX_OPEN_DOORS 128
 static struct { edict_t *e; vec3_t org; } nav_opened_doors[NAV_MAX_OPEN_DOORS];
 static int nav_opened_door_count;
+
+/* Bottom-parked plats get the same treatment for the same reason: they
+   are excluded from the raster (the parked body would fragment the
+   lower room), so traces must not clip them either.  A thin deck parked
+   flush in a floor slot seals the pit its elevator serves (e3m7's well:
+   every fall column into the 240u shaft startsolids on the parked
+   deck).  The plat vacates the column in play -- riding it is the plat
+   link's job, and stepping into the hole it leaves is a plain drop. */
+static struct { edict_t *e; float solid; } nav_unsolid_plats[NAV_MAX_OPEN_DOORS];
+static int nav_unsolid_plat_count;
 
 static void nav_doors_open_for_build(void)
 {
@@ -1000,6 +1465,23 @@ static void nav_doors_open_for_build(void)
 	}
 	if (nav_opened_door_count > 0)
 		fprintf(stderr, "Nav: %d doors held open for link validation\n", nav_opened_door_count);
+
+	nav_unsolid_plat_count = 0;
+	for (i = 1; i < sv.num_edicts; i++)
+	{
+		edict_t *e = EDICT_NUM(i);
+		if (e->free) continue;
+		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")) continue;
+		if (nav_is_brush_entity(e)) continue;   /* top-resting plats are baked: stay solid */
+		if (nav_unsolid_plat_count >= NAV_MAX_OPEN_DOORS) break;
+		nav_unsolid_plats[nav_unsolid_plat_count].e = e;
+		nav_unsolid_plats[nav_unsolid_plat_count].solid = e->v.solid;
+		nav_unsolid_plat_count++;
+		e->v.solid = SOLID_NOT;
+		SV_LinkEdict(e, false);
+	}
+	if (nav_unsolid_plat_count > 0)
+		fprintf(stderr, "Nav: %d parked plats unclipped for link validation\n", nav_unsolid_plat_count);
 }
 
 static void nav_doors_restore(void)
@@ -1013,6 +1495,13 @@ static void nav_doors_restore(void)
 		SV_LinkEdict(e, false);
 	}
 	nav_opened_door_count = 0;
+	for (i = 0; i < nav_unsolid_plat_count; i++)
+	{
+		edict_t *e = nav_unsolid_plats[i].e;
+		e->v.solid = nav_unsolid_plats[i].solid;
+		SV_LinkEdict(e, false);
+	}
+	nav_unsolid_plat_count = 0;
 }
 
 static int nav_door_held_open(edict_t *e)
@@ -1029,12 +1518,14 @@ static int nav_door_held_open(edict_t *e)
    See nav_hull.cpp for why hull geometry instead of render faces. */
 static int nav_extract_bsp(model_t *worldmodel,
 	float **out_verts, int *out_vert_count,
-	int **out_tris, int *out_tri_count)
+	int **out_tris, int *out_tri_count,
+	unsigned char **out_hazard)
 {
 	int i;
 
 	*out_verts = NULL; *out_vert_count = 0;
 	*out_tris = NULL;  *out_tri_count = 0;
+	*out_hazard = NULL;
 	if (!worldmodel) return 0;
 
 	nav_hull_begin();
@@ -1058,7 +1549,7 @@ static int nav_extract_bsp(model_t *worldmodel,
 	}
 
 	{
-		int ok = nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count);
+		int ok = nav_hull_end(out_verts, out_vert_count, out_tris, out_tri_count, out_hazard);
 		const char *box = getenv("NAV_DUMP_TRIS");
 		if (ok && box)
 		{
@@ -1235,7 +1726,7 @@ static int nav_collect_push_links(nav_off_mesh_link_t **out_links)
 			if (inside && vel[2] > 200.0f)
 				rode_up = 1;
 			if (!inside)
-				vel[2] -= 800.0f * dt;
+				vel[2] -= NAV_PHYS_GRAVITY * dt;
 
 			/* Vertical shaft mouth: with neutral input the rider oscillates
 			   at the apex forever (rises out, falls back in, re-grabbed) --
@@ -1381,9 +1872,73 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		eval_t *pos1, *pos2, *spd;
 		float top_z, bot_z, speed, travel;
 		if (e->free) continue;
+
+		/* fd_secret trapdoor: a secret door (movedir stays zero -- secrets
+		   never call SetMovedir) lying flat as a baked thin floor panel.
+		   When it opens it slides AWAY, vacating its whole footprint, and
+		   the route is a fall to whatever floor lies beneath (dm6's LG-pit
+		   lid).  pos1/pos2 are computed lazily by fd_secret_use, so the
+		   collapse/sinking predicates can't see it; the panel shape plus
+		   the vertical shaft below IS the tell.  One-way: nothing carries
+		   a player back up through the opening. */
+		if (!strcasecmp(pr_strings + (int)e->v.classname, "door")
+			&& e->v.movedir[0] == 0.0f && e->v.movedir[1] == 0.0f
+			&& e->v.movedir[2] == 0.0f
+			&& (e->v.absmax[2] - e->v.absmin[2]) <= NAV_DOOR_FLOOR_MAX_THICKNESS
+			&& nav_top_face_has_clearance(e))
+		{
+			float sx = e->v.absmax[0] - e->v.absmin[0];
+			float sy = e->v.absmax[1] - e->v.absmin[1];
+			float min_horiz = sx < sy ? sx : sy;
+			if (min_horiz >= 64.0f)
+			{
+				vec3_t ts, te, zero = {0, 0, 0};
+				trace_t tr;
+				float cx = (e->v.absmin[0] + e->v.absmax[0]) * 0.5f;
+				float cy = (e->v.absmin[1] + e->v.absmax[1]) * 0.5f;
+				float panel_top = e->v.absmax[2];
+				ts[0] = cx; ts[1] = cy; ts[2] = e->v.absmin[2] - 2.0f;
+				te[0] = cx; te[1] = cy; te[2] = ts[2] - NAV_DEEP_DROP_HEIGHT_MAX;
+				tr = SV_Move(ts, zero, zero, te, MOVE_NOMONSTERS, e);
+				if (!tr.startsolid && tr.fraction < 1.0f
+					&& panel_top - tr.endpos[2] > 32.0f)
+				{
+					vec3_t lc;
+					int lcont;
+					lc[0] = cx; lc[1] = cy; lc[2] = tr.endpos[2] + 8.0f;
+					lcont = SV_PointContents(lc);
+					if (lcont != CONTENTS_LAVA && lcont != CONTENTS_SLIME)
+					{
+						float half_x = sx * 0.5f, half_y = sy * 0.5f;
+						float rad = (half_x > half_y ? half_x : half_y) + 24.0f;
+						nav_link_ensure_cap(&links, n, &cap);
+						links[n].start[0] = cx;
+						links[n].start[1] = cy;
+						links[n].start[2] = panel_top;
+						links[n].end[0] = cx;
+						links[n].end[1] = cy;
+						links[n].end[2] = tr.endpos[2];
+						links[n].radius = rad > 64.0f ? rad : 64.0f;
+						links[n].bidirectional = 0;
+						links[n].link_type = AI_PLAT_BOTTOM;
+						links[n].height_delta = panel_top - tr.endpos[2];
+						links[n].wait_time = sqrtf(2.0f * (panel_top - tr.endpos[2]) / NAV_PHYS_GRAVITY);
+						links[n].required_speed = 0;
+						links[n].serve_ent = i;
+						if (nav_debug_cvar.value)
+							Con_Printf("Nav: trapdoor link (%.0f %.0f) z %.0f -> %.0f\n",
+								cx, cy, panel_top, tr.endpos[2]);
+						n++;
+					}
+				}
+				continue;
+			}
+		}
+
 		if (strcasecmp(pr_strings + (int)e->v.classname, "plat")
 			&& !(!strcasecmp(pr_strings + (int)e->v.classname, "door")
-				&& nav_is_floor_collapse_door(e))) continue;
+				&& (nav_is_floor_collapse_door(e)
+					|| nav_is_sinking_floor_door(e)))) continue;
 
 		/* pos1 = top, pos2 = bottom (QC fields, set by plat spawn code;
 		   same ordering for a collapse-floor door, which opens down).
@@ -1424,6 +1979,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 		links[n].height_delta = top_z - bot_z;
 		links[n].wait_time = travel;
 		links[n].required_speed = 0;
+		links[n].serve_ent = i;
 		if (nav_debug_cvar.value)
 			Con_Printf("Nav: plat link (%.0f %.0f) z %.0f -> %.0f spd %.0f\n",
 				links[n].start[0], links[n].start[1], bot_z, top_z, speed);
@@ -1463,6 +2019,7 @@ static int nav_collect_platform_links(nav_off_mesh_link_t **out_links)
 				links[n].height_delta = 0;
 				links[n].wait_time = 0;
 				links[n].required_speed = 0;
+				links[n].serve_ent = i;
 				n++;
 			}
 		}
@@ -1541,6 +2098,7 @@ static int nav_collect_train_links(nav_off_mesh_link_t **out_links)
 				links[n].height_delta = next_pc->v.origin[2] - pc->v.origin[2];
 				links[n].wait_time = dist / (100.0f);
 				links[n].required_speed = 0;
+				links[n].serve_ent = i;
 				n++;
 				break;
 			}
@@ -1608,6 +2166,67 @@ static float nav_find_horizontal_gap(const nav_heightfield_t *hf,
 /* Callback for nav_mesh_build: detect drop/jump links from boundary edges.
    Uses Quake physics to compute landing positions and required approach speeds.
    One edge can produce multiple links (one per reachable floor below). */
+/* Hull walk emulation along the chord from->to: advance the player box in
+   8u samples, lifting a step height before each level sweep and settling
+   back to the floor after -- exactly the engine's step-up movement.  Risers
+   and step-downs over 18u, walls, floor gaps, and lava/slime all reject.
+   Proves terrain is player-walkable even when it never meshed: Recast
+   erodes the walkable radius off every boundary, so a staircase narrower
+   than ~2r vanishes from the mesh outright (hip2m6's south-niche strips)
+   while any real player just walks up it. */
+static int nav_stair_walk_chord(const float *from, const float *to)
+{
+	vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+	vec3_t cur, ls, le, de;
+	trace_t tr;
+	float dx = to[0] - from[0], dy = to[1] - from[1];
+	float hd = sqrtf(dx * dx + dy * dy);
+	int steps, i;
+
+	if (hd < 1.0f || hd > 512.0f)
+		return 0;
+
+	/* Hull-truth the start: poly z carries raster error, so settle the box
+	   onto the real floor first.  No floor within ~20u of the poly plane
+	   means the start itself is phantom. */
+	cur[0] = from[0]; cur[1] = from[1]; cur[2] = from[2] + 42.0f;
+	de[0] = cur[0]; de[1] = cur[1]; de[2] = from[2] + 4.0f;
+	tr = SV_Move(cur, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+	if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f)
+		return 0;
+	cur[2] = tr.endpos[2];
+
+	steps = (int)(hd / 8.0f) + 1;
+	for (i = 1; i <= steps; i++)
+	{
+		float tx = from[0] + dx * (float)i / (float)steps;
+		float ty = from[1] + dy * (float)i / (float)steps;
+		/* Step-up lift, then a level sweep to the next sample. */
+		ls[0] = cur[0]; ls[1] = cur[1]; ls[2] = cur[2] + 18.0f;
+		le[0] = tx; le[1] = ty; le[2] = ls[2];
+		tr = SV_Move(ls, pmins, pmaxs, le, MOVE_NOMONSTERS, NULL);
+		if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
+			return 0;   /* riser taller than a step, or a wall */
+		/* Settle back down; floor must be within a step below where we
+		   stood, or this is a ledge/gap and not walkable terrain. */
+		de[0] = le[0]; de[1] = le[1]; de[2] = le[2] - 37.0f;
+		tr = SV_Move(le, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+		if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f)
+			return 0;
+		cur[0] = tr.endpos[0]; cur[1] = tr.endpos[1]; cur[2] = tr.endpos[2];
+		{
+			vec3_t cc;
+			int cont;
+			cc[0] = cur[0]; cc[1] = cur[1]; cc[2] = cur[2] - 16.0f;
+			cont = SV_PointContents(cc);
+			if (cont == CONTENTS_LAVA || cont == CONTENTS_SLIME)
+				return 0;
+		}
+	}
+	/* Arrived at the target column standing on its floor. */
+	return fabsf(cur[2] - (to[2] + 24.0f)) <= 20.0f;
+}
+
 static int nav_link_callback(
 	const nav_mesh_boundary_edge_t *edges, int edge_count,
 	const nav_heightfield_t *hf,
@@ -1620,12 +2239,21 @@ static int nav_link_callback(
 	float gravity = sv_gravity.value;
 	float maxspeed = sv_maxspeed.value;
 
-	if (gravity < 1.0f) gravity = 800.0f;
-	if (maxspeed < 1.0f) maxspeed = 320.0f;
-	float peak = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE / (2.0f * gravity);
+	if (gravity < 1.0f) gravity = NAV_PHYS_GRAVITY;
+	if (maxspeed < 1.0f) maxspeed = NAV_PHYS_RUN_SPEED;
+	float peak = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE / (2.0f * gravity);
 
 	*out_links = NULL;
 	if (edge_count == 0) return 0;
+
+	const char *dropdbg_env = getenv("NAV_DROP_DEBUG");
+	float dbgb[4] = {0, 0, 0, 0};
+	int dropdbg = dropdbg_env != NULL &&
+		sscanf(dropdbg_env, "%f %f %f %f", &dbgb[0], &dbgb[1], &dbgb[2], &dbgb[3]) == 4;
+#define DDBG(...) do { if (edbg) { \
+		fprintf(stderr, "DROPDBG (%.0f %.0f %.0f) n(%.2f %.2f): ", \
+			mid[0], mid[1], mid[2], norm[0], norm[1]); \
+		fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); } } while (0)
 
 	links = (nav_off_mesh_link_t *)calloc(cap, sizeof(*links));
 
@@ -1634,6 +2262,9 @@ static int nav_link_callback(
 		const float *mid = edges[i].midpoint;
 		const float *norm = edges[i].normal;
 		float short_probe[3];
+		int edbg = dropdbg
+			&& mid[0] >= dbgb[0] && mid[0] <= dbgb[2]
+			&& mid[1] >= dbgb[1] && mid[1] <= dbgb[3];
 
 		/* Short probe outward (8u) to check if there's a wall right at the edge */
 		short_probe[0] = mid[0] + norm[0] * 8.0f;
@@ -1641,6 +2272,7 @@ static int nav_link_callback(
 		short_probe[2] = mid[2];
 		if (!nav_trace_clear_at_height(mid, short_probe, mid[2] + 24.0f, NULL))
 		{
+			DDBG("wall at edge (short probe)");
 			continue;
 		}
 
@@ -1652,15 +2284,28 @@ static int nav_link_callback(
 		   edge: real hull-1 floor catches it (including legit 16u brush
 		   overhang), a phantom shelf lets it fall through.  startsolid
 		   is inconclusive (cramped rims under stairs, dm4 pocket) —
-		   only a CLEAN miss proves there is no floor. */
+		   only a CLEAN miss proves there is no floor.  Sample inward
+		   too before condemning: a midpoint sitting exactly on the
+		   hull floor's expansion boundary clean-misses down the crack
+		   (hip2m6 niche rim), while a true phantom shelf misses at
+		   every offset — it has no hull floor anywhere. */
 		{
 			vec3_t ds, de, pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
 			trace_t tr;
-			ds[0] = mid[0]; ds[1] = mid[1]; ds[2] = mid[2] + 26.0f;
-			de[0] = mid[0]; de[1] = mid[1]; de[2] = mid[2];
-			tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
-			if (!tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f)
+			int standable = 0;
+			for (float soff = 0.0f; soff <= 16.0f && !standable; soff += 8.0f)
 			{
+				ds[0] = mid[0] - norm[0] * soff;
+				ds[1] = mid[1] - norm[1] * soff;
+				ds[2] = mid[2] + 26.0f;
+				de[0] = ds[0]; de[1] = ds[1]; de[2] = mid[2];
+				tr = SV_Move(ds, pmins, pmaxs, de, MOVE_NOMONSTERS, NULL);
+				if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
+					standable = 1;
+			}
+			if (!standable)
+			{
+				DDBG("no hull floor at edge (phantom shelf)");
 				continue;
 			}
 		}
@@ -1693,12 +2338,16 @@ static int nav_link_callback(
 						floors[nfloors++] = pf[ti];
 				}
 			}
+			DDBG("floors below: %d", nfloors);
 
 			for (int fi = 0; fi < nfloors; fi++)
 			{
 				float drop_height = mid[2] - floors[fi];
 				if (drop_height < NAV_DROP_HEIGHT_MIN)
+				{
+					DDBG("floor %.0f: drop %.0f below min", floors[fi], drop_height);
 					continue;
+				}
 
 				/* Past the dry-land cap, only a water landing is survivable
 				   (and escapable via the surface link); anything else is a
@@ -1709,7 +2358,10 @@ static int nav_link_callback(
 					vec3_t wc;
 					wc[0] = mid[0]; wc[1] = mid[1]; wc[2] = floors[fi] + 24.0f;
 					if (SV_PointContents(wc) != CONTENTS_WATER)
+					{
+						DDBG("floor %.0f: deep dry drop %.0f", floors[fi], drop_height);
 						continue;
+					}
 					deep_water_drop = 1;
 				}
 
@@ -1723,10 +2375,12 @@ static int nav_link_callback(
 					probe_xy[2] = 0;
 					if (nav_heightfield_is_blocked(hf, probe_xy, mid[2]))
 					{
+						DDBG("floor %.0f: wall at edge height", floors[fi]);
 						continue; /* wall at edge height blocks the drop */
 					}
 					if (nav_heightfield_is_blocked(hf, probe_xy, floors[fi]))
 					{
+						DDBG("floor %.0f: solid at landing height", floors[fi]);
 						continue; /* solid at landing height */
 					}
 				}
@@ -1752,6 +2406,7 @@ static int nav_link_callback(
 					}
 					if (lane_blocked)
 					{
+						DDBG("floor %.0f: lane blocked", floors[fi]);
 						continue;
 					}
 				}
@@ -1788,6 +2443,7 @@ static int nav_link_callback(
 					}
 					if (!footing)
 					{
+						DDBG("floor %.0f: no approach footing", floors[fi]);
 						continue;
 					}
 				}
@@ -1810,7 +2466,10 @@ static int nav_link_callback(
 				   needing a flat-out sprint drops it into the chasm instead
 				   of the landing (dm1 (142,1558): 108u gap, 212 u/s). */
 				if (speed > maxspeed * 0.5f)
+				{
+					DDBG("floor %.0f: speed %.0f too high", floors[fi], speed);
 					continue; /* needs more run-up than traversal guarantees */
+				}
 
 				/* Landing position: edge + normal * landing_dist */
 				float land_dist = speed * fall_time;
@@ -1826,6 +2485,7 @@ static int nav_link_callback(
 				/* Verify landing is clear */
 				if (hf && nav_heightfield_is_blocked(hf, end, floors[fi]))
 				{
+					DDBG("floor %.0f: landing blocked", floors[fi]);
 					continue;
 				}
 
@@ -1834,6 +2494,7 @@ static int nav_link_callback(
 				   and landings tucked under the start floor. */
 				if (!nav_trace_clear_at_height(mid, end, mid[2] + 24.0f, NULL))
 				{
+					DDBG("floor %.0f: +24 trace to landing blocked", floors[fi]);
 					continue;
 				}
 				{
@@ -1844,6 +2505,7 @@ static int nav_link_callback(
 					tr = SV_Move(fs, zero3, zero3, fe, MOVE_NOMONSTERS, NULL);
 					if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f)
 					{
+						DDBG("floor %.0f: fall column obstructed", floors[fi]);
 						continue; /* fall column obstructed */
 					}
 				}
@@ -1870,6 +2532,8 @@ static int nav_link_callback(
 					if (tr.startsolid || tr.allsolid
 						|| tr.endpos[2] > floors[fi] + 36.0f)
 					{
+						DDBG("floor %.0f: ride-down failed (ss=%d end=%.0f)",
+							floors[fi], tr.startsolid, tr.endpos[2]);
 						continue; /* player hull can't ride the column down */
 					}
 				}
@@ -1883,17 +2547,47 @@ static int nav_link_callback(
 					lc[0] = end[0]; lc[1] = end[1]; lc[2] = floors[fi] + 8.0f;
 					lcont = SV_PointContents(lc);
 					if (lcont == CONTENTS_LAVA || lcont == CONTENTS_SLIME)
+					{
+						DDBG("floor %.0f: lava/slime landing", floors[fi]);
 						continue;
+					}
 				}
 
+				DDBG("floor %.0f: DROP pushed (speed %.0f)", floors[fi], speed);
 				nav_link_push(&links, &n, &cap, mid, end, AI_DROP, speed, -drop_height);
 
 				/* Deep water plunge: pair it with an AI_SURFACE swim-out so the
 				   pool isn't a one-way grave.  Only when the ledge sits nearly
 				   straight above the landing (the bot swims up and steps off);
-				   a far ledge would just nose the lip underwater. */
+				   a far ledge would just nose the lip underwater.
+				   The landing being wet only proves the BOTTOM of the shaft is
+				   water -- it says nothing about the top.  A shallow pool under
+				   a tall ledge (dm5's invuln shaft: ~90u of water under a 240u
+				   drop) still passes the single-point check below, but promises
+				   a swim the water can't carry: once the bot rises above the
+				   real waterline it's back to waterlevel 1, where the engine
+				   applies full gravity and denies swim-thrust (SV_ClientThink
+				   only calls SV_WaterMove at waterlevel>=2) -- it sinks, refills
+				   to waterlevel 2, rises, and repeats forever at the same XY.
+				   Require the whole column to read water before trusting the
+				   climb. */
 				if (deep_water_drop && land_dist <= 48.0f)
-					nav_link_push(&links, &n, &cap, end, mid, AI_SURFACE, 0.0f, drop_height);
+				{
+					int column_wet = 1;
+					float cz;
+					for (cz = floors[fi] + 24.0f; cz < mid[2]; cz += 16.0f)
+					{
+						vec3_t cc;
+						cc[0] = end[0]; cc[1] = end[1]; cc[2] = cz;
+						if (SV_PointContents(cc) != CONTENTS_WATER)
+						{
+							column_wet = 0;
+							break;
+						}
+					}
+					if (column_wet)
+						nav_link_push(&links, &n, &cap, end, mid, AI_SURFACE, 0.0f, drop_height);
+				}
 
 				/* Reverse: if drop height is within jump reach, also create
 				   a jump link from the landing floor back up to the edge.
@@ -1907,13 +2601,15 @@ static int nav_link_callback(
 					lc[0] = end[0]; lc[1] = end[1]; lc[2] = floors[fi] + 24.0f;
 					land_in_liquid = (SV_PointContents(lc) <= CONTENTS_WATER);
 				}
+				DDBG("floor %.0f: reverse jump drop=%.0f peak=%.1f liquid=%d",
+					floors[fi], drop_height, peak, land_in_liquid);
 				if (!land_in_liquid &&
 					drop_height >= NAV_JUMP_HEIGHT_MIN && drop_height <= peak)
 				{
-					float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * drop_height;
+					float disc = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE - 2.0f * gravity * drop_height;
 					if (disc >= 0)
 					{
-						float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+						float time_up = (NAV_PHYS_JUMP_IMPULSE - sqrtf(disc)) / gravity;
 						float jspeed = land_dist / time_up;
 						if (jspeed <= maxspeed)
 						{
@@ -1961,7 +2657,7 @@ static int nav_link_callback(
 				probe[2] = mid[2];
 
 				/* Check for wall at jump apex height — the bot jumps OVER the edge */
-				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + NAV_PLAYER_FLOOR_OFFSET, NULL))
+				if (!nav_trace_clear_at_height(mid, probe, mid[2] + peak + NAV_PHYS_FLOOR_OFFSET, NULL))
 					break; /* wall at jump height — no point probing further */
 
 				/* Find a floor ABOVE the edge at the probe point. */
@@ -1976,9 +2672,9 @@ static int nav_link_callback(
 
 				/* Time to reach jump_height:
 				   h = v0*t - 0.5*g*t^2  →  t = (v0 - sqrt(v0^2 - 2*g*h)) / g */
-				float disc = NAV_JUMP_IMPULSE * NAV_JUMP_IMPULSE - 2.0f * gravity * jump_height;
+				float disc = NAV_PHYS_JUMP_IMPULSE * NAV_PHYS_JUMP_IMPULSE - 2.0f * gravity * jump_height;
 				if (disc < 0) continue;
-				float time_up = (NAV_JUMP_IMPULSE - sqrtf(disc)) / gravity;
+				float time_up = (NAV_PHYS_JUMP_IMPULSE - sqrtf(disc)) / gravity;
 				float speed = step / time_up;
 
 				if (speed > maxspeed)
@@ -2140,6 +2836,36 @@ static int nav_reaches_any(const nav_mesh_runtime_t *nav_mesh, const float *from
 	return 0;
 }
 
+/* Uniform signature for the conn-loop pass table; each wrapper binds a
+   compute function to its validator so the fixpoint loop below can treat
+   every pass identically. */
+typedef int (*nav_conn_compute_fn)(nav_mesh_runtime_t *, nav_off_mesh_link_t **);
+
+static int nav_conn_pass_directed(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
+{
+	return nav_mesh_compute_directed_links(m, nav_link_validate, nav_dir_drop_validate, NULL, out);
+}
+
+static int nav_conn_pass_gap_jumps(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
+{
+	return nav_mesh_compute_gap_jumps(m, nav_link_validate, NULL, out);
+}
+
+static int nav_conn_pass_rocket_jumps(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
+{
+	return nav_mesh_compute_rocket_jumps(m, nav_link_validate, NULL, nav_rj_has_value, NULL, out);
+}
+
+static int nav_conn_pass_swim_links(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
+{
+	return nav_mesh_compute_swim_links(m, nav_swim_link_validate, NULL, out);
+}
+
+static int nav_conn_pass_deep_drops(nav_mesh_runtime_t *m, nav_off_mesh_link_t **out)
+{
+	return nav_mesh_compute_deep_drops(m, nav_deep_drop_validate, NULL, out);
+}
+
 void Nav_BuildForMap(void)
 {
 	nav_mesh_build_config_t config;
@@ -2150,6 +2876,7 @@ void Nav_BuildForMap(void)
 	int vert_count = 0;
 	int *tris = NULL;
 	int tri_count = 0;
+	unsigned char *tri_hazard = NULL;
 	char error[256];
 	double t_start, t_done;
 
@@ -2165,7 +2892,7 @@ void Nav_BuildForMap(void)
 	   link validation then match the raster exactly. */
 	nav_doors_open_for_build();
 
-	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count))
+	if (!nav_extract_bsp(sv.worldmodel, &verts, &vert_count, &tris, &tri_count, &tri_hazard))
 	{
 		Con_Printf("Nav: BSP extraction failed\n");
 		nav_doors_restore();
@@ -2242,20 +2969,34 @@ void Nav_BuildForMap(void)
 			fprintf(stderr, "Nav: %d level-exit points registered as escapable\n", nexits);
 	}
 
-	/* Single-pass build: entity links provided upfront, jump/drop links
-	   detected mid-build via callback after contours are ready. */
-	memset(&summary, 0, sizeof(summary));
+	/* Run the Recast pipeline exactly once: off-mesh links never affect
+	   Recast geometry (the jump/drop link callback fires here, off contour
+	   edges + heightfield), so every link-set change below only needs the
+	   Detour tile re-emitted from this bake -- provably identical output
+	   to a full rebuild. */
 	memset(error, 0, sizeof(error));
-	nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-		&config, entity_links, entity_count, &summary,
+	nav_mesh_bake_t *bake = nav_mesh_bake_begin(verts, vert_count, tris, tri_count,
+		tri_hazard, &config,
 		nav_jump_links_cvar.value ? nav_link_callback : NULL, NULL,
 		error, sizeof(error));
+	if (bake == NULL)
+	{
+		Con_Printf("Nav: build failed: %s\n", error);
+		nav_doors_restore();
+		free(verts); free(tris); free(tri_hazard); free(entity_links);
+		return;
+	}
+
+	memset(error, 0, sizeof(error));
+	nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+		&summary, error, sizeof(error));
 
 	if (nav_mesh == NULL)
 	{
 		Con_Printf("Nav: build failed: %s\n", error);
+		nav_mesh_bake_end(bake);
 		nav_doors_restore();
-		free(verts); free(tris); free(entity_links);
+		free(verts); free(tris); free(tri_hazard); free(entity_links);
 		return;
 	}
 
@@ -2276,200 +3017,192 @@ void Nav_BuildForMap(void)
 			free(ojumps);
 
 			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
 			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
+			nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+				&summary, error, sizeof(error));
 			if (nav_mesh == NULL)
 			{
 				Con_Printf("Nav: rebuild failed: %s\n", error);
+				nav_mesh_bake_end(bake);
 				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
+				free(verts); free(tris); free(tri_hazard); free(entity_links);
 				return;
 			}
 		}
 	}
 
-	/* Third pass: complete one-way connectivity.  Runs on the mesh that
-	   already has teleport/plat/orphan links, so it can see which areas can
-	   only be entered or only exited, and add the missing direction. */
-	if (nav_mesh != NULL && nav_directed_links_cvar.value)
-	{
-		nav_off_mesh_link_t *dlinks = NULL;
-		int nd = nav_mesh_compute_directed_links(nav_mesh, nav_link_validate, NULL, &dlinks);
-		if (nd > 0)
+	/* Passes 3-7 add connectivity in a fixed order, but a later pass can
+	   newly unblock an earlier one: gap-jumps stitching together a broken
+	   staircase's tiny, mutually-unlinked ground fragments can hand
+	   directed-links a forward-reachable neighbor it didn't have on the
+	   first try, and a rocket-jump/swim/deep-drop link can do the same for
+	   some other pocket.  Each pass already iterates its OWN rounds to a
+	   fixpoint; loop the whole block too so a chain across pass TYPES gets
+	   fully resolved as well (e4m6's RL ledge needs exactly this: gap-jumps
+	   must bridge a stair fragment before directed-links can find its IN
+	   link).  Bounded rounds -- a mesh with nothing left to fix converges
+	   in one extra no-op round. */
+	struct conn_pass_t {
+		cvar_t *cvar;
+		nav_conn_compute_fn compute;
+		int rounds;
+	};
+	static const conn_pass_t conn_passes[] = {
+		/* Third pass: complete one-way connectivity.  Runs on the mesh
+		   that already has teleport/plat/orphan links, so it can see which
+		   areas can only be entered or only exited, and add the missing
+		   direction. */
+		{ &nav_directed_links_cvar, nav_conn_pass_directed, 1 },
+		/* Fourth pass: bridge local connectivity gaps.  Runs on the mesh
+		   with every other link in place, so its findPath gate sees the
+		   real graph and only adds a run-jump where two ledges still have
+		   no route between them (dm3 wp62->wp63). */
+		{ &nav_gap_jumps_cvar, nav_conn_pass_gap_jumps, 1 },
+		/* Fifth pass: rocket-jump links to high ledges out of run-jump
+		   reach, gated so the high end can already get back down (no
+		   launcher-less trap).  Sees every link added so far. */
+		{ &nav_rocket_jumps_cvar, nav_conn_pass_rocket_jumps, 1 },
+		/* Sixth pass: bidirectional swim links across components whose
+		   rims connect through fully-submerged water (e4m8 canal tunnel,
+		   end's underwater ledge).  Runs before the deep drops: a water
+		   landing's only way OUT is often a swim (e3m5's hole floor swims
+		   to the wind tunnel), and the drop pass's no-trap gate must see
+		   that route. */
+		{ &nav_swim_links_cvar, nav_conn_pass_swim_links, 1 },
+		/* Seventh pass: deep one-way drops (past the boundary detector's
+		   192u cap) into lower regions with no other way in, gated on the
+		   landing already having a way back OUT.  Runs after every other
+		   link pass in the round so both its no-access and no-trap
+		   findPath gates see the real graph.  Iterates to fixpoint: a pit
+		   whose only exit is itself a deep drop (e3m5's ogre platform over
+		   the hole) fails the no-trap gate on the first round -- its
+		   escape link doesn't exist yet.  Once round 1 adds the outbound
+		   drop, round 2 can accept the inbound one.  The no-access gate
+		   skips already-linked pairs, so rounds never duplicate. */
+		{ &nav_deep_drops_cvar, nav_conn_pass_deep_drops, 3 },
+	};
+
+	/* Run one compute pass on the current mesh; append any new links and
+	   rebuild the mesh so later passes see them.  Returns 1 if links were
+	   added, 0 if nothing new, -1 if the rebuild failed. */
+	auto run_conn_pass = [&](nav_conn_compute_fn compute) -> int {
+		nav_off_mesh_link_t *links = NULL;
+		int n = compute(nav_mesh, &links);
+		if (n <= 0)
+			return 0;
+		entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
+			(size_t)(entity_count + n) * sizeof(*entity_links));
+		memcpy(entity_links + entity_count, links, (size_t)n * sizeof(*entity_links));
+		entity_count += n;
+		free(links);
+
+		nav_mesh_destroy(nav_mesh);
+		memset(error, 0, sizeof(error));
+		nav_mesh = nav_mesh_bake_realize(bake, entity_links, entity_count,
+			&summary, error, sizeof(error));
+		if (nav_mesh == NULL)
 		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nd) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, dlinks, (size_t)nd * sizeof(*entity_links));
-			entity_count += nd;
-			free(dlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
-			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
-				return;
-			}
+			Con_Printf("Nav: rebuild failed: %s\n", error);
+			return -1;
 		}
-	}
+		return 1;
+	};
 
-	/* Fourth pass: bridge local connectivity gaps.  Runs last, on the mesh
-	   with every other link in place, so its findPath gate sees the real
-	   graph and only adds a run-jump where two ledges still have no route
-	   between them (dm3 wp62->wp63). */
-	if (nav_mesh != NULL && nav_gap_jumps_cvar.value)
+	int conn_round = 0;
+	bool conn_progress = true;
+	while (nav_mesh != NULL && conn_progress && conn_round++ < 2)
 	{
-		nav_off_mesh_link_t *glinks = NULL;
-		int ng = nav_mesh_compute_gap_jumps(nav_mesh, nav_link_validate, NULL, &glinks);
-		if (ng > 0)
-		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + ng) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, glinks, (size_t)ng * sizeof(*entity_links));
-			entity_count += ng;
-			free(glinks);
+		conn_progress = false;
 
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
+		for (size_t pi = 0; pi < sizeof(conn_passes) / sizeof(conn_passes[0]); pi++)
+		{
+			if (nav_mesh == NULL || !conn_passes[pi].cvar->value)
+				continue;
+			for (int round = 0; round < conn_passes[pi].rounds; round++)
 			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
-				return;
+				int r = run_conn_pass(conn_passes[pi].compute);
+				if (r < 0)
+				{
+					nav_mesh_bake_end(bake);
+					nav_doors_restore();
+					free(verts); free(tris); free(tri_hazard); free(entity_links);
+					return;
+				}
+				if (r == 0)
+					break;
+				conn_progress = true;
 			}
 		}
 	}
 
-	/* Fifth pass: rocket-jump links to high ledges out of run-jump reach,
-	   gated so the high end can already get back down (no launcher-less
-	   trap).  Runs last so its reachability gate sees every other link. */
-	if (nav_mesh != NULL && nav_rocket_jumps_cvar.value)
-	{
-		nav_off_mesh_link_t *rlinks = NULL;
-		int nr = nav_mesh_compute_rocket_jumps(nav_mesh, nav_link_validate, NULL, &rlinks);
-		if (nr > 0)
-		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nr) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, rlinks, (size_t)nr * sizeof(*entity_links));
-			entity_count += nr;
-			free(rlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
-			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
-				return;
-			}
-		}
-	}
-
-	/* Sixth pass: bidirectional swim links across components whose rims
-	   connect through fully-submerged water (e4m8 canal tunnel, end's
-	   underwater ledge).  Runs before the deep drops: a water landing's
-	   only way OUT is often a swim (e3m5's hole floor swims to the wind
-	   tunnel), and the drop pass's no-trap gate must see that route. */
-	if (nav_mesh != NULL && nav_swim_links_cvar.value)
-	{
-		nav_off_mesh_link_t *swlinks = NULL;
-		int nsw = nav_mesh_compute_swim_links(nav_mesh, nav_swim_link_validate, NULL, &swlinks);
-		if (nsw > 0)
-		{
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + nsw) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, swlinks, (size_t)nsw * sizeof(*entity_links));
-			entity_count += nsw;
-			free(swlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
-			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
-				return;
-			}
-		}
-	}
-
-	/* Seventh pass: deep one-way drops (past the boundary detector's 192u
-	   cap) into lower regions with no other way in, gated on the landing
-	   already having a way back OUT.  Runs after every other link pass so
-	   both its no-access and no-trap findPath gates see the real graph. */
-	if (nav_mesh != NULL && nav_deep_drops_cvar.value)
-	{
-		/* Iterate to fixpoint: a pit whose only exit is itself a deep drop
-		   (e3m5's ogre platform over the hole) fails the no-trap gate on the
-		   first round -- its escape link doesn't exist yet.  Once round 1
-		   adds the outbound drop, round 2 can accept the inbound one.  The
-		   no-access gate skips already-linked pairs, so rounds never
-		   duplicate. */
-		int ddround;
-		for (ddround = 0; ddround < 3; ddround++)
-		{
-			nav_off_mesh_link_t *ddlinks = NULL;
-			int ndd = nav_mesh_compute_deep_drops(nav_mesh, nav_deep_drop_validate, NULL, &ddlinks);
-			if (ndd <= 0)
-				break;
-			entity_links = (nav_off_mesh_link_t *)realloc(entity_links,
-				(size_t)(entity_count + ndd) * sizeof(*entity_links));
-			memcpy(entity_links + entity_count, ddlinks, (size_t)ndd * sizeof(*entity_links));
-			entity_count += ndd;
-			free(ddlinks);
-
-			nav_mesh_destroy(nav_mesh);
-			memset(&summary, 0, sizeof(summary));
-			memset(error, 0, sizeof(error));
-			nav_mesh = nav_mesh_build(verts, vert_count, tris, tri_count,
-				&config, entity_links, entity_count, &summary,
-				nav_link_callback, NULL, error, sizeof(error));
-			if (nav_mesh == NULL)
-			{
-				Con_Printf("Nav: rebuild failed: %s\n", error);
-				nav_doors_restore();
-				free(verts); free(tris); free(entity_links);
-				return;
-			}
-		}
-	}
-
+	nav_mesh_bake_end(bake);
 	nav_doors_restore();
 
 	free(verts);
 	free(tris);
+	free(tri_hazard);
 	free(entity_links);
 
 	nav_build_block_map();
+	nav_link_fail_reset();
 
 	t_done = Sys_FloatTime();
 	Con_Printf("Nav: %.3fs, %d polys, %d entity links\n",
 		t_done - t_start, summary.polygon_count, entity_count);
+
+	/* BAKESUM: machine-parseable bake fingerprint (nav_harness.sh
+	   MODE=bakesum).  Per-type link counts plus an order-independent
+	   FNV-1a hash over quantized link endpoints, so structural refactors
+	   can be gated on exact bake-output identity instead of noisy soaks.
+	   repair/sliver report compensator firings: nonzero means an
+	   upstream imprecision is being masked. */
+	if (nav_mesh != NULL)
+	{
+		int tcount[10] = {0};
+		struct linkrec { int v[8]; };
+		std::vector<linkrec> recs(nav_mesh->link_count);
+		for (int li = 0; li < nav_mesh->link_count; li++)
+		{
+			const nav_off_mesh_link_t *l = &nav_mesh->links[li];
+			if (l->link_type >= 0 && l->link_type < 10)
+				tcount[l->link_type]++;
+			linkrec *r = &recs[li];
+			/* 0.125u quantization: coarse enough to absorb float
+			   formatting noise, fine enough that no two distinct
+			   links collide. */
+			for (int ci = 0; ci < 3; ci++)
+			{
+				r->v[ci] = (int)lrintf(l->start[ci] * 8.0f);
+				r->v[3 + ci] = (int)lrintf(l->end[ci] * 8.0f);
+			}
+			r->v[6] = l->link_type;
+			r->v[7] = l->bidirectional;
+		}
+		std::sort(recs.begin(), recs.end(),
+			[](const linkrec &a, const linkrec &b) {
+				return memcmp(a.v, b.v, sizeof(a.v)) < 0;
+			});
+		unsigned int hash = 2166136261u;
+		for (size_t ri = 0; ri < recs.size(); ri++)
+		{
+			const unsigned char *p = (const unsigned char *)recs[ri].v;
+			for (size_t bi = 0; bi < sizeof(recs[ri].v); bi++)
+			{
+				hash ^= p[bi];
+				hash *= 16777619u;
+			}
+		}
+		fprintf(stderr, "Nav: BAKESUM map=%s polys=%d verts=%d links=%d"
+			" tele=%d jump=%d drop=%d plat=%d train=%d door=%d rj=%d"
+			" surface=%d walk=%d rounds=%d repair=%d sliver=%d hash=%08x\n",
+			sv.name, summary.polygon_count, summary.navmesh_vertex_count,
+			nav_mesh->link_count,
+			tcount[AI_TELELINK], tcount[AI_JUMP], tcount[AI_DROP],
+			tcount[AI_PLAT_BOTTOM], tcount[AI_RIDE_TRAIN], tcount[AI_DOORFLAG],
+			tcount[AI_SUPER_JUMP], tcount[AI_SURFACE], tcount[AI_WALK],
+			conn_round, summary.regions_repaired, summary.sliver_polys_disabled,
+			hash);
+	}
 
 	/* Validate navmesh against hand-crafted waypoints */
 	if (nav_mesh != NULL)
@@ -2676,6 +3409,13 @@ void Nav_BuildForMap(void)
 			fprintf(stderr, "Nav: CONNECTIVITY: %d/%d spawns resolve to a navmesh floor poly\n",
 				usable_spawns, (int)spawns.size());
 
+			if (getenv("NAV_DUMP_SPAWNS") != NULL)
+			{
+				for (size_t si = 0; si < spawns.size(); si++)
+					fprintf(stderr, "Nav: SPAWNDUMP %s (%.0f %.0f %.0f)\n",
+						spawns[si].cn, spawns[si].pos[0], spawns[si].pos[1], spawns[si].pos[2]);
+			}
+
 			/* A bot respawns AT a spawn point -- it never walks to one, so
 			   inbound reachability (can other spawns path TO this one) is
 			   the wrong question and flags legitimate dead-end spawns
@@ -2791,13 +3531,30 @@ void Nav_BuildForMap(void)
 					float cand[8][3];
 					vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
 					int nc = nav_mesh_query_poly_points(nav_mesh, items[i].pos, he, cand, 8);
+					/* NAV_GRAB_DEBUG="x y z" (item pos, 8u tol): print each
+					   candidate and which stage rejected it. */
+					int gdbg = 0;
+					{
+						const char *ge = getenv("NAV_GRAB_DEBUG");
+						float gx, gy, gz;
+						if (ge != NULL && sscanf(ge, "%f %f %f", &gx, &gy, &gz) == 3
+							&& fabsf(gx - items[i].pos[0]) <= 8.0f
+							&& fabsf(gy - items[i].pos[1]) <= 8.0f
+							&& fabsf(gz - items[i].pos[2]) <= 8.0f)
+							gdbg = 1;
+					}
 					for (int c = 0; c < nc && !reached; c++)
 					{
 						float dz = items[i].pos[2] - cand[c][2];
 						vec3_t js, je;
 						trace_t jtr;
 						if (dz > 102.0f)
+						{
+							if (gdbg)
+								fprintf(stderr, "GRABDBG cand %d (%.0f %.0f %.0f): dz=%.0f too high\n",
+									c, cand[c][0], cand[c][1], cand[c][2], dz);
 							continue;
+						}
 						js[0] = cand[c][0]; js[1] = cand[c][1]; js[2] = cand[c][2] + 24 + 45;
 						je[0] = items[i].pos[0]; je[1] = items[i].pos[1];
 						je[2] = js[2];
@@ -2805,7 +3562,16 @@ void Nav_BuildForMap(void)
 						if (je[2] < items[i].pos[2] - 33.0f) je[2] = items[i].pos[2] - 33.0f;
 						jtr = SV_Move(js, pmins, pmaxs, je, MOVE_NOMONSTERS, NULL);
 						if (jtr.startsolid || jtr.fraction < 0.95f)
+						{
+							if (gdbg)
+								fprintf(stderr, "GRABDBG cand %d (%.0f %.0f %.0f): sweep %s frac=%.2f\n",
+									c, cand[c][0], cand[c][1], cand[c][2],
+									jtr.startsolid ? "startsolid" : "blocked", jtr.fraction);
 							continue;
+						}
+						if (gdbg)
+							fprintf(stderr, "GRABDBG cand %d (%.0f %.0f %.0f): sweep ok, pathing\n",
+								c, cand[c][0], cand[c][1], cand[c][2]);
 						for (size_t j = 0; j < spawns.size() && !reached; j++)
 						{
 							nav_mesh_path_result_t path_result;
@@ -2816,6 +3582,88 @@ void Nav_BuildForMap(void)
 								fprintf(stderr, "Nav: CONNECTIVITY: %s at (%.0f %.0f %.0f) reachable via jump-grab from (%.0f %.0f %.0f)\n",
 									items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2],
 									cand[c][0], cand[c][1], cand[c][2]);
+							}
+						}
+					}
+				}
+				if (!reached)
+				{
+					/* Rocket-jump grab: the same touch logic one tier up.
+					   An alcove item whose only approach is a shaft from
+					   below (hip2m3's secret megahealth over its ambush
+					   pit) sits beyond the plain-jump budget but inside one
+					   rocket's lift (256u) -- the same ceiling the
+					   event-gate skip below already treats as the tallest
+					   climb in the arsenal.  Sweep the hull straight UP
+					   from reachable mesh under the item -- door brushes
+					   are openable, so a closed slab across the shaft
+					   doesn't condemn it -- then level to the item at
+					   touch height. */
+					float he2[3] = {128, 128, 300};
+					float cand2[8][3];
+					vec3_t pmins = {-16, -16, -24}, pmaxs = {16, 16, 32};
+					int nc2 = nav_mesh_query_poly_points(nav_mesh, items[i].pos, he2, cand2, 8);
+					for (int c = 0; c < nc2 && !reached; c++)
+					{
+						float dz = items[i].pos[2] - cand2[c][2];
+						float tz_lo = items[i].pos[2] - 33.0f;
+						float tz = cand2[c][2] + 24.0f + 256.0f;
+						float h = -99999.0f;
+						vec3_t us, ue;
+						trace_t utr;
+						if (dz <= 0.0f || dz > 312.0f)
+							continue;
+						if (tz > items[i].pos[2] + 81.0f)
+							tz = items[i].pos[2] + 81.0f;
+						if (tz < tz_lo)
+							continue;
+						us[0] = cand2[c][0]; us[1] = cand2[c][1];
+						us[2] = cand2[c][2] + 24.0f;
+						for (int hops = 0; hops < 3; hops++)
+						{
+							ue[0] = us[0]; ue[1] = us[1]; ue[2] = tz;
+							utr = SV_Move(us, pmins, pmaxs, ue, MOVE_NOMONSTERS, NULL);
+							if (utr.startsolid || utr.allsolid)
+								break;
+							if (utr.fraction >= 1.0f)
+							{
+								h = tz;
+								break;
+							}
+							edict_t *be = utr.ent;
+							const char *ecn = be != NULL ? pr_strings + (int)be->v.classname : "";
+							if (be == NULL || be == sv.edicts
+								|| (strcmp(ecn, "door") && strncasecmp(ecn, "func_door", 9)))
+							{
+								h = utr.endpos[2];
+								break;
+							}
+							us[2] = be->v.absmax[2] + 25.0f;
+							if (us[2] >= tz)
+							{
+								h = tz;
+								break;
+							}
+						}
+						if (h < tz_lo)
+							continue;
+						if (h < tz)
+							tz = h;
+						us[2] = tz;
+						ue[0] = items[i].pos[0]; ue[1] = items[i].pos[1]; ue[2] = tz;
+						utr = SV_Move(us, pmins, pmaxs, ue, MOVE_NOMONSTERS, NULL);
+						if (utr.startsolid || utr.fraction < 0.95f)
+							continue;
+						for (size_t j = 0; j < spawns.size() && !reached; j++)
+						{
+							nav_mesh_path_result_t path_result;
+							char perr[128];
+							if (nav_mesh_find_path(nav_mesh, spawns[j].pos, cand2[c], &path_result, perr, sizeof(perr)))
+							{
+								reached = 1;
+								fprintf(stderr, "Nav: CONNECTIVITY: %s at (%.0f %.0f %.0f) reachable via rocket-jump grab from (%.0f %.0f %.0f)\n",
+									items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2],
+									cand2[c][0], cand2[c][1], cand2[c][2]);
 							}
 						}
 					}
@@ -2850,6 +3698,40 @@ void Nav_BuildForMap(void)
 							gto[2] - gfrom[2]);
 						continue;
 					}
+					/* Gap-chord fallbacks: the gate measures PLAYER
+					   reachability, and two real routes never make it into
+					   the mesh.  (1) Eroded staircases -- terrain narrower
+					   than the walkable radius that any player just walks
+					   up with engine step-up.  (2) Rocket-jump boardings --
+					   the directed pass deliberately never bakes RJ links
+					   (bots grind them), so an island whose only entry is
+					   one rocket's lift stays one-way in the mesh while a
+					   player enters it fine.  Validate the closest-pair
+					   chord with the hull walker, then the full movement
+					   envelope (jump family + RJ); either proves a player
+					   crosses the gap. */
+					if (have_gap)
+					{
+						const char *how = NULL;
+						if (nav_stair_walk_chord(gfrom, gto))
+							how = "stair-walk";
+						else if (nav_link_validate(gfrom, gto, NULL))
+							how = "movement envelope";
+						if (how != NULL)
+						{
+							nav_mesh_path_result_t spr;
+							char sperr[128];
+							if (nav_mesh_find_path(nav_mesh, gto, items[i].pos, &spr, sperr, sizeof(sperr)))
+							{
+								reached = 1;
+								fprintf(stderr, "Nav: CONNECTIVITY: %s at (%.0f %.0f %.0f) reachable via %s (%.0f %.0f %.0f)->(%.0f %.0f %.0f)\n",
+									items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], how,
+									gfrom[0], gfrom[1], gfrom[2], gto[0], gto[1], gto[2]);
+							}
+						}
+					}
+					if (!reached)
+					{
 					item_unreachable++;
 					fprintf(stderr, "Nav: CONNECTIVITY unreachable %s at (%.0f %.0f %.0f): unreachable from every spawn (%s)\n",
 						items[i].cn, items[i].pos[0], items[i].pos[1], items[i].pos[2], lasterr);
@@ -2858,6 +3740,7 @@ void Nav_BuildForMap(void)
 							gfrom[0], gfrom[1], gfrom[2], gto[0], gto[1], gto[2],
 							gfrom[2] - gto[2],
 							sqrtf((gfrom[0]-gto[0])*(gfrom[0]-gto[0]) + (gfrom[1]-gto[1])*(gfrom[1]-gto[1])));
+					}
 				}
 			}
 
@@ -2871,8 +3754,6 @@ void Nav_BuildForMap(void)
 	}
 
 	/* Inline diagnostics removed — see Nav_Validate() in nav_val.cpp */
-
-	/* ---- DM4 stairway connectivity probe — REMOVED ---- */
 #if 0 /* inline diagnostics moved to nav_val.cpp */
 	if (nav_mesh != NULL && !strcasecmp(sv.name, "dm4"))
 	{
@@ -3230,6 +4111,9 @@ void Nav_Shutdown(void)
 	nav_bot_want_func = 0;
 	nav_block_map_count = 0;
 	nav_blocked.count = 0;
+	free(nav_link_fail_until);
+	nav_link_fail_until = NULL;
+	nav_link_fail_count = 0;
 	if (nav_mesh != NULL)
 	{
 		nav_mesh_destroy(nav_mesh);
@@ -3245,6 +4129,7 @@ void Nav_Shutdown(void)
 				nav_corridor_destroy(nav_bot_corridors[ci]);
 				nav_bot_corridors[ci] = NULL;
 			}
+			nav_bot_steer_link[ci] = 0;
 		}
 	}
 	if (nav_debug_polys != NULL)
@@ -3347,20 +4232,29 @@ static void PF_nav_stub(void)
 /* A bot may be routed onto a rocket-jump link only if it can actually pay
    for the launch: owns the launcher, has a rocket loaded, and enough health
    to survive the self-damage (>75).  Otherwise RJ links are excluded from
-   its pathing and it takes the normal route the safety gate guarantees. */
+   its pathing and it takes the normal route the safety gate guarantees.
+   Quad damage (IT_QUAD) is excluded outright regardless of health: quad
+   quadruples self-splash too (combat.qc T_Damage), turning the ~60-point
+   worst-case point-blank splash the health check budgets for into ~240 --
+   no health/armor a bot can carry survives that, so RJ is simply off the
+   table while quad is running rather than trying to raise the bar. */
 #define NAV_IT_ROCKET_LAUNCHER 32
+#define NAV_IT_QUAD 4194304
 static int nav_bot_can_rj(edict_t *bot)
 {
 	if (bot == NULL)
 		return 0;
 	return ((int)bot->v.items & NAV_IT_ROCKET_LAUNCHER)
+		&& !((int)bot->v.items & NAV_IT_QUAD)
 		&& bot->v.ammo_rockets > 0.0f
 		&& bot->v.health > 75.0f;
 }
 
 /* vector nav_path_steer(vector pos) = #84
-   Uses dtPathCorridor to get next steering corner.
-   Returns corner position. Off-mesh links encoded in Z (10000 + type).
+   Uses dtPathCorridor to get next steering corner.  When the corner is
+   an off-mesh link, the slot's steer-link ref is set so the metadata
+   builtins (nav_link_info & co) describe it; the corner itself comes
+   back untouched.
    Returns '0 0 0' if corridor is empty. */
 static void PF_nav_path_steer(void)
 {
@@ -3378,6 +4272,7 @@ static void PF_nav_path_steer(void)
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;
+	nav_bot_steer_link[slot] = 0;
 
 	if (nav_bot_corridors[slot] == NULL) return;
 	if (nav_mesh == NULL) return;
@@ -3388,25 +4283,173 @@ static void PF_nav_path_steer(void)
 		nav_bot_can_rj(PROG_TO_EDICT(pr_global_struct->self)));
 
 	if (!navigate(nav_bot_corridors[slot], nav_mesh, pos,
-		corner, &flags, &ref))
+		corner, &flags, &ref, nav_bot_standable))
 		return;
 
 	G_FLOAT(OFS_RETURN + 0) = corner[0];
 	G_FLOAT(OFS_RETURN + 1) = corner[1];
 	G_FLOAT(OFS_RETURN + 2) = corner[2];
 
-	/* encode off-mesh link type in corner z for the QC side */
+	/* off-mesh corner: publish the link ref for the metadata builtins */
 	if (flags & 0x04) /* DT_STRAIGHTPATH_OFFMESH_CONNECTION */
 	{
 		int lt = nav_mesh_get_link_type(nav_mesh, ref);
-		if (lt > 0)
+
+		/* A link a bot recently gave up on (see PF_nav_fail_current_link)
+		   is still cooling down -- report a dead corridor (0 0 0) instead
+		   of steering back onto it.  QC's existing dead-corridor handling
+		   in bot_get() then abandons the goal cleanly rather than the bot
+		   walking straight back into the same link it just failed. */
+		int idx = nav_mesh_get_link_index(nav_mesh, ref);
+		if (idx >= 0 && idx < nav_link_fail_count
+			&& sv.time < nav_link_fail_until[idx])
 		{
-			/* Multiplicative encoding so QC can recover both type and
-			   corner z: z' = z + 10000*(1+type).  Additive (+10000+type)
-			   was ambiguous — type and z can't be separated. */
-			G_FLOAT(OFS_RETURN + 2) = corner[2] + 10000.0f * (1.0f + (float)lt);
+			G_FLOAT(OFS_RETURN + 0) = 0.0f;
+			G_FLOAT(OFS_RETURN + 1) = 0.0f;
+			G_FLOAT(OFS_RETURN + 2) = 0.0f;
+			return;
 		}
+
+		if (lt > 0)
+			nav_bot_steer_link[slot] = ref;
 	}
+}
+
+
+/* void nav_fail_current_link(entity bot) = #96
+   Mark the off-mesh link the bot is currently mid-traversal on (if any) as
+   temporarily failed: nobody routes through it or steers onto it again for
+   NAV_LINK_FAIL_COOLDOWN seconds.  Called from QC when a bot has spent too
+   long stuck executing the same link (e.g. repeatedly failing a jump) --
+   see the continuous-time-in-link-execution check in bot_get(). Distinct
+   from the existing net-displacement stall check: a bot can be genuinely
+   "moving" (bouncing off a ledge) while still never clearing the link. */
+static void PF_nav_fail_current_link(void)
+{
+	int slot;
+	unsigned long long ref;
+	int idx;
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_bot_corridors[slot] == NULL) return;
+	if (nav_mesh == NULL) return;
+
+	/* Deliberately the corridor's PENDING ref, not the steer-link ref the
+	   metadata builtins use: pending is only set once the bot committed
+	   (36u advance trigger), so only genuine mid-traversal failures cool
+	   the link down.  Wiring this to the steer ref let a bot stalled on
+	   the APPROACH (crowded lane, long walk-in) condemn a healthy link
+	   map-wide for everyone -- e1m1/e3m6 goalfail storms. */
+	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	if (ref == 0) return;
+
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_link_fail_count) return;
+
+	if (nav_debug_cvar.value)
+		Con_Printf("LINKFAIL bot=%s link=%d cooldown=%.0fs\n",
+			pr_strings + (int)PROG_TO_EDICT(pr_global_struct->self)->v.netname,
+			idx, NAV_LINK_FAIL_COOLDOWN);
+
+	nav_link_fail_until[idx] = sv.time + NAV_LINK_FAIL_COOLDOWN;
+}
+
+
+/* vector nav_link_info(float field) = #91
+   Bake-time metadata for the off-mesh link behind the calling bot's
+   current steer corner (approach and traversal alike) -- this is the
+   sole channel for link type since the z-encoding retired.
+   Returns '0 0 0' when the steer corner is plain ground.
+     field 0: (link_type, required_speed, wait_time)
+     field 1: start endpoint (Quake coords)
+     field 2: end endpoint (Quake coords)
+     field 3: (height_delta, bidirectional, radius)
+     field 4: (serve_ent, 0, 0) -- edict number of the plat/train serving
+              the link, 0 when no entity serves it */
+static void PF_nav_link_info(void)
+{
+	int field = (int)G_FLOAT(OFS_PARM0);
+	int slot, idx;
+	unsigned long long ref;
+	const nav_off_mesh_link_t *l;
+
+	G_FLOAT(OFS_RETURN + 0) = 0.0f;
+	G_FLOAT(OFS_RETURN + 1) = 0.0f;
+	G_FLOAT(OFS_RETURN + 2) = 0.0f;
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_mesh == NULL) return;
+
+	ref = nav_bot_steer_link[slot];
+	if (ref == 0) return;
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_mesh->link_count) return;
+	l = &nav_mesh->links[idx];
+
+	switch (field)
+	{
+	case 0:
+		G_FLOAT(OFS_RETURN + 0) = (float)l->link_type;
+		G_FLOAT(OFS_RETURN + 1) = l->required_speed;
+		G_FLOAT(OFS_RETURN + 2) = l->wait_time;
+		break;
+	case 1:
+		G_FLOAT(OFS_RETURN + 0) = l->start[0];
+		G_FLOAT(OFS_RETURN + 1) = l->start[1];
+		G_FLOAT(OFS_RETURN + 2) = l->start[2];
+		break;
+	case 2:
+		G_FLOAT(OFS_RETURN + 0) = l->end[0];
+		G_FLOAT(OFS_RETURN + 1) = l->end[1];
+		G_FLOAT(OFS_RETURN + 2) = l->end[2];
+		break;
+	case 3:
+		G_FLOAT(OFS_RETURN + 0) = l->height_delta;
+		G_FLOAT(OFS_RETURN + 1) = (float)l->bidirectional;
+		G_FLOAT(OFS_RETURN + 2) = l->radius;
+		break;
+	case 4:
+		G_FLOAT(OFS_RETURN + 0) = (float)l->serve_ent;
+		break;
+	}
+}
+
+
+/* entity nav_link_serve_ent() = #82
+   The plat/train edict serving the calling bot's pending off-mesh link,
+   recorded at bake time -- replaces QC's runtime nearest-plat scan, which
+   guessed and could pick a different plat than the one the link rides.
+   Returns world when there is no pending link or no serving entity. */
+static void PF_nav_link_serve_ent(void)
+{
+	int slot, idx;
+	unsigned long long ref;
+	const nav_off_mesh_link_t *l;
+
+	G_INT(OFS_RETURN) = EDICT_TO_PROG(sv.edicts);	/* world */
+
+	slot = nav_bot_slot();
+	if (slot < 0) return;
+	if (nav_bot_corridors[slot] == NULL) return;
+	if (nav_mesh == NULL) return;
+
+	/* Deliberately the PENDING ref (set at the 36u advance trigger), not
+	   the steer-link ref nav_link_info uses: the sole consumer is the QC
+	   plat-hold, whose stand-and-wait is only correct once the bot is AT
+	   the shaft.  Publishing the plat for the whole approach made bots
+	   freeze map-wide waiting on a top-parked lift they hadn't reached --
+	   and thus could never trigger down (e1m1/e3m6 goalfail storms). */
+	ref = nav_corridor_pending_link(nav_bot_corridors[slot]);
+	if (ref == 0) return;
+	idx = nav_mesh_get_link_index(nav_mesh, ref);
+	if (idx < 0 || idx >= nav_mesh->link_count) return;
+	l = &nav_mesh->links[idx];
+
+	if (l->serve_ent <= 0 || l->serve_ent >= sv.num_edicts) return;
+	if (EDICT_NUM(l->serve_ent)->free) return;
+	G_INT(OFS_RETURN) = EDICT_TO_PROG(EDICT_NUM(l->serve_ent));
 }
 
 
@@ -3575,6 +4618,13 @@ static edict_t *nav_door_opener(edict_t *ent, int depth)
 
 /* ---- nav_find_goal: pick best item, pathfind, cache path ---- */
 
+/* cost = (1-want)*dist lets want=1 zero the distance term entirely, so a
+   marginally-more-wanted item across the map beats an adequate one at the
+   bot's feet (a bot on low health would cross the whole map for red armor
+   past a nearby health pack). Flooring the want factor keeps distance a
+   real tiebreaker even when want saturates near 1. */
+#define NAV_GOAL_WANT_FLOOR 0.15f
+
 extern "C" dfunction_t *ED_FindFunction(char *name);
 extern "C" void PR_ExecuteProgram(func_t fnum);
 
@@ -3596,9 +4646,14 @@ static void PF_nav_find_goal(void)
 	Nav_EnsureBuilt();
 	if (nav_mesh == NULL) return;
 
-	/* Lazy item cache — wait until QC has classified items (item_res set) */
-	if (nav_item_count == 0)
+	/* Lazy item cache — wait until QC has classified items (item_res set).
+	   Re-cache every 10s so backpacks spawned mid-match (from bot deaths)
+	   get poly refs too, matching QC's own map_stuff() re-scan cadence. */
+	if (nav_item_count == 0 || sv.time > nav_item_cache_time + 10.0)
+	{
 		nav_cache_item_polys();
+		nav_item_cache_time = sv.time;
+	}
 
 	slot = nav_bot_slot();
 	if (slot < 0) return;
@@ -3629,16 +4684,32 @@ static void PF_nav_find_goal(void)
 
 	bestcost = 999999.0f;
 	best = sv.edicts;
+	float best_want = 0.0f;
 
-	/* Failed-goal cooldown: QC marks the goal it stalled on; skip it so
-	   the deterministic scorer can't immediately re-pick it and recreate
-	   the same jam. */
-	edict_t *failed_goal = NULL;
+	/* Highest-magnitude reachable candidate, tracked purely for the
+	   GOAL_PICK telemetry line (src/tools/ffa_triage.py) -- did the
+	   scorer pass up a bigger prize for something cheaper? */
+	edict_t *top_mag_it = NULL;
+	float top_mag_val = 0.0f;
+
+	/* Failed-goal cooldown: QC marks the goal(s) it stalled on; skip them
+	   so the deterministic scorer can't immediately re-pick and recreate
+	   the same jam. 4-slot ring (see bot_mark_failed_goal in bot_move.qc)
+	   with exponential per-goal backoff: a 2-slot "remember the most
+	   recent 2 distinct failures" scheme forgets the 1st failure's
+	   remaining cooldown the instant a 3rd distinct goal fails, letting
+	   the scorer immediately re-pick it and repeat a 3+-item cycle. */
+	edict_t *failed_goal[4] = { NULL, NULL, NULL, NULL };
 	{
-		eval_t *fg = GetEdictFieldValue(bot, "_failed_goal");
-		eval_t *fgt = GetEdictFieldValue(bot, "_failed_goal_time");
-		if (fg && fgt && fgt->_float > sv.time && fg->edict)
-			failed_goal = PROG_TO_EDICT(fg->edict);
+		static char *fg_fields[4] = { "_fg0", "_fg1", "_fg2", "_fg3" };
+		static char *fgt_fields[4] = { "_fg0_time", "_fg1_time", "_fg2_time", "_fg3_time" };
+		for (int s = 0; s < 4; s++)
+		{
+			eval_t *fg = GetEdictFieldValue(bot, fg_fields[s]);
+			eval_t *fgt = GetEdictFieldValue(bot, fgt_fields[s]);
+			if (fg && fgt && fgt->_float > sv.time && fg->edict)
+				failed_goal[s] = PROG_TO_EDICT(fg->edict);
+		}
 	}
 
 	int dbg_avail = 0, dbg_wanted = 0, dbg_pathed = 0, dbg_blocked = 0;
@@ -3647,7 +4718,9 @@ static void PF_nav_find_goal(void)
 	{
 		it = nav_item_cache[i].ent;
 		if (it->free) continue;
-		if (it == failed_goal) continue;
+		if (it == failed_goal[0] || it == failed_goal[1]
+			|| it == failed_goal[2] || it == failed_goal[3])
+			continue;
 
 		if ((int)it->v.flags & FL_ITEM)
 			if (!it->v.model) continue;
@@ -3693,6 +4766,13 @@ static void PF_nav_find_goal(void)
 				continue;
 			}
 		}
+		if (nav_path_has_cooling_link(path, path_count))
+		{
+			if (nav_debug_cvar.value)
+				fprintf(stderr, "  COOLING to %s (%d polys)\n",
+					pr_strings + (int)it->v.classname, path_count);
+			continue;
+		}
 
 		dbg_pathed++;
 
@@ -3708,7 +4788,8 @@ static void PF_nav_find_goal(void)
 				   goal pass routes straight through. */
 				edict_t *opener = blocker ? nav_door_opener(blocker, 0) : NULL;
 				int routed = 0;
-				if (opener && opener != failed_goal)
+				if (opener && opener != failed_goal[0] && opener != failed_goal[1]
+					&& opener != failed_goal[2] && opener != failed_goal[3])
 				{
 					float oq[3], orc[3], onear[3];
 					float oext[3] = {64.0f, 128.0f, 64.0f};
@@ -3727,7 +4808,8 @@ static void PF_nav_find_goal(void)
 						int ook = 0;
 						if (!dtStatusFailed(os) && ocount > 0
 							&& !(dtStatusDetail(os, DT_PARTIAL_RESULT)
-								&& opath[ocount - 1] != oref))
+								&& opath[ocount - 1] != oref)
+							&& !nav_path_has_cooling_link(opath, ocount))
 						{
 							int obc = nav_path_block_class(opath, ocount, bot, &oblk);
 							if (obc != 1)
@@ -3753,11 +4835,12 @@ static void PF_nav_find_goal(void)
 						if (ook)
 						{
 							dist = (float)ocount * 48.0f;
-							cost = (1.0f - want) * dist + 400.0f;
+							cost = fmaxf(1.0f - want, NAV_GOAL_WANT_FLOOR) * dist + 400.0f;
 							if (cost < bestcost)
 							{
 								bestcost = cost;
 								best = opener;
+								best_want = want;
 								best_path_count = ocount;
 								memcpy(best_path, opath, (size_t)ocount * sizeof(dtPolyRef));
 								memcpy(best_goal_rc, onear, sizeof(float) * 3);
@@ -3775,9 +4858,22 @@ static void PF_nav_find_goal(void)
 				continue;
 			}
 			dist = (float)path_count * 48.0f;
-			cost = (1.0f - want) * dist;
+			cost = fmaxf(1.0f - want, NAV_GOAL_WANT_FLOOR) * dist;
 			if (bc == 2)
 				cost += 200.0f; /* opening the door costs a moment */
+		}
+
+		/* Highest-magnitude item actually walkable right now (not stuck
+		   behind a closed door) -- tracked after the block check so the
+		   SKIPPED telemetry never blames the scorer for passing up a
+		   prize that wasn't reachable without a detour in the first place. */
+		{
+			eval_t *mag = GetEdictFieldValue(it, "item_mag");
+			if (mag && mag->_float > top_mag_val)
+			{
+				top_mag_val = mag->_float;
+				top_mag_it = it;
+			}
 		}
 
 		/* Log each reachable item's cost breakdown */
@@ -3796,6 +4892,7 @@ static void PF_nav_find_goal(void)
 		{
 			bestcost = cost;
 			best = it;
+			best_want = want;
 			best_path_count = path_count;
 			memcpy(best_path, path, (size_t)path_count * sizeof(dtPolyRef));
 			memcpy(best_goal_rc, nav_item_cache[i].nav_pos, sizeof(float) * 3);
@@ -3858,7 +4955,8 @@ static void PF_nav_find_goal(void)
 				bot_ref, roam_ref, bot_nearest, roam_rc,
 				&plain_filter, path, &path_count, NAV_MESH_MAX_PATH_REFS);
 			if (dtStatusSucceed(ps) && path_count > 0
-				&& nav_path_block_class(path, path_count, bot, NULL) != 1)
+				&& nav_path_block_class(path, path_count, bot, NULL) != 1
+				&& !nav_path_has_cooling_link(path, path_count))
 			{
 				if (nav_debug_cvar.value)
 				{
@@ -3873,6 +4971,29 @@ static void PF_nav_find_goal(void)
 				best = bot; /* sentinel: have a corridor, no item */
 			}
 		}
+	}
+
+	/* GOAL_PICK telemetry for the FFA decision-quality timeline tool
+	   (src/tools/ffa_triage.py) -- always-on like NAVSTAT, one line per
+	   real decision (nav_find_goal only runs when the bot has no goal).
+	   Skipped for the no-goal and roam-sentinel cases; those aren't item
+	   decisions. skip_item/skip_val are blank/0 when the highest-mag
+	   reachable candidate is the one actually picked. */
+	if (best != sv.edicts && best != bot)
+	{
+		eval_t *best_mag_ev = GetEdictFieldValue(best, "item_mag");
+		float best_mag = best_mag_ev ? best_mag_ev->_float : 0.0f;
+		const char *skip_item = "";
+		float skip_val = 0.0f;
+		if (top_mag_it && top_mag_it != best && top_mag_val > best_mag)
+		{
+			skip_item = pr_strings + (int)top_mag_it->v.classname;
+			skip_val = top_mag_val;
+		}
+		Con_Printf("GOAL_PICK time=%.1f bot=%s item=%s want=%.2f cost=%.0f skip_item=%s skip_mag=%.2f\n",
+			sv.time, pr_strings + (int)bot->v.netname,
+			pr_strings + (int)best->v.classname, best_want, bestcost,
+			skip_item, skip_val);
 	}
 
 	/* Load winning path into corridor */
@@ -4035,8 +5156,9 @@ static void PF_nav_report_stats(void)
 		"le_nav=%.0f le_beeline=%.0f le_combat=%.0f le_roam=%.0f tgt=%s dist=%.0f\n",
 		pr_strings + (int)bot->v.netname,
 		core[0], core[1], core[2],
-		env[0], env[1], env[2],
+		env[0], env[1],
 		lava_entries[0], lava_entries[1], lava_entries[2],
+		env[2],
 		tgt, tgt_dist);
 }
 
@@ -4107,10 +5229,75 @@ static void PF_nav_debug_event(void)
 		fwd_tr.fraction, fwd_tr.plane.normal[0], fwd_tr.plane.normal[1], fwd_tr.plane.normal[2], fwd_cn);
 }
 
+/* void nav_log_damage(entity targ, entity attacker, float amount) = #94
+   Structured telemetry for the FFA decision-quality timeline tool
+   (src/tools/ffa_triage.py) -- combat events, always-on like NAVSTAT. */
+static void PF_nav_log_damage(void)
+{
+	edict_t *targ = G_EDICT(OFS_PARM0);
+	edict_t *attacker = G_EDICT(OFS_PARM1);
+	float amount = G_FLOAT(OFS_PARM2);
+
+	Con_Printf("DAMAGE time=%.1f target=%s attacker=%s amount=%.0f health=%.0f armor=%.0f\n",
+		sv.time,
+		pr_strings + (int)targ->v.netname,
+		pr_strings + (int)attacker->v.netname,
+		amount, targ->v.health, targ->v.armorvalue);
+}
+
+/* void nav_log_pickup(entity item, entity bot) = #95
+   Structured telemetry for the FFA decision-quality timeline tool.
+   item_res/item_mag come from bot_goal.qc's map_classify; a freshly
+   spawned backpack not yet classified will log res=0 mag=0.00.
+   self is the item (touch-function convention), so the toucher must
+   be passed explicitly rather than read off pr_global_struct->self. */
+static void PF_nav_log_pickup(void)
+{
+	edict_t *item = G_EDICT(OFS_PARM0);
+	edict_t *bot = G_EDICT(OFS_PARM1);
+
+	eval_t *res = GetEdictFieldValue(item, "item_res");
+	eval_t *mag = GetEdictFieldValue(item, "item_mag");
+
+	Con_Printf("PICKUP time=%.1f bot=%s item=%s res=%.0f mag=%.2f health=%.0f armor=%.0f\n",
+		sv.time,
+		pr_strings + (int)bot->v.netname,
+		pr_strings + (int)item->v.classname,
+		res ? res->_float : 0.0f, mag ? mag->_float : 0.0f,
+		bot->v.health, bot->v.armorvalue);
+}
+
+/* void nav_log_goalfail(entity goal, float dur, float why) = #81
+   Structured telemetry, always-on like NAVSTAT: a bot abandoning a goal
+   it could not reach (bot_mark_failed_goal in bot_move.qc).  The behav
+   regression tier trends the fire RATE per map; each firing is a
+   navigation defect the backoff ring is compensating for.  self is the
+   bot. */
+static void PF_nav_log_goalfail(void)
+{
+	static const char *why_names[] =
+		{ "?", "corridor", "rj_hp", "linkexec", "pin", "stall" };
+	edict_t *bot = PROG_TO_EDICT(pr_global_struct->self);
+	edict_t *goal = G_EDICT(OFS_PARM0);
+	float dur = G_FLOAT(OFS_PARM1);
+	int why = (int)G_FLOAT(OFS_PARM2);
+
+	if (why < 0 || why > 5)
+		why = 0;
+
+	Con_Printf("GOALFAIL time=%.1f bot=%s goal=%s dur=%.0f why=%s pos=(%.0f %.0f %.0f)\n",
+		sv.time,
+		pr_strings + (int)bot->v.netname,
+		pr_strings + (int)goal->v.classname,
+		dur,
+		why_names[why],
+		bot->v.origin[0], bot->v.origin[1], bot->v.origin[2]);
+}
+
 /* ---- Registration ---- */
 
 #define NAV_BUILTIN_BASE  80
-#define NAV_BUILTIN_COUNT 14
+#define NAV_BUILTIN_COUNT 17
 #define NAV_BUILTIN_MAX   (NAV_BUILTIN_BASE + NAV_BUILTIN_COUNT)
 
 static builtin_t nav_extended_builtins[NAV_BUILTIN_MAX];
@@ -4126,8 +5313,8 @@ void Nav_RegisterBuiltins(void)
 		nav_extended_builtins[i] = pr_builtins[0];
 
 	nav_extended_builtins[NAV_BUILTIN_BASE + 0] = PF_nav_ready;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 1] = PF_nav_stub;      /* was nav_move */
-	nav_extended_builtins[NAV_BUILTIN_BASE + 2] = PF_nav_stub;      /* was nav_path_start */
+	nav_extended_builtins[NAV_BUILTIN_BASE + 1] = PF_nav_log_goalfail;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 2] = PF_nav_link_serve_ent;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 3] = PF_nav_stub;      /* was nav_route_cost */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 4] = PF_nav_path_steer;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 5] = PF_nav_path_debug;
@@ -4136,9 +5323,12 @@ void Nav_RegisterBuiltins(void)
 	nav_extended_builtins[NAV_BUILTIN_BASE + 8] = PF_nav_stub;      /* was nav_wp_pos */
 	nav_extended_builtins[NAV_BUILTIN_BASE + 9] = PF_nav_block;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 10] = PF_nav_unblock;
-	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_stub;     /* was nav_link_info */
+	nav_extended_builtins[NAV_BUILTIN_BASE + 11] = PF_nav_link_info;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 12] = PF_nav_report_stats;
 	nav_extended_builtins[NAV_BUILTIN_BASE + 13] = PF_nav_debug_event;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 14] = PF_nav_log_damage;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 15] = PF_nav_log_pickup;
+	nav_extended_builtins[NAV_BUILTIN_BASE + 16] = PF_nav_fail_current_link;
 
 	pr_builtins = nav_extended_builtins;
 	pr_numbuiltins = NAV_BUILTIN_MAX;

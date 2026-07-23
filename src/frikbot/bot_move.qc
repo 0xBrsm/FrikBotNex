@@ -49,12 +49,79 @@ this notice in its entirety.
 .float _nav_pin;          // next net-displacement check (corner-independent)
 .vector _nav_pin_org;     // position at last check
 .float _nav_pin_strikes;  // consecutive dead 2s windows
-.entity _failed_goal;     // goal abandoned after a stall (engine skips it)
-.float _failed_goal_time; // cooldown expiry for _failed_goal
+// Link-execution timeout: a bot repeatedly failing to CLEAR an off-mesh
+// link (bounces off a ledge trying to make a jump, say) can still show
+// corner-distance improvement and net displacement every cycle -- both
+// the _progress_stall and _nav_pin_strikes recovery signals above reset
+// on that motion and never latch. Track continuous wall-clock time spent
+// mid-link on the SAME corner instead; motion within the attempt doesn't
+// reset it, only actually clearing the link (link_type -> 0) or the
+// corridor advancing to a new corner does.
+.float _link_exec_start;  // time continuous execution of the current link began, 0 if none
+.vector _link_exec_wp;    // corner the current link timer belongs to
+// Failed-goal cooldown ring: 4 slots, each remembering a distinct
+// abandoned goal's cooldown expiry AND a strike count for exponential
+// backoff (engine skips any goal still on cooldown). 4 slots instead of
+// 2 so a 3-4 item cycle can't evict an unexpired cooldown early -- a
+// 2-slot "remember the most recent 2 distinct failures" scheme forgets
+// the 1st failure's remaining cooldown the instant a 3rd distinct goal
+// fails, letting the bot immediately re-pick it and repeat the cycle.
+.entity _fg0; .float _fg0_time; .float _fg0_strikes;
+.entity _fg1; .float _fg1_time; .float _fg1_strikes;
+.entity _fg2; .float _fg2_time; .float _fg2_strikes;
+.entity _fg3; .float _fg3_time; .float _fg3_strikes;
 .float _nav_backoff;      // until this time, walk _backoff_dir instead
 .vector _backoff_dir;     // retreat direction (give a moving door room)
-.entity _plat_link_pl;    // cached nearest-plat lookup for a AI_PLAT_BOTTOM corner
-.vector _plat_link_wp;    // corner that cache was computed for
+// Livelock backstop: every abandon signal above is phase- or goal-keyed,
+// and a real grind defeats all of them. The 2s net-pin (_nav_pin) samples
+// position at two instants and ALIASES -- an oscillating grind that swings
+// 100u+ off the jam point and back reads as ">24u moved" and never latches;
+// a bot cycling goals in place resets every goal-keyed timer each pick. So
+// a bot could grind one unreachable spot for a whole match (e2m6: locked on
+// item_shells for 90s against a plat the corridor can't clear; e4m8: churns
+// every goal against the same wall corner). Anchor on POSITION and run the
+// clock only while ALSO failing to close on the corner (_progress_stall):
+// a bot making headway or working an item cluster keeps reaching corners
+// and never accumulates; one pinned in a BOT_STUCK_BALL ball with a dead
+// corner for BOT_STUCK_TIME -- however it wiggles, whatever it re-picks --
+// is livelocked, so cool the goal and let the scorer route elsewhere.
+.vector _stuck_org;       // camp anchor (position, not corner)
+.float _stuck_since;      // when the current camp on this goal began, 0 if none
+.entity _stuck_tgt;       // goal the camp anchor belongs to
+.float _stuck_gstart;     // flat dist to the goal when this camp began
+
+// ---- Probe geometry ----
+// All derived from the player hull (VEC_HULL_MIN '-16 -16 -24' /
+// VEC_HULL_MAX '16 16 32': a 32x32 footprint) -- probes that don't
+// scale with the body they're probing for go stale if the hull ever
+// changes, and the bare numbers hide WHY these distances work.
+float BOT_PROBE_SIDE = 16;   // half the footprint: the shoulder itself
+float BOT_PROBE_AHEAD = 48;  // own half-box + one full body ahead
+float BOT_JUMP_WINDOW = 64;  // two body widths; must stay wider than the
+                             // corridor's 36u link-advance trigger or the
+                             // corner changes before the bot can jump
+
+// ---- Livelock backstop thresholds ----
+// A bot en route to a reachable goal always does one of two things well
+// inside this window: reaches its corner (headway), or leaves a
+// BOT_STUCK_BALL ball around where it started stalling. Both are generous
+// -- a bot at run speed (320) clears the ball in under a second -- so this
+// only forces an abandon on a genuine grind, never on slow legitimate
+// navigation, a detour, or an item cluster.
+float BOT_STUCK_TIME = 5;    // seconds camped on one goal -> abandon
+float BOT_STUCK_BALL = 384;  // "left the area" radius (flat) -- wide, so the
+                             // window survives a grind's own wide oscillation
+                             // (a veer off the jam point and back doesn't reset
+                             // it). Legit slow nav isn't caught by width -- the
+                             // goal-progress credit below spares it instead.
+float BOT_STUCK_GAIN = 96;   // getting this much closer to the goal resets the
+                             // clock. This is the real grind/legit-nav split:
+                             // a bot winding through complex geometry keeps
+                             // closing distance on its goal and never matures;
+                             // a grind (pinned or oscillating in place) never
+                             // earns the credit. Works at any ball size, unlike
+                             // width or an instantaneous wedge probe, which
+                             // can't tell a wide grind from wide winding nav.
 
 // ---- Debug ----
 .float _dbg_notgt_time;   // throttle for no-target logging
@@ -297,7 +364,10 @@ void() bot_build_movevect =
 	vang_x = vang_z = 0;
 	makevectors(vang);
 
-	spd = sv_maxspeed * 2;
+	if (self.b_speed_cap > 0)
+		spd = self.b_speed_cap;
+	else
+		spd = sv_maxspeed * 2;
 	self.movevect_x = (self.b_wishdir * v_forward) * spd;
 	self.movevect_y = (self.b_wishdir * v_right) * spd;
 	// swimming: send the vertical component as upmove so the bot can
@@ -310,9 +380,249 @@ void() bot_build_movevect =
 
 // ---- Navigation ----
 
+// Exponential backoff, like a rate limiter: a goal that keeps failing
+// gets pushed further out of rotation each time (base, base*2, base*4...)
+// instead of a flat cooldown the deterministic scorer just re-picks the
+// instant it expires. Capped so a truly cursed goal goes quiet for a
+// while but is never written off forever -- a respawn, a jam clearing,
+// or the bot picking up gear that unlocks a new link could all make it
+// reachable again later.
+float BOT_FAILED_GOAL_CAP = 120;
+float(float base, float strikes) bot_backoff_dur =
+{
+	local float d, i;
+	d = base;
+	i = 1;
+	while (i < strikes)
+	{
+		d = d * 2;
+		i = i + 1;
+	}
+	if (d > BOT_FAILED_GOAL_CAP)
+		d = BOT_FAILED_GOAL_CAP;
+	return d;
+};
+
+// bot_mark_failed_goal: cool a goal down so the deterministic scorer can't
+// immediately re-pick it. 4-slot ring (see field comments above) so a
+// 3-4 item cycle can't evict an unexpired cooldown early. Re-failing a
+// goal still tracked in a slot escalates its cooldown (exponential
+// backoff); a goal that's gone quiet for a while (>60s past its last
+// cooldown) is treated as a fresh, one-off blip instead of carrying
+// forward old strikes.
+float BOT_FAILED_GOAL_DECAY = 60;
+void(entity g, float dur, float why) bot_mark_failed_goal =
+{
+	nav_log_goalfail(g, dur, why);
+	if (self._fg0 == g)
+	{
+		if (time > self._fg0_time + BOT_FAILED_GOAL_DECAY)
+			self._fg0_strikes = 0;
+		self._fg0_strikes = self._fg0_strikes + 1;
+		self._fg0_time = time + bot_backoff_dur(dur, self._fg0_strikes);
+		return;
+	}
+	if (self._fg1 == g)
+	{
+		if (time > self._fg1_time + BOT_FAILED_GOAL_DECAY)
+			self._fg1_strikes = 0;
+		self._fg1_strikes = self._fg1_strikes + 1;
+		self._fg1_time = time + bot_backoff_dur(dur, self._fg1_strikes);
+		return;
+	}
+	if (self._fg2 == g)
+	{
+		if (time > self._fg2_time + BOT_FAILED_GOAL_DECAY)
+			self._fg2_strikes = 0;
+		self._fg2_strikes = self._fg2_strikes + 1;
+		self._fg2_time = time + bot_backoff_dur(dur, self._fg2_strikes);
+		return;
+	}
+	if (self._fg3 == g)
+	{
+		if (time > self._fg3_time + BOT_FAILED_GOAL_DECAY)
+			self._fg3_strikes = 0;
+		self._fg3_strikes = self._fg3_strikes + 1;
+		self._fg3_time = time + bot_backoff_dur(dur, self._fg3_strikes);
+		return;
+	}
+
+	// New distinct failure: evict whichever slot frees up soonest --
+	// that's the one with the least remaining cooldown to lose.
+	local float evict, evict_time;
+	evict = 0;
+	evict_time = self._fg0_time;
+	if (self._fg1_time < evict_time) { evict = 1; evict_time = self._fg1_time; }
+	if (self._fg2_time < evict_time) { evict = 2; evict_time = self._fg2_time; }
+	if (self._fg3_time < evict_time) { evict = 3; evict_time = self._fg3_time; }
+
+	if (evict == 0)
+	{
+		self._fg0 = g;
+		self._fg0_time = time + dur;
+		self._fg0_strikes = 1;
+	}
+	else if (evict == 1)
+	{
+		self._fg1 = g;
+		self._fg1_time = time + dur;
+		self._fg1_strikes = 1;
+	}
+	else if (evict == 2)
+	{
+		self._fg2 = g;
+		self._fg2_time = time + dur;
+		self._fg2_strikes = 1;
+	}
+	else
+	{
+		self._fg3 = g;
+		self._fg3_time = time + dur;
+		self._fg3_strikes = 1;
+	}
+};
+
+// Sample a straight line in 32u steps for lava/slime. The navmesh never
+// carves walkable polys over hazard floors, so a corridor never routes
+// through one on purpose — but the last-stretch beeline in bot_get()
+// below bypasses the mesh entirely, and a goal sitting across a lava
+// pool (an item on a mid-pool island with no path in) is close enough
+// as the crow flies to trigger it.
+float(vector from, vector to) nav_hazard_between =
+{
+	local vector dir;
+	local float dist, step, c;
+
+	dist = vlen(to - from);
+	if (dist < 1)
+		return FALSE;
+	dir = (to - from) * (1 / dist);
+	step = 0;
+	while (step <= dist)
+	{
+		c = pointcontents(from + dir * step);
+		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
+			return TRUE;
+		step = step + 32;
+	}
+	return FALSE;
+};
+
+// A single same-height sample only catches hazard flush with the bot's own
+// feet -- it's blind to a ledge/cliff a step ahead that drops into a hazard
+// pool far below (the sample point reads open air, not lava). Step straight
+// down from the ahead point instead (mirrors nav_hazard_between's 32-unit
+// line-stepping above) so a fall-into-hazard is caught the same way a flush
+// hazard already is; stop early once real ground is found.
+//
+// A flat 32-unit lookahead is only one physics tick of travel at run speed
+// (~320 ups) -- real momentum can't turn on a dime, so by the time a check
+// one tick out finally reads unsafe, ground friction needs several more
+// ticks to bleed off the speed already carried toward the edge, walking
+// the bot over it anyway. Scale the lookahead by the bot's own current
+// speed (a physical invariant, not a per-map constant) so it always covers
+// roughly its own coast-to-stop distance.
+//
+// Originally combat-only (strafe/retreat pick a direction purely relative
+// to the enemy, with no ground awareness) -- but the navmesh corridor can
+// have its own connectivity gaps (a poly sequence that funnels a straight
+// line over a hazard the bake never meant to link), so bot_get()'s plain
+// corridor steering (link_type 0) uses this too as a backstop the mesh
+// itself is supposed to make unnecessary.
+//
+// cap_dist bounds how far ahead the sample point can land (0 = uncapped,
+// what combat callers want -- there's no waypoint to overshoot past).
+// bot_get() passes the remaining distance to its corridor corner: without
+// that cap, a bot approaching a turn projects straight through the corner
+// into whatever unrelated geometry (including hazard) happens to sit past
+// it -- geometry the bot was never actually going to enter -- and flags a
+// dead corridor that was never really there.
+float(vector dir, float cap_dist) nav_hazard_ahead =
+{
+	local vector p;
+	local float c, step, lookahead;
+
+	lookahead = 32 + vlen(self.velocity) * 0.3;
+	if (cap_dist > 0 && lookahead > cap_dist)
+		lookahead = cap_dist;
+	p = self.origin + normalize(dir) * lookahead;
+	step = 0;
+	while (step <= 600)
+	{
+		c = pointcontents(p - '0 0 1' * step);
+		if (c == CONTENT_LAVA || c == CONTENT_SLIME)
+			return TRUE;
+		if (c == CONTENT_SOLID)
+			return FALSE;
+		step = step + 32;
+	}
+	return FALSE;
+};
+
+// Opportunistic pickup radius/threshold: nav_find_goal only ever commits
+// to ONE item at a time, so a bot beelining across the map for the RL
+// walked straight past a shotgun or a health box sitting a few steps off
+// its own corridor -- picking it up costs nothing (Quake pickup is a bare
+// touch), so it's worth a small steering nudge without touching the
+// actual goal/path in the C engine.
+// The scorer's own eligibility floor for a PRIMARY goal is want>0.01
+// (nav_bot.cpp PF_nav_find_goal) -- 0.3 here meant a bot would happily
+// cross the map for an item worth 0.1-0.3 as its main goal, yet walk
+// right past that same item sitting on its current path. Set the grab
+// floor just above the scorer's noise floor instead, so "on the way"
+// items are judged by roughly the same bar as "worth a special trip"
+// items -- only truly negligible wants (nearly-topped-off ammo/armor)
+// get skipped.
+float NAV_SIDEGRAB_RADIUS = 150;
+float NAV_SIDEGRAB_WANT = 0.05;
+
+// Look for a high-value item near the bot that's roughly on the way to
+// this frame's steering corner `wp`. Skips the active goal itself (already
+// being pursued), anything behind us (dot product with travel direction),
+// and anything a straight line would cross lava/slime to reach.
+entity(vector wp) bot_sidegrab_scan =
+{
+	local entity e, best;
+	local float w, bestw, d;
+	local vector todir, itemdir;
+
+	todir = wp - self.origin;
+	if (vlen(todir) < 1)
+		return world;
+	todir = normalize(todir);
+
+	best = world;
+	bestw = NAV_SIDEGRAB_WANT;
+	e = findradius(self.origin, NAV_SIDEGRAB_RADIUS);
+	while (e)
+	{
+		if ((e.flags & FL_ITEM) && e.model != string_null && e != self.target1)
+		{
+			d = vlen(e.origin - self.origin);
+			if (d > 1)
+			{
+				itemdir = normalize(e.origin - self.origin);
+				if ((itemdir * todir) > 0.3 && !nav_hazard_between(self.origin, e.origin))
+				{
+					w = bot_want(e);
+					if (w > bestw)
+					{
+						bestw = w;
+						best = e;
+					}
+				}
+			}
+		}
+		e = e.chain;
+	}
+	return best;
+};
+
 // bot_get: follow cached path corridor to target item.
 // Single-authority steering: navigate() returns corner, bot walks toward it.
-// Single recovery: if no progress for 1 second, abandon goal.
+// Recovery: corner-distance stalling for ~1s abandons the goal only if the
+// bot also isn't net-displacing; otherwise the net-displacement pin check
+// (real position, corner-independent) is the deciding signal.
 void() bot_get =
 {
 	local vector wp, steer;
@@ -334,16 +644,44 @@ void() bot_get =
 	wp = navigate(self.origin);
 	if (wp == '0 0 0')
 	{
-		self.target1 = world;
-		return;
+		// Corridor says "arrived" (within 32u of the nav target) or died.
+		// Arriving is NOT the errand: items need a touch, buttons a press.
+		// If the goal entity is right here, walk the last stretch at its
+		// center — the progress stall below cools it if we never connect.
+		// Anything else is a dead corridor: cool the goal before dropping,
+		// or the deterministic scorer re-picks it next frame and the
+		// pick/drop loop pins the bot in place at 20Hz.
+		local vector gc;
+		gc = (self.target1.absmin + self.target1.absmax) * 0.5;
+		if (self.target1 != self && vlen(gc - self.origin) < 128
+			&& !nav_hazard_between(self.origin, gc))
+			wp = gc;
+		else
+		{
+			if (self.target1 != world && self.target1 != self)
+				bot_mark_failed_goal(self.target1, 10, 1); // corridor
+			self.target1 = world;
+			return;
+		}
 	}
 
-	// decode off-mesh link type from Z encoding: z' = z + 10000*(1+type)
-	link_type = 0;
-	if (wp_z > 9000)
+	// off-mesh link type from the metadata channel (0 = plain corner);
+	// the engine keeps it in step with the corner navigate() just gave us
 	{
-		link_type = rint(wp_z / 10000) - 1;
-		wp_z = wp_z - (link_type + 1) * 10000;
+		local vector li_type;
+		li_type = nav_link_info(0);
+		link_type = li_type_x;
+	}
+
+	// incidental pickup: only while on plain ground corridor steering --
+	// mid-jump/drop/rj/plat/train/door the corner IS the errand, swerving
+	// off it risks missing the link entirely.
+	if (link_type == 0)
+	{
+		local entity grab;
+		grab = bot_sidegrab_scan(wp);
+		if (grab != world)
+			wp = grab.origin;
 	}
 
 	// single-authority steering: walk toward the nav corner.
@@ -369,6 +707,21 @@ void() bot_get =
 	else
 		self._m_move_mode = MM_NAV;
 
+	// Backstop: a plain corridor corner is never supposed to route over
+	// hazard (the bake excludes lava/slime floors entirely), but a mesh
+	// connectivity gap can still funnel a straight line over one the bake
+	// never meant to link. Treat it exactly like a dead corridor -- drop
+	// the goal and let the next frame re-plan -- rather than trusting the
+	// mesh blindly and walking in.
+	if (link_type == 0 && nav_hazard_ahead(self.b_wishdir, vlen(steer)))
+	{
+		if (self.target1 != world && self.target1 != self)
+			bot_mark_failed_goal(self.target1, 10, 1); // corridor
+		self.target1 = world;
+		self.b_wishdir = '0 0 0';
+		return;
+	}
+
 	// off-mesh link actions
 	if (link_type == AI_DROP)
 	{
@@ -391,6 +744,31 @@ void() bot_get =
 				flat_to_wp_z = flat_to_wp_z + 24;
 			if (vlen(flat_to_wp) > 0.1)
 				self.b_wishdir = normalize(flat_to_wp);
+
+			// The bake only proved this drop survivable at its modeled
+			// required_speed, not a full sprint -- approaching faster can
+			// overshoot bot_air_guide's correction authority and sail past
+			// the landing shelf into whatever's below it. Throttle the
+			// ground approach to what the mesh actually validated, floored
+			// at the stuck-streak detector's own noise floor (bot_debug_metrics
+			// flags <1u/frame as wedged) rather than a fraction of sv_maxspeed,
+			// which has no inherent relation to the server's tick rate. A bare
+			// 2x margin isn't enough -- ground friction and wall-slide bleed
+			// off some of the commanded speed before it becomes displacement,
+			// so bots parked exactly at a thin floor still dip under 1u/frame
+			// on ordinary noise and keep re-tripping the detector. 4x holds up
+			// under that noise while still well short of sv_maxspeed*0.25.
+			if (self.waterlevel < 2 && (self.flags & FL_ONGROUND))
+			{
+				local vector li_speed;
+				local float cap, noise_floor;
+				li_speed = nav_link_info(0);
+				cap = li_speed_y;
+				noise_floor = 4 / frametime;
+				if (cap < noise_floor)
+					cap = noise_floor;
+				self.b_speed_cap = cap;
+			}
 		}
 	}
 	else if (link_type == AI_JUMP)
@@ -410,7 +788,7 @@ void() bot_get =
 		// Don't commit the jump into a blocked lane: a bot body (or
 		// wall) between here and the link start just bounces the
 		// jumper in place, and airborne frames can't steer around it.
-		if (jdist < 64 && (self.flags & FL_ONGROUND))
+		if (jdist < BOT_JUMP_WINDOW && (self.flags & FL_ONGROUND))
 		{
 			traceline(self.origin, wp + '0 0 24', FALSE, self);
 			if (trace_fraction == 1)
@@ -424,13 +802,30 @@ void() bot_get =
 		// own) and grinds the link forever. Bail on the goal — the area's
 		// rocket-only items go unwanted instead of fatal, and pathing
 		// falls back to a route the bot can actually walk.
-		if (!(self.items & IT_ROCKET_LAUNCHER))
+		// Goal pick only checked health/quad once, at commit time (C side,
+		// nav_bot_can_rj). target1 sticks until the errand's done -- a fight
+		// picked up along the way can chip health well below the safe
+		// margin before the bot ever reaches the launch point, and nothing
+		// re-validates that in between. Re-check here too, or a bot that
+		// was fine when it picked the goal can still splash itself dead
+		// executing a jump it can no longer survive.
+		//
+		// Judge survivability on effective HP (health + armor's damage-save
+		// share), same "armor counts as HP" idiom bot_fight.qc's player
+		// sizing and bot_goal.qc's CAP_ARMOR_EHP already use -- raw health
+		// alone unfairly bails a well-armored bot that's actually safe.
+		//
+		// Worst case self-splash: T_RadiusDamage's rocket blast is 120,
+		// points = 120 - 0.5*dist, halved again for self-hits (combat.qc) --
+		// at point-blank (dist=0) that's a flat 60, before armor. Require
+		// double that (120) so a bot that survives worst-case still has a
+		// real buffer left over, not just barely positive HP.
+		if (!(self.items & IT_ROCKET_LAUNCHER)
+			|| (self.health + self.armorvalue * self.armortype) <= 120
+			|| (self.items & IT_QUAD))
 		{
 			if (self.target1.flags & FL_ITEM)
-			{
-				self._failed_goal = self.target1;
-				self._failed_goal_time = time + 30;
-			}
+				bot_mark_failed_goal(self.target1, 30, 2); // rj_hp
 			self.target1 = world;
 			return;
 		}
@@ -445,9 +840,28 @@ void() bot_get =
 	}
 	else if (link_type == AI_SURFACE)
 	{
-		if (self.waterlevel > 2)
+		// Any water contact counts: a long climb to a distant surface
+		// exit can read waterlevel 1-2 for most of the ascent (ledges,
+		// shafts that aren't uniformly full-depth), not just 3. Gating
+		// on full submersion left the bot with no vertical propulsion
+		// at all for most of the climb -- it just stalled treading in
+		// place until the goal got abandoned.
+		//
+		// Pure '0 0 1' thrust only works when the exit is plumb overhead:
+		// a crossing whose opening sits off to one side just noses the
+		// ceiling forever with no horizontal correction. Keep swimming
+		// toward the corner's XY (same corridor authority as everywhere
+		// else) and add the upward bias on top, instead of discarding it.
+		if (self.waterlevel > 0)
 		{
-			self.b_wishdir = '0 0 1';
+			local vector surf_dir;
+
+			surf_dir = wp - self.origin;
+			surf_dir_z = surf_dir_z + 64;
+			if (vlen(surf_dir) > 0.1)
+				self.b_wishdir = normalize(surf_dir);
+			else
+				self.b_wishdir = '0 0 1';
 			self.button2 = TRUE;
 		}
 	}
@@ -468,71 +882,118 @@ void() bot_get =
 		}
 		else if (link_type == AI_PLAT_BOTTOM)
 		{
-			// Not aboard. If the plat serving this link is ABOVE the
-			// corner we're heading for, hold at the shaft lip — walking
-			// to the exact center means dropping into the pit under it
-			// (and blocking its return). Position, not state: a bot at
-			// the TOP lip must board a top-parked plat or walk off over
-			// a lowered one, never stand waiting. The 8x abandon window
-			// below covers the wait; a dead plat (targeted, never
-			// triggered) still times out.
-			local entity pl, bestpl;
-			local vector pc;
-			local float pd, bestpd;
+			// Not aboard. Board against the PLAT'S OWN deck center, not the
+			// corridor corner: the bake snaps a plat link's endpoint out onto
+			// the surrounding floor (the plat body isn't meshed), often tens
+			// of units off the deck, and as the bot nears it navigate() flips
+			// to an across-plat corner and back -- the bot ping-pongs at the
+			// plat's edge, boarding nothing (e2m6: a bot pinned 49u short of
+			// the boarding corner at a cycling lift, forever). Steering to the
+			// deck itself makes boarding deterministic: walk on when the deck
+			// is at a steppable level and parked, WAIT at the lip when it's
+			// away or moving. A dead/never-returning plat still times out
+			// (the 8x stall window below; the livelock backstop once shoving).
+			local entity bestpl;
+			local vector deck, pc;
+			local float clearance, dcenter, dz;
 
-			// The serving plat is a function of the link corner (wp), which
-			// only changes when the corridor advances -- re-scanning every
-			// plat in the level every frame while a bot waits at the lip is
-			// wasted work. Cache the lookup per corner instead.
-			if (self._plat_link_pl == world
-				|| self._plat_link_pl.classname != "plat"
-				|| vlen(wp - self._plat_link_wp) > 1)
+			// The bake records which entity serves this link -- no more
+			// nearest-plat scan, which guessed and could latch onto a
+			// different plat than the one the link rides. Collapse-floor
+			// doors serve their exit links too, but the old scan never
+			// matched them (classname "door"), so keep this plat-only.
+			bestpl = nav_link_serve_ent();
+			if (bestpl.classname == "plat")
 			{
-				bestpl = world;
-				bestpd = 99999;
-				pl = find(world, classname, "plat");
-				while (pl != world)
+				// The deck center and how far the deck top sits above our
+				// feet right now (the ride brings it to us; we board when it
+				// arrives at a steppable level).
+				deck_x = (bestpl.absmin_x + bestpl.absmax_x) * 0.5;
+				deck_y = (bestpl.absmin_y + bestpl.absmax_y) * 0.5;
+				pc = deck - self.origin;
+				pc_z = 0;
+				dcenter = vlen(pc);
+				dz = bestpl.absmax_z - (self.origin_z - 24);
+
+				// Footprint half-extent + a body: a wide plat (e1m2's lift is
+				// 126x86) needs the lip measured from its own size, not a flat
+				// guess that lands inside the shaft it must return to.
+				clearance = bestpl.absmax_x - bestpl.absmin_x;
+				if (bestpl.absmax_y - bestpl.absmin_y > clearance)
+					clearance = bestpl.absmax_y - bestpl.absmin_y;
+				clearance = clearance * 0.5 + 32;
+
+				// Only take over steering near the plat; far out, the corridor
+				// is still routing us in and its corner is fine.
+				if (dcenter < clearance + 96)
 				{
-					pc = (pl.absmin + pl.absmax) * 0.5;
-					pc_z = wp_z;
-					pd = vlen(pc - wp);
-					if (pd < bestpd)
+					if (bestpl.velocity == '0 0 0' && dz < 18 && dz > -32)
 					{
-						bestpd = pd;
-						bestpl = pl;
+						// Boardable: deck is parked at a steppable level.
+						// Commit straight onto it, ignoring the flip-flopping
+						// corner. Once aboard the riding branch above holds us.
+						if (dcenter > 1)
+							self.b_wishdir = normalize(pc);
 					}
-					pl = find(pl, classname, "plat");
+					else if (dcenter < clearance)
+						// Deck away/moving and we're inside its footprint --
+						// step back out to the lip, don't ride it down a shaft
+						// or get crushed by its return.
+						self.b_wishdir = normalize(self.origin - deck);
+					else
+						// Deck away/moving, we're at the lip -- wait for it.
+						self.b_wishdir = '0 0 0';
 				}
-				self._plat_link_pl = bestpl;
-				self._plat_link_wp = wp;
-			}
-			bestpl = self._plat_link_pl;
-			pc = (bestpl.absmin + bestpl.absmax) * 0.5;
-			pc_z = wp_z;
-			bestpd = vlen(pc - wp);
-			if (bestpl != world && bestpd < 128
-				&& bestpl.absmax_z > wp_z + 32
-				&& self.origin_z < bestpl.absmax_z)
-			{
-				pc = wp - self.origin;
-				pc_z = 0;
-				if (vlen(pc) < 80)
-					self.b_wishdir = '0 0 0';
-			}
-			// A plat actively moving through this link's shaft: stepping
-			// toward it just grinds the bot against its side/underside.
-			// Hold until it parks, then board. Moving is transient, so
-			// this can't become a standing freeze.
-			else if (bestpl != world && bestpd < 96
-				&& bestpl.velocity != '0 0 0')
-			{
-				pc = wp - self.origin;
-				pc_z = 0;
-				if (vlen(pc) < 96)
-					self.b_wishdir = '0 0 0';
 			}
 		}
 	}
+
+	// Link-execution timeout: give up on a link the bot can't actually
+	// clear, even while it's visibly moving (an approach/jump/bounce-back
+	// cycle keeps inching the corner-distance closer and displacing real
+	// position every retry, so neither recovery signal below ever
+	// latches). Only the "must be committed and repeatedly attempting"
+	// link types apply -- WALK bridges belong here too (no execution
+	// step at all, see the e1m2 off-mesh ping-pong fix), but plat/train/
+	// surface links are excused: standing still there is the CORRECT
+	// behavior (waiting for a ride, or a long swim), already budgeted by
+	// the 8x stall_limit below, and this timer would misfire on it.
+	if (link_type == AI_JUMP || link_type == AI_DROP
+		|| link_type == AI_SUPER_JUMP || link_type == AI_WALK)
+	{
+		if (self._link_exec_start == 0 || vlen(wp - self._link_exec_wp) > 32)
+		{
+			self._link_exec_start = time;
+			self._link_exec_wp = wp;
+		}
+		else
+		{
+			// Budget from the link's own metadata, not a flat guess: the
+			// physical traverse at run speed (320) plus any baked wait,
+			// plus one global slack covering the approach and a couple of
+			// retries. The old flat 8s starved the longest deep-drops
+			// (dry + wet leg can run ~1300u) exactly as much as it
+			// overpaid a 60u hop; with no pending link the metadata reads
+			// zero and the budget degrades to the slack alone, which is
+			// the old flat value.
+			local vector li_twt, li_span;
+			local float budget;
+			li_twt = nav_link_info(0);
+			li_span = nav_link_info(2) - nav_link_info(1);
+			budget = li_twt_z + vlen(li_span) / 320 + 8;
+			if (time - self._link_exec_start > budget)
+			{
+				nav_fail_current_link();
+				self._link_exec_start = 0;
+				if (self.target1 != world && self.target1 != self)
+					bot_mark_failed_goal(self.target1, 10, 3); // linkexec
+				self.target1 = world;
+				return;
+			}
+		}
+	}
+	else
+		self._link_exec_start = 0;
 
 	// progress check: not getting closer to corner? abandon.
 	// Off-mesh links get 3x timeout (bot may be doing controlled approach).
@@ -614,11 +1075,11 @@ void() bot_get =
 			rt_x = self.b_wishdir_y;
 			rt_y = 0 - self.b_wishdir_x;
 			rt_z = 0;
-			traceline(self.origin + rt * 16,
-				self.origin + rt * 16 + self.b_wishdir * 48, FALSE, self);
+			traceline(self.origin + rt * BOT_PROBE_SIDE,
+				self.origin + rt * BOT_PROBE_SIDE + self.b_wishdir * BOT_PROBE_AHEAD, FALSE, self);
 			fr = trace_fraction;
-			traceline(self.origin - rt * 16,
-				self.origin - rt * 16 + self.b_wishdir * 48, FALSE, self);
+			traceline(self.origin - rt * BOT_PROBE_SIDE,
+				self.origin - rt * BOT_PROBE_SIDE + self.b_wishdir * BOT_PROBE_AHEAD, FALSE, self);
 			fl = trace_fraction;
 			if (fr < fl - 0.1)
 				self.b_wishdir = normalize(self.b_wishdir - rt * 0.8);
@@ -683,21 +1144,128 @@ void() bot_get =
 				self._progress_stall = 0;
 				self._progress_best = 99999;
 				if (self.target1 != world && self.target1 != self)
-				{
-					self._failed_goal = self.target1;
-					self._failed_goal_time = time + 10;
-				}
+					bot_mark_failed_goal(self.target1, 10, 4); // pin
 				self.target1 = world;
 				return;
 			}
+		}
+
+		// --- livelock backstop (position-camp, keyed on the goal) ---
+		// See the _stuck_org field comment: catches the oscillating grind
+		// the 2s net-pin aliases through. Pure position anchor -- NOT gated
+		// on _progress_stall, which the stall_limit block below zeroes every
+		// ~1s and corner-flips reset constantly, so coupling to it never
+		// accumulates. Anchored to the goal too: a bot working an item
+		// cluster changes target as it grabs each one, re-anchoring and
+		// clearing the clock, so only a bot pinned on the SAME unreachable
+		// goal inside a BOT_STUCK_BALL ball for BOT_STUCK_TIME trips it.
+		// Reaching far from the anchor, switching goals, dropping the goal,
+		// or an excused ride/swim link all re-anchor and reset.
+		{
+			local vector camp, gflat;
+			local float camped, gdist;
+			camp = self.origin - self._stuck_org;
+			camp_z = 0;
+			camped = vlen(camp);
+			// Flat distance to the goal right now (the net-progress signal).
+			gdist = 99999;
+			if (self.target1 != world && self.target1 != self)
+			{
+				gflat = (self.target1.absmin + self.target1.absmax) * 0.5
+					- self.origin;
+				gflat_z = 0;
+				gdist = vlen(gflat);
+			}
+			// One window for every link: the clock only runs while ACTIVELY
+			// pushing with no escape, and a correct plat/train wait holds
+			// wishdir at 0 (paused, below), so a lift no longer needs a
+			// padded budget -- continuous shoving at one for this long is a
+			// grind, not a wait. Swim stays fully excused (a vertical climb
+			// legitimately thrusts for many seconds without covering ground).
+			if (self.target1 == world || self.target1 == self
+				|| self.target1 != self._stuck_tgt
+				|| camped > BOT_STUCK_BALL
+				|| gdist < self._stuck_gstart - BOT_STUCK_GAIN
+				|| link_type == AI_SURFACE)
+			{
+				// Real escape / real progress -- switched or dropped the goal,
+				// left the ball, got BOT_STUCK_GAIN closer to the goal (the
+				// net-progress credit that separates a bot slowly winding
+				// toward its goal from one grinding an unreachable spot), or an
+				// excused swim: re-anchor here and reset the clock.
+				self._stuck_org = self.origin;
+				self._stuck_tgt = self.target1;
+				self._stuck_gstart = gdist;
+				self._stuck_since = 0;
+			}
+			else if (self.b_wishdir != '0 0 0')
+			{
+				// Camped on the same goal and actively pushing: run the clock.
+				// A held frame (wishdir 0) does NOT land here -- it PAUSES the
+				// clock (below), it does not reset it. That distinction is the
+				// whole fix: a plat link's own motion cycle briefly engages the
+				// plat-hold (wishdir 0) every few seconds, and resetting on
+				// that kept the timer from ever maturing on a bot grinding a
+				// lift it can't board (e2m6: Erwin's clock capped at ~4s, the
+				// plat's period, forever). A bot that legitimately boards and
+				// rides leaves the ball (camped > BALL) and resets up there.
+				if (self._stuck_since == 0)
+					self._stuck_since = time;
+				else if (time - self._stuck_since > BOT_STUCK_TIME)
+				{
+					// A shootable mover in the lane is the one honest reason
+					// a corridor stalls here -- gun it and keep the goal.
+					local vector sdir;
+					sdir = wp - self.origin;
+					sdir_z = 0;
+					if (vlen(sdir) > 0.1)
+					{
+						sdir = normalize(sdir);
+						traceline(self.origin, self.origin + sdir * 64, TRUE, self);
+						if (bot_shoot_lane_mover())
+						{
+							self._stuck_since = time;
+							return;
+						}
+					}
+					self._stuck_since = 0;
+					// Relocate OUT of the trap before re-picking. Cooling the
+					// goal alone isn't enough where the same spot has a
+					// compelling item cluster: the scorer waits out the 10s and
+					// routes the bot right back. Walk away from the dead corner
+					// for a beat so the next pick paths from open ground --
+					// hazard-checked so we never back into lava/slime behind us.
+					local vector away;
+					away = self.origin - wp;
+					away_z = 0;
+					if (vlen(away) > 0.1)
+					{
+						away = normalize(away);
+						if (!nav_hazard_between(self.origin, self.origin + away * 64))
+						{
+							self._backoff_dir = away;
+							self._nav_backoff = time + 1;
+						}
+					}
+					bot_mark_failed_goal(self.target1, 10, 4); // pin
+					self.target1 = world;
+					return;
+				}
+			}
+			// else: camped on the goal but held (wishdir 0) -- pause the clock,
+			// neither accumulate nor reset. A correct plat/door wait sits here.
 		}
 
 		local float stall_limit;
 		stall_limit = 1 / sv_ticrate;
 		// lift links: zero XY progress is normal while waiting for and
 		// riding the plat — budget a full return + ride cycle (~8s)
-		// before declaring the goal dead
-		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN)
+		// before declaring the goal dead. Surface links get the same
+		// budget: a long vertical swim can cover corridor-corner
+		// distance slower than dry running, and shouldn't be judged
+		// against the same 1s window.
+		if (link_type == AI_PLAT_BOTTOM || link_type == AI_RIDE_TRAIN
+			|| link_type == AI_SURFACE)
 			stall_limit = stall_limit * 8;
 		if (self._progress_stall > stall_limit)
 		{
@@ -735,15 +1303,23 @@ void() bot_get =
 			}
 			self._progress_stall = 0;
 			self._progress_best = 99999;
+			// Corner-distance stalling isn't proof of being stuck: a
+			// corner that flips between two candidates, a wall-slide
+			// around an obstacle, or sidestepping another bot can all
+			// stall THIS metric for a second while the bot is clearly
+			// still going somewhere. Only abandon here if the bot also
+			// isn't actually displacing -- otherwise defer to the
+			// net-displacement pin check above (real position over a 2s
+			// window, corner-independent), which is the more honest
+			// "truly stuck" signal.
+			if (vlen(self.origin - self._nav_pin_org) > 48)
+				return;
 			// Cool the goal down: the scorer is deterministic, so an
 			// immediate re-pick chooses the same goal and re-creates the
 			// same jam. Cool ANY real goal, not just items — a func_button
 			// opener the bot can't reach is re-picked every frame otherwise.
 			if (self.target1 != world && self.target1 != self)
-			{
-				self._failed_goal = self.target1;
-				self._failed_goal_time = time + 10;
-			}
+				bot_mark_failed_goal(self.target1, 10, 5); // stall
 			self.target1 = world;
 			return;
 		}

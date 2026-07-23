@@ -482,8 +482,13 @@ void() bot_combat_strafe =
 	else if (foedist - 32 > ideal)
 		movedir = movedir + normalize(org - self.origin) * 0.5;
 
-	if (!frik_walkmove(movedir))
+	if (nav_hazard_ahead(movedir, 0) || !frik_walkmove(movedir))
 	{
+		// frik_walkmove only ever sets b_wishdir and returns TRUE -- it
+		// never runs when the hazard check trips (short-circuited), so
+		// without this the bot keeps whatever wishdir a prior frame left
+		// behind instead of actually avoiding the hazard it just found.
+		self.b_wishdir = '0 0 0';
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 		self.b_strafe_time = time + 0.1;
 	}
@@ -502,7 +507,14 @@ void() bot_retreat =
 
 
 	if (self.b_skill == 0)
-	{ if (random() < 0.3) frik_walkmove(away); return; }
+	{
+		if (random() < 0.3)
+		{
+			if (!nav_hazard_ahead(away, 0)) frik_walkmove(away);
+			else self.b_wishdir = '0 0 0';
+		}
+		return;
+	}
 
 	// team: bias toward nearest buddy
 	if (teamplay)
@@ -512,7 +524,7 @@ void() bot_retreat =
 			away = normalize(away + normalize(mate.origin - self.origin) * 0.3);
 	}
 	if (self.b_skill == 1)
-	{ frik_walkmove(away); return; }
+	{ if (!nav_hazard_ahead(away, 0)) frik_walkmove(away); else self.b_wishdir = '0 0 0'; return; }
 
 	// skill 2-3: angular retreat
 	makevectors(self.v_angle);
@@ -527,10 +539,13 @@ void() bot_retreat =
 	}
 
 	movedir = normalize(away + right * self.b_strafe_dir * 0.7);
-	if (!frik_walkmove(movedir))
+	if (nav_hazard_ahead(movedir, 0) || !frik_walkmove(movedir))
 	{
 		movedir = normalize(away + right * self.b_strafe_dir * -0.7);
-		frik_walkmove(movedir);
+		if (!nav_hazard_ahead(movedir, 0))
+			frik_walkmove(movedir);
+		else
+			self.b_wishdir = '0 0 0';
 		self.b_strafe_dir = self.b_strafe_dir * -1;
 	}
 
@@ -617,9 +632,17 @@ void() bot_fight_style =
 		v1_x = v_y * -1; v1_y = v_x;
 		v2_x = v_y; v2_y = v_x * -1;
 		if (vlen(self.avoid.origin - (self.origin + v1)) < vlen(self.avoid.origin - (self.origin + v2)))
-			frik_walkmove(v2);
+		{
+			if (!nav_hazard_ahead(v2, 0)) frik_walkmove(v2);
+			else if (!nav_hazard_ahead(v1, 0)) frik_walkmove(v1);
+			else self.b_wishdir = '0 0 0';
+		}
 		else
-			frik_walkmove(v1);
+		{
+			if (!nav_hazard_ahead(v1, 0)) frik_walkmove(v1);
+			else if (!nav_hazard_ahead(v2, 0)) frik_walkmove(v2);
+			else self.b_wishdir = '0 0 0';
+		}
 		return;
 	}
 

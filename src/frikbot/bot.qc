@@ -46,6 +46,7 @@ float CSTATE_RETREAT = 2;
 .vector	b_angle, mouse_emu;
 .vector	movevect;
 .vector	b_wishdir;
+.float	b_speed_cap;	// 0 = uncapped (sv_maxspeed*2 wish); else clamps bot_build_movevect's wish speed
 
 // movement modes (for metrics)
 .float _m_move_mode;
@@ -83,13 +84,19 @@ void()				bot_build_movevect;
 
 // navmesh builtins (Detour pathfinding)
 float()					nav_ready = #80;
+void(entity goal, float dur, float why)	nav_log_goalfail = #81;
+entity()				nav_link_serve_ent = #82;
 vector(vector pos)			navigate = #84;
 vector(entity bot, float index)	nav_path_debug = #85;
 entity()				nav_find_goal = #86;
 void(entity e)				nav_block = #89;
 void(entity e)				nav_unblock = #90;
+vector(float field)			nav_link_info = #91;
 void(vector core, vector env, vector lava_entries, string tgt, float tgt_dist) nav_report_stats = #92;
 void(float streak, string tgt, float tgt_dist) nav_debug_event = #93;
+void(entity targ, entity attacker, float amount) nav_log_damage = #94;
+void(entity item, entity bot) nav_log_pickup = #95;
+void()					nav_fail_current_link = #96;
 float		nav_booted;
 
 // off-mesh link types — must match the AI_* enum in src/server/nav_mesh.h

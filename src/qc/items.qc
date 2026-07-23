@@ -190,6 +190,9 @@ void() health_touch =
 			return;
 	}
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	sprint(other, "You receive ");
 	s = ftos(self.healamount);
 	sprint(other, s);
@@ -296,6 +299,9 @@ void() armor_touch =
 	other.armortype = type;
 	other.armorvalue = value;
 	other.items = other.items - (other.items & (IT_ARMOR1 | IT_ARMOR2 | IT_ARMOR3)) + bit;
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	self.solid = SOLID_NOT;
 	self.model = string_null;
@@ -512,6 +518,9 @@ void() weapon_touch =
 
 	self = stemp;
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	if (leave)
 		return;
 
@@ -664,6 +673,9 @@ void() ammo_touch =
 	}
 
 	bound_other_ammo ();
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	sprint (other, "You got the ");
 	sprint (other, self.netname);
@@ -1145,6 +1157,9 @@ void() powerup_touch =
 		other.super_damage_finished = time + 30;
 	}
 
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
+
 	activator = other;
 	// fire all targets / killtargets
 	SUB_UseTargets();
@@ -1281,6 +1296,9 @@ void() BackpackTouch =
 	other.items = other.items | new;
 
 	bound_other_ammo ();
+
+	if (!other.ishuman)
+		nav_log_pickup(self, other);
 
 	if (self.ammo_shells)
 	{

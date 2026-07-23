@@ -1,4 +1,5 @@
 #include "nav_mesh.h"
+#include "nav_physics.h"
 
 #include <cfloat>
 #include <cmath>
@@ -132,6 +133,7 @@ void nav_mesh_setup_filter(dtQueryFilter *filter)
 	filter->setAreaCost(NAV_AREA_DOOR, 2.0f);
 	filter->setAreaCost(NAV_AREA_RJ, 10.0f);
 	filter->setAreaCost(NAV_AREA_NEAR_WALL, 3.0f);
+	filter->setAreaCost(NAV_AREA_HAZARD, 40.0f);
 }
 
 /* Level-exit points (trigger_changelevel volumes): a component holding
@@ -553,6 +555,52 @@ int nav_mesh_actor_floor_snap(const nav_mesh_runtime_t *navmesh,
 	return *out_ref != 0;
 }
 
+/* Goal-point floor snap.  dtFindNearestPolyQuery favors any poly a
+   point is "over" within walkableClimb, clamping the vertical term
+   toward zero -- when two floors stack within climb height of the
+   query point (a pit floor directly under a plateau), BOTH clamp to
+   d=0 and the FIRST poly the tile query happens to visit wins the
+   tie, regardless of which floor is actually closer.  That silently
+   snaps a goal (item, path endpoint) onto the wrong level entirely.
+   Skip the clamp and rank by true 3D distance so the closer floor
+   always wins the tie. */
+static int nav_mesh_goal_floor_snap(const nav_mesh_runtime_t *navmesh,
+	const dtQueryFilter *filter, const float *rc_point, const float *half_extents,
+	dtPolyRef *out_ref, float *out_pt, bool *out_over)
+{
+	dtPolyRef polys[128];
+	int n = 0;
+
+	if (dtStatusFailed(navmesh->query->queryPolygons(
+			rc_point, half_extents, filter, polys, &n, 128)))
+		return 0;
+
+	float best_d = FLT_MAX;
+	*out_ref = 0;
+	if (out_over)
+		*out_over = false;
+	for (int i = 0; i < n; i++)
+	{
+		float pt[3];
+		bool over = false;
+		if (dtStatusFailed(navmesh->query->closestPointOnPoly(polys[i], rc_point, pt, &over)))
+			continue;
+		float dx = pt[0] - rc_point[0];
+		float dy = pt[1] - rc_point[1];
+		float dz = pt[2] - rc_point[2];
+		float d = dx * dx + dy * dy + dz * dz;
+		if (d < best_d)
+		{
+			best_d = d;
+			*out_ref = polys[i];
+			dtVcopy(out_pt, pt);
+			if (out_over)
+				*out_over = over;
+		}
+	}
+	return *out_ref != 0;
+}
+
 /* extents_override: if non-NULL, use these instead of the runtime defaults. */
 static int nav_mesh_find_nearest_internal(
 	const nav_mesh_runtime_t *navmesh,
@@ -567,7 +615,6 @@ static int nav_mesh_find_nearest_internal(
 	dtQueryFilter filter; nav_mesh_setup_filter(&filter);
 	float recast_point[3];
 	const float *extents;
-	dtStatus status;
 
 	if (navmesh == nullptr || navmesh->query == nullptr || navmesh->navmesh == nullptr)
 	{
@@ -597,14 +644,8 @@ static int nav_mesh_find_nearest_internal(
 	}
 	else
 	{
-		status = navmesh->query->findNearestPoly(
-			recast_point,
-			extents,
-			&filter,
-			nearest_ref,
-			nearest_pt,
-			is_over_poly);
-		if (dtStatusFailed(status))
+		if (!nav_mesh_goal_floor_snap(navmesh, &filter, recast_point, extents,
+				nearest_ref, nearest_pt, is_over_poly))
 		{
 			nav_set_error(error, error_size, "Detour findNearestPoly failed");
 			return 0;
@@ -1046,6 +1087,92 @@ static std::vector<int> nav_mesh_ground_uf(const dtMeshTile *tile,
 	return ga;
 }
 
+/* Snapshot accessors (see nav_conn_snapshot in nav_mesh.h).  Roots come
+   back fully path-compressed, so snap[i] IS poly i's component root --
+   callers compare/index them directly, no find needed. */
+static const std::vector<int> &nav_snap_comp(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, const dtNavMesh *mesh, int ground, bool skip_disabled)
+{
+	std::vector<int> &c = skip_disabled ? nav->snap.comp_enabled : nav->snap.comp_all;
+	bool &have = skip_disabled ? nav->snap.have_enabled : nav->snap.have_all;
+	if (!have)
+	{
+		c = nav_mesh_ground_uf(tile, mesh, ground, skip_disabled);
+		auto gf = [&](int x) { while (c[x] != x) { c[x] = c[c[x]]; x = c[x]; } return x; };
+		for (int i = 0; i < ground; i++)
+			c[i] = gf(i);
+		have = true;
+	}
+	return c;
+}
+
+static const std::vector<float> &nav_snap_centroids(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, int ground)
+{
+	if (!nav->snap.have_centroids)
+	{
+		nav_collect_ground_centroids(tile, ground, nav->snap.centroids);
+		nav->snap.have_centroids = true;
+	}
+	return nav->snap.centroids;
+}
+
+/* Ground centroids reachable from 'seed' by walking the CURRENT graph
+   forward: an unbounded BFS over tile->links crossing every link type
+   findPath itself can cross (doors, jumps, drops, teleporters, plats),
+   skipping disabled polys exactly like the query filter would.  This
+   mirrors authoritative findPath reachability, so the RJ worth-it gate
+   reduces to "does the landing reach an item the launch cannot".  Both
+   sides MUST use the same unbounded semantics: the no-trap gate
+   guarantees the landing paths back down to the launch, so its reach
+   set is a superset of the launch's, and the set difference is exactly
+   what the link unlocks.  Earlier asymmetric versions (bare floor-patch
+   launch set, one-hop-capped landing set) both misfired: the narrow
+   launch set let an e1m2 door RJ credit an item that had a perfectly
+   good multi-door walking route, and the capped landing set killed the
+   e3m5 terrace rung whose value sits several ordinary jump links above
+   the landing ledge.
+
+   Every poly in a ground patch shares one reach set (patch members are
+   mutually walkable), so memoize per component root -- on big maps the
+   RJ candidate loop otherwise re-runs thousands of identical BFS passes. */
+static const std::vector<char> &nav_snap_reach(nav_mesh_runtime_t *nav,
+	const dtMeshTile *tile, const dtNavMesh *mesh, int ground, int seed)
+{
+	const std::vector<int> &comp = nav_snap_comp(nav, tile, mesh, ground, false);
+	if (nav->snap.reach.empty())
+	{
+		nav->snap.reach.resize((size_t)ground);
+		nav->snap.reach_built.assign((size_t)ground, 0);
+	}
+	const int c = comp[seed];
+	if (!nav->snap.reach_built[c])
+	{
+		const int npolys = tile->header->polyCount;
+		std::vector<char> seenPoly(npolys, 0);
+		std::vector<int> frontier;
+		seenPoly[seed] = 1;
+		frontier.push_back(seed);
+		for (size_t fi = 0; fi < frontier.size(); fi++)
+		{
+			int u = frontier[fi];
+			const dtPoly *pu = &tile->polys[u];
+			for (unsigned int k = pu->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+			{
+				if (tile->links[k].ref == 0) continue;
+				unsigned int s, t, np; mesh->decodePolyId(tile->links[k].ref, s, t, np);
+				if ((int)np >= npolys || seenPoly[np]) continue;
+				if (tile->polys[np].flags == 0) continue;
+				seenPoly[np] = 1;
+				frontier.push_back((int)np);
+			}
+		}
+		nav->snap.reach[c].swap(seenPoly);
+		nav->snap.reach_built[c] = 1;
+	}
+	return nav->snap.reach[c];
+}
+
 extern "C" int nav_mesh_compute_orphan_jumps(
 	nav_mesh_runtime_t *nav,
 	nav_jump_validate_fn validate, void *user,
@@ -1140,7 +1267,7 @@ extern "C" int nav_mesh_compute_orphan_jumps(
 					   ledges above that.  validate still gates the physics, and
 					   cost prefers the cheaper walk/jump, so this only adds
 					   links for components nothing else could connect. */
-					if (adz > 256.0f) continue;
+					if (adz > NAV_RJ_HEIGHT_MAX) continue;
 					if (hd > 280.0f || hd < 8.0f) continue;
 					float cost = hd + adz;
 					if (cost >= bestcost) continue;
@@ -1196,7 +1323,7 @@ extern "C" int nav_mesh_compute_orphan_jumps(
    strand a bot (the trap the earlier bidirectional SCC attempt caused).  */
 int nav_mesh_compute_directed_links(
 	nav_mesh_runtime_t *navmesh,
-	nav_jump_validate_fn validate, void *user,
+	nav_jump_validate_fn validate, nav_jump_validate_fn drop_validate, void *user,
 	nav_off_mesh_link_t **out_links)
 {
 	*out_links = nullptr;
@@ -1213,15 +1340,15 @@ int nav_mesh_compute_directed_links(
 
 	/* Ground-adjacency components: union only ground<->ground edges (an
 	   off-mesh link goes ground -> offmesh poly -> ground, so it never
-	   unions here -- exactly the contiguous-floor patches we want). */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground, -1), gasize;
+	   unions here -- exactly the contiguous-floor patches we want).
+	   Dense ids assigned in poly order for the size/main bookkeeping. */
+	const std::vector<int> &garoots = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	std::vector<int> dense(ground, -1), gacomp(ground), gasize;
 	for (int i = 0; i < ground; i++)
 	{
-		int r = gf(i);
-		if (gacomp[r] < 0) { gacomp[r] = (int)gasize.size(); gasize.push_back(0); }
-		gacomp[i] = gacomp[r]; gasize[gacomp[i]]++;
+		int r = garoots[i];
+		if (dense[r] < 0) { dense[r] = (int)gasize.size(); gasize.push_back(0); }
+		gacomp[i] = dense[r]; gasize[gacomp[i]]++;
 	}
 	int maingc = 0;
 	for (size_t c = 1; c < gasize.size(); c++)
@@ -1242,8 +1369,7 @@ int nav_mesh_compute_directed_links(
 	}
 
 	/* Quake-coord centroids. */
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	int dbg_comp = -1;
 	if (const char *db = getenv("NAV_DIR_DEBUG"))
@@ -1380,18 +1506,22 @@ int nav_mesh_compute_directed_links(
 					const float *qo = &q[o * 3], *qm = &q[m * 3];
 					float dx = qo[0] - qm[0], dy = qo[1] - qm[1];
 					float hd = sqrtf(dx * dx + dy * dy);
-					float dz = qo[2] - qm[2], adz = dz < 0 ? -dz : dz;
 					if (hd > 320.0f) { rej_far++; continue; }
 					if (hd < 8.0f) { rej_near++; continue; }
-					if (adz > 320.0f) { rej_dz++; continue; }
-					float cost = hd + adz;
-					if (cost >= bestcost) continue;
-
 					/* The link runs FROM the main side TO the comp for IN, and
 					   FROM the comp TO the main side for OUT.  Name the ends so
 					   validate sees the actual direction of travel. */
 					const float *from = need_in ? qm : qo;
 					const float *to   = need_in ? qo : qm;
+					/* Up moves are bounded by jump reach.  Down moves are
+					   drops: falls are never lethal, so the only bound is the
+					   validator's scan range -- some areas are only enterable
+					   by a designed deep shaft (hip1m4's lower level, ~880u). */
+					float tdz = to[2] - from[2];
+					if (tdz > 320.0f || tdz < -NAV_DEEP_DROP_SCAN_MAX) { rej_dz++; continue; }
+					float adz = tdz < 0 ? -tdz : tdz;
+					float cost = hd + adz;
+					if (cost >= bestcost) continue;
 					int type = validate(from, to, user);
 					/* Never restore one-way connectivity with a rocket jump: bots
 					   grind RJ links (they can't reliably execute them, or own no
@@ -1402,11 +1532,15 @@ int nav_mesh_compute_directed_links(
 					if (!type)
 					{
 						/* validate only models level/up moves.  A downward move
-						   is a drop -- survivable fall, clear-ish column, not into
-						   lava (the cycle's other half already exists, so the bot
-						   won't be stranded down there). */
-						float ddz = to[2] - from[2];
-						if (ddz < -18.0f && ddz > -320.0f)  /* below step height = a drop */
+						   is a drop -- but only if the fall physics validator
+						   proves it (walk-off line, hull fall column, no lava).
+						   This used to stamp AI_DROP on the dz band alone, which
+						   baked through-the-wall "drops" (start's shells alcove:
+						   a 260u-horizontal 80u fall needs a 920u/s launch) that
+						   bots ground against forever. */
+						if (tdz < -18.0f  /* below step height = a drop */
+							&& drop_validate != nullptr
+							&& drop_validate(from, to, user) == AI_DROP)
 							type = AI_DROP;
 					}
 					if (!type)
@@ -1414,7 +1548,7 @@ int nav_mesh_compute_directed_links(
 						rej_val++;
 						if (dbg && rej_val <= 10)
 							fprintf(stderr, "Nav: DIRDBG valfail (%.0f %.0f %.0f)->(%.0f %.0f %.0f) hd=%.0f dz=%.0f\n",
-								from[0], from[1], from[2], to[0], to[1], to[2], hd, dz);
+								from[0], from[1], from[2], to[0], to[1], to[2], hd, tdz);
 						continue;
 					}
 					bestcost = cost; bestType = type;
@@ -1489,13 +1623,8 @@ int nav_mesh_compute_gap_jumps(
 
 	/* Ground-adjacency components (ground<->ground links only): contiguous
 	   walkable patches.  Same construction as the directed pass. */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
@@ -1588,6 +1717,7 @@ int nav_mesh_compute_gap_jumps(
 int nav_mesh_compute_rocket_jumps(
 	nav_mesh_runtime_t *navmesh,
 	nav_jump_validate_fn validate, void *user,
+	nav_jump_value_fn has_value, void *value_user,
 	nav_off_mesh_link_t **out_links)
 {
 	*out_links = nullptr;
@@ -1602,17 +1732,18 @@ int nav_mesh_compute_rocket_jumps(
 	if (ground <= 0)
 		return 0;
 
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, false);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, false);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
 	nav_mesh_setup_filter(&filter);
+
+	/* Forward reach sets for the worth-it gate below (semantics + memoizing
+	   documented on nav_snap_reach). */
+	auto reachableCached = [&](int seed) -> const std::vector<char> & {
+		return nav_snap_reach(navmesh, tile, mesh, ground, seed);
+	};
 
 	std::vector<int> seenLo, seenHi;
 	auto pair_seen = [&](int x, int y) {
@@ -1627,10 +1758,11 @@ int nav_mesh_compute_rocket_jumps(
 	{
 		if (tile->polys[lo].flags == 0) continue;
 
-		/* Cheapest higher cross-patch poly inside the RJ-up envelope:
-		   up past a run-jump's apex (48u) but within one rocket's lift
-		   (256u), horizontal tight (128u) -- validate() does the exact
-		   physics and overhead-clearance. */
+		/* Cheapest higher cross-patch poly inside the RJ-up envelope
+		   (shared with the validator via nav_physics.h): up past a
+		   run-jump's reach but within one rocket's lift, horizontal
+		   tight -- validate() does the exact physics and
+		   overhead-clearance. */
 		float bestcost = 1e9f; int bestHi = -1;
 		for (int hi = 0; hi < ground; hi++)
 		{
@@ -1638,10 +1770,10 @@ int nav_mesh_compute_rocket_jumps(
 			if (gacomp[lo] == gacomp[hi]) continue;
 			const float *ql = &q[lo * 3], *qh = &q[hi * 3];
 			float dz = qh[2] - ql[2];
-			if (dz <= 48.0f || dz > 256.0f) continue;
+			if (dz <= NAV_JUMP_HEIGHT_MAX || dz > NAV_RJ_HEIGHT_MAX) continue;
 			float dx = qh[0]-ql[0], dy = qh[1]-ql[1];
 			float hd = sqrtf(dx*dx + dy*dy);
-			if (hd < 8.0f || hd > 128.0f) continue;
+			if (hd < 8.0f || hd > NAV_RJ_HORIZ_MAX) continue;
 			float cost = hd + dz;
 			if (cost < bestcost) { bestcost = cost; bestHi = hi; }
 		}
@@ -1658,7 +1790,7 @@ int nav_mesh_compute_rocket_jumps(
 		nav_quake_to_recast(ql, rl);
 		nav_quake_to_recast(qh, rh);
 
-		/* New up-access: skip if the bot can already reach the high ledge
+		/* Up-access gate: skip if the bot can already reach the high ledge
 		   (an RJ shortcut over an existing climb just invites grinding). */
 		dtStatus up = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)bestHi,
 			rl, rh, &filter, path, &pc, 256);
@@ -1671,6 +1803,40 @@ int nav_mesh_compute_rocket_jumps(
 			rh, rl, &filter, path, &pc, 256);
 		if (dtStatusFailed(down) || dtStatusDetail(down, DT_PARTIAL_RESULT) || pc < 1)
 			continue;
+
+		/* Worth-it gate: skip ledges with nothing to reach.  Both prior
+		   gates already established the ledge is otherwise unreachable --
+		   but that alone isn't sufficient reason to spawn a link, since
+		   plenty of scenery nubs (monster perches, window sills) fail the
+		   same reachability probes and were never meant to be player-
+		   reachable.  Without this, those get a "rocket jump to nowhere"
+		   that a bot will actually use once it meets the health/quad gate.
+		   Compares what the landing reaches against what the launch point
+		   ALREADY reaches on foot (reachableFrom above), so an item that's
+		   just a normal walk away from lo doesn't count as new value. */
+		if (has_value != nullptr)
+		{
+			const std::vector<char> &hiSeen = reachableCached(bestHi);
+			const std::vector<char> &loSeen = reachableCached(lo);
+			/* reach(hi) is a superset of reach(lo) (no-trap gate), so only
+			   the difference can credit anything new -- pass just that as
+			   the landing set, which keeps the per-item crediting loops in
+			   has_value near the unlocked ledge instead of the whole map. */
+			std::vector<float> newPts, alreadyPts;
+			for (int ii = 0; ii < ground; ii++)
+			{
+				if (!hiSeen[ii] && !loSeen[ii]) continue;
+				std::vector<float> &dst = loSeen[ii] ? alreadyPts : newPts;
+				dst.push_back(q[ii * 3 + 0]);
+				dst.push_back(q[ii * 3 + 1]);
+				dst.push_back(q[ii * 3 + 2]);
+			}
+			if (newPts.empty())
+				continue;
+			if (!has_value(newPts.data(), (int)(newPts.size() / 3),
+				alreadyPts.data(), (int)(alreadyPts.size() / 3), value_user))
+				continue;
+		}
 
 		links.push_back(nav_make_link(ql, qh, AI_SUPER_JUMP, 0, 32.0f));
 		seenLo.push_back(gacomp[lo] < gacomp[bestHi] ? gacomp[lo] : gacomp[bestHi]);
@@ -1693,21 +1859,19 @@ int nav_mesh_compute_deep_drops(
 	nav_jump_validate_fn validate, void *user,
 	nav_off_mesh_link_t **out_links)
 {
-	/* Envelope: below 48 the walk/jump passes own the space; capped short
-	   of a lethal fall (~800u kills).  Horizontal reach is physics, not a
-	   fixed radius: during a dz fall a running bot covers up to
-	   run_speed * sqrt(2*dz/800), so a candidate is feasible whenever the
-	   required launch speed stays under a full run (with margin). */
-	const float kDeepDropMin = 48.0f;
-	/* Envelope only: the validator enforces the true lethal-fall cap (~700u)
-	   on the DRY part of the fall, so a landing poly deep under water may sit
-	   far below that.  This just bounds the candidate search. */
-	const float kDeepDropMax = 1400.0f;
-	const float kDeepDropMaxSpeed = 300.0f;
-	/* Envelope slack for water landings: after splashdown the remaining
-	   horizontal distance is swum, not flown -- the validator's entry-column
-	   search enforces the real per-offset drift caps and the wet leg. */
-	const float kDeepDropSwimSlack = 600.0f;
+	/* Candidate envelope, shared with the validator via nav_physics.h.
+	   Horizontal reach is physics, not a fixed radius: during a dz fall a
+	   running bot covers up to run_speed * sqrt(2*dz/g), so a candidate is
+	   feasible whenever the required launch speed stays under a full run
+	   (with margin), plus the wet-leg swim budget for water landings --
+	   after splashdown the remaining distance is swum, not flown.  The
+	   validator enforces the dry cap on the DRY part of the fall only, so
+	   a landing poly deep under water may sit far below it; the scan max
+	   just bounds the candidate search (see nav_physics.h). */
+	const float kDeepDropMin = NAV_DEEP_DROP_HEIGHT_MIN;
+	const float kDeepDropMax = NAV_DEEP_DROP_SCAN_MAX;
+	const float kDeepDropMaxSpeed = NAV_DEEP_DROP_MAX_SPEED;
+	const float kDeepDropSwimSlack = NAV_DEEP_DROP_WET_LEG;
 
 	*out_links = nullptr;
 	if (navmesh == nullptr || navmesh->navmesh == nullptr
@@ -1723,11 +1887,9 @@ int nav_mesh_compute_deep_drops(
 
 	/* Walk-adjacency components (off-mesh hops excluded on purpose --
 	   the findPath gates below are what see those). */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, true);
 	std::vector<int> compsize(ground, 0);
-	for (int i = 0; i < ground; i++) { gacomp[i] = gf(i); compsize[gacomp[i]]++; }
+	for (int i = 0; i < ground; i++) compsize[gacomp[i]]++;
 	int maincomp = 0;
 	for (int i = 0; i < ground; i++)
 		if (compsize[i] > compsize[maincomp]) maincomp = i;
@@ -1735,8 +1897,7 @@ int nav_mesh_compute_deep_drops(
 	for (int i = 0; i < ground; i++)
 		if (gacomp[i] == maincomp && tile->polys[i].flags != 0) { mainrep = i; break; }
 
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
@@ -1744,6 +1905,7 @@ int nav_mesh_compute_deep_drops(
 
 	/* Components that contain a level exit are escapable by definition. */
 	std::vector<char> compexit(ground, 0);
+	std::vector<int> exitreps;
 	for (int e = 0; e < nav_exit_point_count; e++)
 	{
 		float re[3], nearest[3];
@@ -1756,7 +1918,10 @@ int nav_mesh_compute_deep_drops(
 			unsigned int s, t, np;
 			mesh->decodePolyId(ref, s, t, np);
 			if ((int)np < ground)
+			{
 				compexit[gacomp[np]] = 1;
+				exitreps.push_back((int)np);
+			}
 		}
 	}
 
@@ -1868,7 +2033,7 @@ int nav_mesh_compute_deep_drops(
 			float hd_min = hd - pr[hi] - pr[lo];
 			if (hd_min < 8.0f) hd_min = 8.0f;
 			float dz_cap = dmax < kDeepDropMax ? dmax : kDeepDropMax;
-			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / 800.0f) + kDeepDropSwimSlack) return false;
+			if (hd_min > kDeepDropMaxSpeed * sqrtf(2.0f * dz_cap / NAV_PHYS_GRAVITY) + kDeepDropSwimSlack) return false;
 			out->cost = hd + (qh[2] - ql[2]) * 0.25f;
 			out->lo = lo;
 			return true;
@@ -1926,7 +2091,7 @@ int nav_mesh_compute_deep_drops(
 			if (hd < 8.0f) { hd = 8.0f; }
 			if (!why && (ddz <= kDeepDropMin || ddz > kDeepDropMax))
 				why = "dz";
-			if (!why && hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / 800.0f) + kDeepDropSwimSlack)
+			if (!why && hd > kDeepDropMaxSpeed * sqrtf(2.0f * ddz / NAV_PHYS_GRAVITY) + kDeepDropSwimSlack)
 				why = "speed";
 			if (!why && validate(qh, ql, user) != AI_DROP)
 				why = "validate";
@@ -1984,6 +2149,19 @@ int nav_mesh_compute_deep_drops(
 					}
 				}
 			}
+			/* Exit reachability over the full link graph: compexit only
+			   marks the exit poly's own ground patch, but an exit on a
+			   jump-up pedestal (hip2m1's secret room) is still an escape
+			   for every poly that can PATH to it. */
+			for (size_t e = 0; !escapes && e < exitreps.size(); e++)
+			{
+				if (exitreps[e] == lo) { escapes = 1; break; }
+				float rx[3];
+				nav_quake_to_recast(&q[exitreps[e] * 3], rx);
+				dtStatus esc = navmesh->query->findPath(base | (dtPolyRef)lo, base | (dtPolyRef)exitreps[e],
+					rl, rx, &filter, path, &pc, 256);
+				escapes = (!dtStatusFailed(esc) && !dtStatusDetail(esc, DT_PARTIAL_RESULT) && pc > 0);
+			}
 			if (!escapes)
 			{
 				if (dbg_hi)
@@ -1995,7 +2173,7 @@ int nav_mesh_compute_deep_drops(
 
 			nav_off_mesh_link_t lk = nav_make_link(qh, ql, AI_DROP, 0, 32.0f);
 			{
-				float fall_time = sqrtf(2.0f * ddz / 800.0f);
+				float fall_time = sqrtf(2.0f * ddz / NAV_PHYS_GRAVITY);
 				lk.required_speed = hd / fall_time;
 				if (lk.required_speed < 10.0f) lk.required_speed = 10.0f;
 			}
@@ -2044,13 +2222,8 @@ int nav_mesh_compute_swim_links(
 		return 0;
 
 	/* Walk-adjacency components, same as the deep-drop pass. */
-	std::vector<int> ga = nav_mesh_ground_uf(tile, mesh, ground, true);
-	auto gf = [&](int x) { while (ga[x] != x) { ga[x] = ga[ga[x]]; x = ga[x]; } return x; };
-	std::vector<int> gacomp(ground);
-	for (int i = 0; i < ground; i++) gacomp[i] = gf(i);
-
-	std::vector<float> q;
-	nav_collect_ground_centroids(tile, ground, q);
+	const std::vector<int> &gacomp = nav_snap_comp(navmesh, tile, mesh, ground, true);
+	const std::vector<float> &q = nav_snap_centroids(navmesh, tile, ground);
 
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
 	dtQueryFilter filter;
@@ -2492,11 +2665,11 @@ int nav_mesh_gap_probe(
    reseed onto and then roam forever inside a 1-poly island.  Traversal
    follows Detour link chains, which include off-mesh connections, so
    ledges reachable only by jump/drop/teleport links stay enabled. */
-static void nav_mesh_disable_islands(dtNavMesh *mesh)
+static int nav_mesh_disable_islands(dtNavMesh *mesh)
 {
 	const dtMeshTile *tile = static_cast<const dtNavMesh *>(mesh)->getTile(0);
 	if (tile == nullptr || tile->header == nullptr)
-		return;
+		return 0;
 
 	const int npolys = tile->header->polyCount;
 	const dtPolyRef base = mesh->getPolyRefBase(tile);
@@ -2664,17 +2837,33 @@ static void nav_mesh_disable_islands(dtNavMesh *mesh)
 			fprintf(stderr, "Nav: ORPHAN comp size=%d at quake (%.0f %.0f %.0f)\n",
 				comp_size[c], cx / n, cz / n, cy / n);
 	}
+
+	return disabled;
 }
 
-extern "C" nav_mesh_runtime_t *nav_mesh_build(
+/* Recast products cached by nav_mesh_bake_begin for reuse across Detour
+   realizes.  Everything here depends only on the input geometry + config,
+   never on the off-mesh link set. */
+struct nav_mesh_bake_s
+{
+	rcPolyMesh *poly_mesh;
+	rcPolyMeshDetail *detail_mesh;
+	nav_off_mesh_link_t *callback_links;
+	int callback_link_count;
+	int regions_repaired;
+	int input_vertex_count;
+	int input_triangle_count;
+	nav_mesh_build_config_t config;
+	float cs, ch;
+};
+
+extern "C" nav_mesh_bake_t *nav_mesh_bake_begin(
 	const float *verts,
 	int vertex_count,
 	const int *tris,
 	int triangle_count,
+	const unsigned char *tri_hazard,
 	const nav_mesh_build_config_t *config,
-	const nav_off_mesh_link_t *off_mesh_links,
-	int off_mesh_link_count,
-	nav_mesh_summary_t *summary,
 	nav_mesh_link_callback_t link_callback,
 	void *callback_data,
 	char *error,
@@ -2685,13 +2874,8 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	RecastBuildGuard guard;
 	std::vector<float> recast_verts;
 	std::vector<unsigned char> areas;
-	int nav_data_size;
-	dtNavMeshCreateParams params;
-	dtStatus status;
 	int i;
 
-	if (summary != nullptr)
-		memset(summary, 0, sizeof(*summary));
 	if (verts == nullptr || tris == nullptr || config == nullptr)
 	{
 		nav_set_error(error, error_size, "Navmesh build requires non-null vertices, triangles, and config");
@@ -2724,8 +2908,6 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	rc_config.detailSampleDist = config->detail_sample_distance < 0.9f ? 0.0f : rc_config.cs * config->detail_sample_distance;
 	rc_config.detailSampleMaxError = rc_config.ch * config->detail_sample_max_error;
 
-	nav_data_size = 0;
-
 	guard.solid = rcAllocHeightfield();
 	if (guard.solid == nullptr)
 	{
@@ -2740,6 +2922,24 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 
 	areas.assign(static_cast<size_t>(triangle_count), 0);
 	rcMarkWalkableTriangles(&ctx, rc_config.walkableSlopeAngle, recast_verts.data(), vertex_count, tris, triangle_count, areas.data());
+
+	/* Slime ground (never lava -- lava is excluded outright at mesh-build
+	   time in nav_hull.cpp, since it's an effectively-instant kill and must
+	   never be a routable option) reads walkable off the clip hull (Quake's
+	   slime is walk-through-with-damage, not solid) but should still be the
+	   pathfinder's last resort: tag it a distinct area instead of
+	   RC_WALKABLE_AREA so nav_mesh_setup_filter's steep NAV_AREA_HAZARD
+	   cost steers a bot around it whenever a dry route exists, while
+	   leaving it in the mesh (and reachable) when it's the only route
+	   in.  Only downgrades triangles rcMarkWalkableTriangles already
+	   called walkable -- never turns a too-steep face into hazard. */
+	if (tri_hazard != nullptr)
+	{
+		for (i = 0; i < triangle_count; ++i)
+			if (tri_hazard[i] && areas[i] == RC_WALKABLE_AREA)
+				areas[i] = NAV_AREA_HAZARD;
+	}
+
 	if (!rcRasterizeTriangles(&ctx, recast_verts.data(), vertex_count, tris, areas.data(), triangle_count, *guard.solid, rc_config.walkableClimb))
 	{
 		nav_set_error(error, error_size, "Failed to rasterize triangles into heightfield");
@@ -3313,11 +3513,9 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		nav_set_error(error, error_size, "Failed to build navigation regions");
 		return nullptr;
 	}
-	{
-		int repaired = nav_mesh_repair_broken_regions(guard.compact);
-		if (repaired > 0)
-			fprintf(stderr, "Nav: repaired %d overlapping/split watershed regions\n", repaired);
-	}
+	int regions_repaired = nav_mesh_repair_broken_regions(guard.compact);
+	if (regions_repaired > 0)
+		fprintf(stderr, "Nav: repaired %d overlapping/split watershed regions\n", regions_repaired);
 
 	/* NAV_DUMP_SPANS second stage: compact spans (area/region) post-region
 	   build at the same column, to separate region loss from contour loss. */
@@ -3502,6 +3700,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	if (!rcBuildPolyMesh(&ctx, *guard.contours, rc_config.maxVertsPerPoly, *guard.poly_mesh))
 	{
 		nav_set_error(error, error_size, "Failed to build polygon mesh");
+		free(callback_links);
 		return nullptr;
 	}
 
@@ -3509,16 +3708,19 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	if (guard.detail_mesh == nullptr)
 	{
 		nav_set_error(error, error_size, "Failed to allocate detail mesh");
+		free(callback_links);
 		return nullptr;
 	}
 	if (!rcBuildPolyMeshDetail(&ctx, *guard.poly_mesh, *guard.compact, rc_config.detailSampleDist, rc_config.detailSampleMaxError, *guard.detail_mesh))
 	{
 		nav_set_error(error, error_size, "Failed to build detail mesh");
+		free(callback_links);
 		return nullptr;
 	}
 	if (guard.poly_mesh->npolys <= 0 || guard.poly_mesh->nverts <= 0)
 	{
 		nav_set_error(error, error_size, "Recast produced an empty navmesh");
+		free(callback_links);
 		return nullptr;
 	}
 
@@ -3625,19 +3827,78 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			n_walk, n_nearwall, npoly);
 	}
 
+	nav_mesh_bake_t *bake = new (std::nothrow) nav_mesh_bake_s();
+	if (bake == nullptr)
+	{
+		nav_set_error(error, error_size, "Failed to allocate bake cache");
+		free(callback_links);
+		return nullptr;
+	}
+	bake->poly_mesh = guard.poly_mesh;
+	bake->detail_mesh = guard.detail_mesh;
+	guard.poly_mesh = nullptr;
+	guard.detail_mesh = nullptr;
+	bake->callback_links = callback_links;
+	bake->callback_link_count = callback_link_count;
+	bake->regions_repaired = regions_repaired;
+	bake->input_vertex_count = vertex_count;
+	bake->input_triangle_count = triangle_count;
+	bake->config = *config;
+	bake->cs = rc_config.cs;
+	bake->ch = rc_config.ch;
+	return bake;
+}
+
+extern "C" void nav_mesh_bake_end(nav_mesh_bake_t *bake)
+{
+	if (bake == nullptr)
+		return;
+	rcFreePolyMeshDetail(bake->detail_mesh);
+	rcFreePolyMesh(bake->poly_mesh);
+	free(bake->callback_links);
+	delete bake;
+}
+
+extern "C" nav_mesh_runtime_t *nav_mesh_bake_realize(
+	const nav_mesh_bake_t *bake,
+	const nav_off_mesh_link_t *off_mesh_links,
+	int off_mesh_link_count,
+	nav_mesh_summary_t *summary,
+	char *error,
+	size_t error_size)
+{
+	RecastBuildGuard guard;
+	dtNavMeshCreateParams params;
+	dtStatus status;
+	int nav_data_size = 0;
+
+	if (summary != nullptr)
+		memset(summary, 0, sizeof(*summary));
+	if (bake == nullptr)
+	{
+		nav_set_error(error, error_size, "Detour realize requires a bake cache");
+		return nullptr;
+	}
+
+	const nav_mesh_build_config_t *config = &bake->config;
+	const rcPolyMesh *poly_mesh = bake->poly_mesh;
+	const rcPolyMeshDetail *detail_mesh = bake->detail_mesh;
+	const nav_off_mesh_link_t *callback_links = bake->callback_links;
+	const int callback_link_count = bake->callback_link_count;
+
 	memset(&params, 0, sizeof(params));
-	params.verts = guard.poly_mesh->verts;
-	params.vertCount = guard.poly_mesh->nverts;
-	params.polys = guard.poly_mesh->polys;
-	params.polyAreas = guard.poly_mesh->areas;
-	params.polyFlags = guard.poly_mesh->flags;
-	params.polyCount = guard.poly_mesh->npolys;
-	params.nvp = guard.poly_mesh->nvp;
-	params.detailMeshes = guard.detail_mesh->meshes;
-	params.detailVerts = guard.detail_mesh->verts;
-	params.detailVertsCount = guard.detail_mesh->nverts;
-	params.detailTris = guard.detail_mesh->tris;
-	params.detailTriCount = guard.detail_mesh->ntris;
+	params.verts = poly_mesh->verts;
+	params.vertCount = poly_mesh->nverts;
+	params.polys = poly_mesh->polys;
+	params.polyAreas = poly_mesh->areas;
+	params.polyFlags = poly_mesh->flags;
+	params.polyCount = poly_mesh->npolys;
+	params.nvp = poly_mesh->nvp;
+	params.detailMeshes = detail_mesh->meshes;
+	params.detailVerts = detail_mesh->verts;
+	params.detailVertsCount = detail_mesh->nverts;
+	params.detailTris = detail_mesh->tris;
+	params.detailTriCount = detail_mesh->ntris;
 	params.walkableHeight = config->walkable_height;
 	params.walkableRadius = config->walkable_radius;
 	/* Query-time vertical tolerance, NOT the raster walkable height.
@@ -3646,10 +3907,10 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 	   origins, not guaranteed foot-contact points, so the search must cover
 	   origin-to-surface separation even when the navmesh itself is on the floor. */
 	params.walkableClimb = NAV_MESH_QUERY_CLIMB;
-	rcVcopy(params.bmin, guard.poly_mesh->bmin);
-	rcVcopy(params.bmax, guard.poly_mesh->bmax);
-	params.cs = rc_config.cs;
-	params.ch = rc_config.ch;
+	rcVcopy(params.bmin, poly_mesh->bmin);
+	rcVcopy(params.bmax, poly_mesh->bmax);
+	params.cs = bake->cs;
+	params.ch = bake->ch;
 	params.buildBvTree = true;
 
 	/* Off-mesh connections (teleporters, jump pads).
@@ -3824,7 +4085,7 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 		}
 	}
 
-	nav_mesh_disable_islands(guard.runtime->navmesh);
+	int sliver_polys_disabled = nav_mesh_disable_islands(guard.runtime->navmesh);
 
 	/* Wide extents for goal/item snapping.
 	   Keep XZ tighter than the original 64u box to avoid snapping
@@ -3857,17 +4118,17 @@ extern "C" nav_mesh_runtime_t *nav_mesh_build(
 			guard.runtime->link_count = total_links;
 		}
 	}
-	free(callback_links);
-
 	if (summary != nullptr)
 	{
-		summary->input_vertex_count = vertex_count;
-		summary->input_triangle_count = triangle_count;
-		summary->polygon_count = guard.poly_mesh->npolys;
-		summary->navmesh_vertex_count = guard.poly_mesh->nverts;
-		summary->detail_mesh_count = guard.detail_mesh->nmeshes;
-		summary->detail_vertex_count = guard.detail_mesh->nverts;
-		summary->detail_triangle_count = guard.detail_mesh->ntris;
+		summary->input_vertex_count = bake->input_vertex_count;
+		summary->input_triangle_count = bake->input_triangle_count;
+		summary->polygon_count = poly_mesh->npolys;
+		summary->navmesh_vertex_count = poly_mesh->nverts;
+		summary->detail_mesh_count = detail_mesh->nmeshes;
+		summary->detail_vertex_count = detail_mesh->nverts;
+		summary->detail_triangle_count = detail_mesh->ntris;
+		summary->regions_repaired = bake->regions_repaired;
+		summary->sliver_polys_disabled = sliver_polys_disabled;
 	}
 
 	/* Success: release runtime from the guard so it is not destroyed */
@@ -4124,6 +4385,22 @@ extern "C" int nav_mesh_find_path(
 		}
 	}
 
+	if (getenv("NAV_DUMP_PARTIAL_PATH") != NULL)
+	{
+		const dtMeshTile *et = nullptr;
+		const dtPoly *ep = nullptr;
+		if (!dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(end_ref, &et, &ep)))
+		{
+			unsigned int ls, lt, lp;
+			navmesh->navmesh->decodePolyId(end_ref, ls, lt, lp);
+			float c[3], q[3];
+			nav_mesh_poly_center(et, ep, c);
+			nav_recast_to_quake(c, q);
+			fprintf(stderr, "Nav: ENDSNAP end_ref poly=%u type=%d over_poly=%d (%.0f %.0f %.0f)\n",
+				lp, ep->getType(), end_over_poly ? 1 : 0, q[0], q[1], q[2]);
+		}
+	}
+
 	path_count = 0;
 	status = navmesh->query->findPath(
 		start_ref,
@@ -4148,6 +4425,23 @@ extern "C" int nav_mesh_find_path(
 			   chase phantom mesh gaps. */
 			const char *oon = dtStatusDetail(status, DT_OUT_OF_NODES)
 				? ", out of nodes" : "";
+			if (getenv("NAV_DUMP_PARTIAL_PATH") != NULL)
+			{
+				for (i = 0; i < path_count; i++)
+				{
+					const dtMeshTile *pt = nullptr;
+					const dtPoly *pp = nullptr;
+					unsigned int ls, lt, lp;
+					if (dtStatusFailed(navmesh->navmesh->getTileAndPolyByRef(path_refs[i], &pt, &pp)))
+						continue;
+					navmesh->navmesh->decodePolyId(path_refs[i], ls, lt, lp);
+					float c[3], q[3];
+					nav_mesh_poly_center(pt, pp, c);
+					nav_recast_to_quake(c, q);
+					fprintf(stderr, "Nav: PPATH[%d] poly=%u type=%d (%.0f %.0f %.0f)\n",
+						i, lp, pp->getType(), q[0], q[1], q[2]);
+				}
+			}
 			/* Report WHERE the search dead-ended, in quake coords -- the
 			   gap between here and the goal is the thing to go look at. */
 			const dtMeshTile *stop_tile = nullptr;
@@ -4207,6 +4501,23 @@ extern "C" int nav_mesh_get_link_type(
 	if (idx < 0 || idx >= navmesh->link_count)
 		return 0;
 	return navmesh->links[idx].link_type;
+}
+
+extern "C" int nav_mesh_get_link_index(
+	const nav_mesh_runtime_t *navmesh, unsigned long long poly_ref)
+{
+	const dtOffMeshConnection *con;
+	int idx;
+
+	if (navmesh == nullptr || navmesh->navmesh == nullptr || poly_ref == 0)
+		return -1;
+	con = navmesh->navmesh->getOffMeshConnectionByRef(static_cast<dtPolyRef>(poly_ref));
+	if (con == nullptr)
+		return -1;
+	idx = static_cast<int>(con->userId);
+	if (idx < 0 || idx >= navmesh->link_count)
+		return -1;
+	return idx;
 }
 
 extern "C" void nav_mesh_destroy(nav_mesh_runtime_t *navmesh)
@@ -4347,7 +4658,8 @@ extern "C" int navigate(nav_corridor_t *c,
 	const float *agent_pos,
 	float *corner_pos,
 	unsigned char *corner_flags,
-	unsigned long long *corner_ref)
+	unsigned long long *corner_ref,
+	nav_standable_fn standable)
 {
 	float rc_pos[3];
 	float snapped_pos[3];
@@ -4400,9 +4712,20 @@ extern "C" int navigate(nav_corridor_t *c,
 		{
 			/* Approach the link start first so jumps get their run-up
 			   geometry; only steer at the end once committed (close to
-			   the start, or already off the start level mid-traversal). */
+			   the start, or already off the start level mid-traversal).
+			   This only makes sense for links that actually need a
+			   run-up (JUMP/SUPER_JUMP) -- for a plain WALK/DROP/PLAT/etc
+			   link the bot is already free to walk straight at the end.
+			   Applying it universally created a limit cycle: crossing
+			   out past the 24u ring flips steer_to back to the start,
+			   which pulls the bot back inside the ring, which flips it
+			   right back out -- an undamped ping-pong with no jump
+			   button or other execution step to break out of it, seen
+			   live as bots "circling" in tight loops at WALK link starts. */
 			const float *steer_to = c->pending_end;
-			if (have_snapped_pos
+			int pending_type = nav_mesh_get_link_type(navmesh, c->pending_link_ref);
+			if ((pending_type == AI_JUMP || pending_type == AI_SUPER_JUMP)
+				&& have_snapped_pos
 				&& dtVdist2D(snapped_pos, c->pending_start) > 24.0f
 				&& fabsf(snapped_pos[1] - c->pending_start[1]) <= NAV_MESH_QUERY_CLIMB)
 				steer_to = c->pending_start;
@@ -4539,6 +4862,35 @@ extern "C" int navigate(nav_corridor_t *c,
 		}
 	}
 
+	/* Same phantom border, descent case: a corner at roughly level height
+	   (too small a delta to trip the climb check above) can still sit past
+	   the true ledge lip over open air -- the widened/dilated poly reads as
+	   flat ground because it's the SAME triangle's height, just stretched
+	   past the real edge.  A real ledge drop has no floor there; probe it
+	   and swap in the next corridor poly's center, same recovery as above. */
+	if (standable != nullptr && !(flags[0] & DT_STRAIGHTPATH_OFFMESH_CONNECTION)
+		&& c->corridor.getPathCount() > 1)
+	{
+		float qcorner[3];
+
+		nav_recast_to_quake(corners, qcorner);
+		if (!standable(qcorner))
+		{
+			float center[3];
+			dtPolyRef next_ref = c->corridor.getPath()[1];
+
+			if (nav_poly_center(navmesh, next_ref, center))
+			{
+				float h = 0;
+				if (dtStatusSucceed(navmesh->query->getPolyHeight(next_ref, center, &h)))
+					center[1] = h;
+				dtVcopy(corners, center);
+				flags[0] = 0;
+				refs[0] = next_ref;
+			}
+		}
+	}
+
 	/* Periodically optimize corridor */
 	optimize_counter++;
 	if ((optimize_counter & 15) == 0) /* every 16 frames */
@@ -4582,6 +4934,12 @@ extern "C" int nav_corridor_length(const nav_corridor_t *c)
 {
 	if (c == nullptr) return 0;
 	return c->corridor.getPathCount();
+}
+
+extern "C" unsigned long long nav_corridor_pending_link(const nav_corridor_t *c)
+{
+	if (c == nullptr) return 0;
+	return static_cast<unsigned long long>(c->pending_link_ref);
 }
 
 /* ---- Heightfield probing ---- */

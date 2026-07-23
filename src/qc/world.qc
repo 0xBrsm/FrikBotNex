@@ -375,10 +375,19 @@ void() StartFrame =
 		p = find(world, classname, "player");
 		if (p && nav_debug_total > 0)
 		{
+			local float scan;
 			ppos = p.origin;
 			drawn = 0;
 			i = 0;
-			while (i < nav_debug_total && drawn < 8)
+			// Cap the per-frame scan: big maps carry thousands of markers,
+			// and sweeping them all in one frame when few are near the
+			// player blows the QC runaway instruction limit (Host_Error
+			// kills the server). The cycle already resumes at
+			// nav_debug_idx, so full coverage just takes more frames.
+			scan = nav_debug_total;
+			if (scan > 256)
+				scan = 256;
+			while (i < scan && drawn < 8)
 			{
 				pt = nav_path_debug(world, nav_debug_idx);
 				nav_debug_idx = nav_debug_idx + 1;
